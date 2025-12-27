@@ -82,7 +82,10 @@ impl FeedForward {
         // net.2 = Linear(inner_dim → hidden_size)
         let proj_out = linear(inner_dim, config.hidden_size, vb.pp("net.2"))?;
 
-        Ok(Self { gelu_proj, proj_out })
+        Ok(Self {
+            gelu_proj,
+            proj_out,
+        })
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -563,10 +566,10 @@ impl CaptionProjection {
 /// - norm (via AdaLN) + feedforward (ff) with GEGLU
 /// - AdaLN modulation via scale_shift_table
 pub struct BasicTransformerBlock {
-    norm1: RMSNormNoWeight,    // Pre self-attention normalization (NO weights, elementwise_affine=False)
-    norm2: RMSNormNoWeight,    // Pre cross-attention normalization (NO weights)
-    attn1: Attention,          // Self-attention (has internal QK-norm)
-    attn2: Option<Attention>,  // Cross-attention (optional)
+    norm1: RMSNormNoWeight, // Pre self-attention normalization (NO weights, elementwise_affine=False)
+    norm2: RMSNormNoWeight, // Pre cross-attention normalization (NO weights)
+    attn1: Attention,       // Self-attention (has internal QK-norm)
+    attn2: Option<Attention>, // Cross-attention (optional)
     ff: FeedForward,
     scale_shift_table: Tensor, // (6, dim) for AdaLN modulation
     hidden_size: usize,
@@ -704,7 +707,7 @@ impl BasicTransformerBlock {
         if let (Some(attn2), Some(enc_hidden)) = (&self.attn2, encoder_hidden_states) {
             let cross_attn_output = attn2.forward(
                 &hidden_states,
-                None,  // No RoPE for cross-attention!
+                None, // No RoPE for cross-attention!
                 Some(enc_hidden),
                 encoder_attention_mask,
                 None, // No skip layer mask for cross-attention

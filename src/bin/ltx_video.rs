@@ -14,20 +14,20 @@
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
-use candle_nn::VarBuilder;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use tracing::{info, warn};
 
 use candle_video::{
     config::{DitConfig, InferenceConfig, SchedulerConfig, VaeConfig},
-    dit::Transformer3DModel,
-    latents_bin::write_f32_tensor_with_header,
-    pipeline::PipelineConfig,
-    rope,  // Use module directly for generate_indices_grid_raw
-    scheduler::RectifiedFlowScheduler,
-    vae::VaeDecoder,
+    pipeline::{PipelineConfig, TextToVideoPipeline},
 };
+
+#[derive(ValueEnum, Debug, Clone)]
+enum Mode {
+    T2v,
+    I2v,
+}
 
 /// Command line arguments for LTX-Video generation
 #[derive(Parser, Debug)]
@@ -57,6 +57,14 @@ struct Args {
     #[arg(short, long, default_value = "output")]
     output: PathBuf,
 
+    /// Generation mode
+    #[arg(long, value_enum, default_value = "t2v")]
+    mode: Mode,
+
+    /// Input image for image-to-video mode
+    #[arg(long)]
+    image: Option<PathBuf>,
+
     /// Number of frames to generate (must be 8N+1: 9, 17, 25, 33...)
     #[arg(long, default_value = "17")]
     num_frames: usize,
@@ -81,6 +89,10 @@ struct Args {
     #[arg(long, default_value = "42")]
     seed: u64,
 
+    /// Frame rate for RoPE scaling
+    #[arg(long, default_value_t = 25.0)]
+    frame_rate: f64,
+
     /// Use CPU instead of CUDA
     #[arg(long)]
     cpu: bool,
@@ -92,6 +104,14 @@ struct Args {
     /// Use float16 precision
     #[arg(long)]
     f16: bool,
+
+    /// Use float32 precision
+    #[arg(long = "f32")]
+    f32_precision: bool,
+
+    /// Use fp8 precision (f8e4m3)
+    #[arg(long = "fp8")]
+    fp8_precision: bool,
 
     /// Separate VAE model path (optional, uses embedded VAE from main model if not provided)
     #[arg(long)]
@@ -143,16 +163,40 @@ fn main() -> Result<()> {
     };
 
     // Select dtype - BF16 is default (LTX models are stored in BF16)
-    let dtype = if args.f16 {
-        info!("Using Float16 precision");
-        DType::F16
-    } else if args.bf16 {
-        info!("Using BFloat16 precision");
-        DType::BF16
-    } else {
-        // Default to BF16 for LTX models
-        info!("Using BFloat16 precision (default)");
-        DType::BF16
+    let dtype = {
+        let mut dtype_flags = 0;
+        if args.f16 {
+            dtype_flags += 1;
+        }
+        if args.bf16 {
+            dtype_flags += 1;
+        }
+        if args.f32_precision {
+            dtype_flags += 1;
+        }
+        if args.fp8_precision {
+            dtype_flags += 1;
+        }
+        if dtype_flags > 1 {
+            anyhow::bail!("Select only one of --bf16, --f16, --f32, or --fp8.");
+        }
+        if args.f16 {
+            info!("Using Float16 precision");
+            DType::F16
+        } else if args.f32_precision {
+            info!("Using Float32 precision");
+            DType::F32
+        } else if args.fp8_precision {
+            info!("Using FP8 precision (f8e4m3)");
+            DType::F8E4M3
+        } else if args.bf16 {
+            info!("Using BFloat16 precision");
+            DType::BF16
+        } else {
+            // Default to BF16 for LTX models
+            info!("Using BFloat16 precision (default)");
+            DType::BF16
+        }
     };
 
     // Validate num_frames
@@ -165,7 +209,8 @@ fn main() -> Result<()> {
         InferenceConfig::new(args.num_frames, args.height, args.width, args.seed)
             .context("Invalid inference configuration")?
             .with_steps(args.num_inference_steps)
-            .with_guidance_scale(args.guidance_scale);
+            .with_guidance_scale(args.guidance_scale)
+            .with_frame_rate(args.frame_rate);
 
     // Run generation
     if args.mock {
@@ -186,7 +231,7 @@ fn run_mock_generation(
     _dtype: DType,
     config: &InferenceConfig,
 ) -> Result<()> {
-    use candle_video::pipeline::TextToVideoPipeline;
+    use candle_video::ConditioningItem;
 
     info!("Creating mock pipeline...");
 
@@ -198,11 +243,25 @@ fn run_mock_generation(
 
     info!("Running mock denoising loop...");
 
-    let video = if !args.negative_prompt.is_empty() || args.guidance_scale > 1.0 {
-        let neg_emb = Tensor::randn(0f32, 0.1, (1, 77, 4096), device)?;
-        pipeline.mock_generate_with_cfg(&text_emb, &neg_emb, config)?
-    } else {
-        pipeline.mock_generate(&text_emb, config)?
+    let video = match args.mode {
+        Mode::T2v => {
+            if !args.negative_prompt.is_empty() || args.guidance_scale > 1.0 {
+                let neg_emb = Tensor::randn(0f32, 0.1, (1, 77, 4096), device)?;
+                pipeline.mock_generate_with_cfg(&text_emb, &neg_emb, config)?
+            } else {
+                pipeline.mock_generate(&text_emb, config)?
+            }
+        }
+        Mode::I2v => {
+            let (_lat_t, lat_h, lat_w) = pipeline.compute_latent_dims(config);
+            let cond_latents = Tensor::zeros(
+                (1, pipeline.vae_config().latent_channels, 1, lat_h, lat_w),
+                DType::F32,
+                device,
+            )?;
+            let cond_item = ConditioningItem::new(cond_latents, 0, 1.0);
+            pipeline.mock_generate_image_to_video(&text_emb, &[cond_item], config, 0.025)?
+        }
     };
 
     info!("Generated video tensor shape: {:?}", video.dims());
@@ -226,58 +285,47 @@ fn run_full_generation(
     let dit_model_file = find_model_file(&args.model_path)?;
     info!("Using DiT model file: {:?}", dit_model_file);
 
-    // Find VAE file:
-    // 1. Use --vae-path if explicitly provided
-    // 2. Otherwise use embedded VAE from main model
-    let (vae_file, vae_prefix) = if let Some(vae_path) = &args.vae_path {
-        info!("Using separate VAE from --vae-path: {:?}", vae_path);
-        (vae_path.clone(), "decoder") // Separate file uses "decoder" prefix
-    } else {
-        info!("Using embedded VAE from main model file");
-        (dit_model_file.clone(), "vae.decoder") // Embedded uses "vae.decoder" prefix
-    };
+    let (vae_file, vae_decoder_prefix, vae_encoder_prefix, stats_prefix) =
+        if let Some(vae_path) = &args.vae_path {
+            info!("Using separate VAE from --vae-path: {:?}", vae_path);
+            (vae_path.clone(), "decoder", "encoder", None)
+        } else {
+            info!("Using embedded VAE from main model file");
+            (
+                dit_model_file.clone(),
+                "vae.decoder",
+                "vae.encoder",
+                Some("vae"),
+            )
+        };
 
-    // Create configurations
-    let dit_config = create_dit_config();
-    let vae_config = create_vae_config();
     let scheduler_config = SchedulerConfig {
         num_inference_steps: args.num_inference_steps,
         guidance_scale: args.guidance_scale,
         timestep_spacing: "linspace".to_string(),
-        use_dynamic_shifting: true, // Enable resolution-dependent timestep shifting
+        use_dynamic_shifting: true,
         ..SchedulerConfig::default()
     };
 
-    // Load DiT model
+    let pipeline_config = PipelineConfig {
+        dit: create_dit_config(),
+        vae: create_vae_config(),
+        scheduler: scheduler_config,
+    };
+    let mut pipeline = TextToVideoPipeline::new(device.clone(), pipeline_config)?;
+
     info!("Loading DiT model...");
-    let vb_dit = unsafe { VarBuilder::from_mmaped_safetensors(&[&dit_model_file], dtype, device)? };
-    let vb_dit = vb_dit.pp("model.diffusion_model");
-    let dit_model = Transformer3DModel::new(vb_dit, &dit_config)?;
-    info!("DiT model loaded");
-
-    // Load VAE decoder
+    pipeline.load_dit(&dit_model_file, dtype)?;
     info!("Loading VAE decoder...");
-    let vb_vae = unsafe { VarBuilder::from_mmaped_safetensors(&[&vae_file], dtype, device)? };
-    let vb_vae = vb_vae.pp(vae_prefix);
-    let vae_decoder = VaeDecoder::new(vb_vae)?;
-    info!("VAE decoder loaded");
+    pipeline.load_vae_decoder(&vae_file, vae_decoder_prefix, dtype)?;
+    info!("Loading latent statistics...");
+    pipeline.load_latent_stats(&vae_file, stats_prefix, dtype)?;
 
-    // Load latent statistics for denormalization (from VAE config)
-    // These are stored in vae.per_channel_statistics in the main model file
-    let vb_stats =
-        unsafe { VarBuilder::from_mmaped_safetensors(&[&dit_model_file], dtype, device)? };
-    let latents_mean = vb_stats
-        .get((128,), "vae.per_channel_statistics.mean-of-means")
-        .unwrap_or_else(|_| Tensor::zeros((128,), dtype, device).unwrap());
-    let latents_std = vb_stats
-        .get((128,), "vae.per_channel_statistics.std-of-means")
-        .unwrap_or_else(|_| Tensor::ones((128,), dtype, device).unwrap());
-    info!("Loaded latent statistics for denormalization");
+    if matches!(args.mode, Mode::I2v) {
+        info!("Loading VAE encoder...");
+        pipeline.load_vae_encoder(&vae_file, vae_encoder_prefix, dtype)?;
+    }
 
-    // Create scheduler (will be updated with sample shape after latent dims are computed)
-    let mut scheduler = RectifiedFlowScheduler::new(scheduler_config);
-
-    // Text encoding
     info!("Creating text embeddings...");
     let (text_emb, neg_emb) = create_text_embeddings(
         &args.prompt,
@@ -287,192 +335,27 @@ fn run_full_generation(
         &args.model_path,
     )?;
 
-    // Initialize noise
-    info!("Initializing noise...");
-    let (lat_t, lat_h, lat_w) = compute_latent_dims(config, &vae_config);
-    let mut latents = Tensor::randn(
-        0f32,
-        1.0,
-        (1, vae_config.latent_channels, lat_t, lat_h, lat_w),
-        device,
-    )?
-    .to_dtype(dtype)?;
-    info!(
-        "Latent shape: {:?} (T={}, H={}, W={})",
-        latents.dims(),
-        lat_t,
-        lat_h,
-        lat_w
-    );
-
-    // Update scheduler with sample shape for dynamic timestep shifting
-    let sample_shape = (1, vae_config.latent_channels, lat_t, lat_h, lat_w);
-    scheduler.set_timesteps_with_shape(scheduler.num_steps(), Some(sample_shape), None, None)?;
-    info!(
-        "Scheduler timesteps (first 3): {:?}",
-        &scheduler.timesteps()[..3.min(scheduler.num_steps())]
-    );
-
-    // Generate RoPE indices with standard LTX-Video scaling
-    // base_num_frames=128, base_resolution=512x768
-    // rope_scales: 8 (temporal), 32 (spatial) -> matches vae compression
-    let indices_grid = rope::generate_indices_grid_for_diffusers(
-        1, lat_t, lat_h, lat_w,
-        128,   // base_num_frames (standard context)
-        512,   // base_height
-        768,   // base_width
-        1,     // patch_size
-        1,     // patch_size_t
-        8.0,   // rope_scale_t
-        32.0,  // rope_scale_h
-        32.0,  // rope_scale_w
-        device,
-    )?;
-
-    // Denoising loop
-    info!(
-        "Starting denoising loop ({} steps)...",
-        scheduler.num_steps()
-    );
-    let use_cfg = args.guidance_scale > 1.0;
-
-    for step in 0..scheduler.num_steps() {
-        let timestep = scheduler.timesteps()[step];
-        let progress = (step + 1) as f32 / scheduler.num_steps() as f32 * 100.0;
-
-        info!(
-            "Step {}/{} (t={:.4}, progress={:.1}%)",
-            step + 1,
-            scheduler.num_steps(),
-            timestep,
-            progress
-        );
-
-        // Create timestep tensor - flow matching uses [0, 1] range
-        let timestep_tensor = Tensor::new(&[timestep as f32], device)?.to_dtype(dtype)?;
-
-        // Run DiT forward pass
-        let model_output = if use_cfg {
-            // Run with CFG - two forward passes
-            let latents_input = Tensor::cat(&[&latents, &latents], 0)?;
-            let text_input = Tensor::cat(&[&neg_emb, &text_emb], 0)?;
-            let timestep_input = Tensor::cat(&[&timestep_tensor, &timestep_tensor], 0)?;
-
-            let output = dit_model.forward(
-                &latents_input,
-                &indices_grid,
-                Some(&text_input),
-                &timestep_input,
-                None,
-                None,
-                None, // skip_layer_mask
-                None, // skip_layer_strategy
-            )?;
-
-            // Apply CFG
-            let output_uncond = output.i(0)?;
-            let output_cond = output.i(1)?;
-            scheduler.apply_cfg(&output_cond, &output_uncond)?
-        } else {
-            dit_model
-                .forward(
-                    &latents,
-                    &indices_grid,
-                    Some(&text_emb),
-                    &timestep_tensor,
-                    None,
-                    None,
-                    None, // skip_layer_mask
-                    None, // skip_layer_strategy
-                )?
-                .squeeze(0)?
-        };
-
-        // Debug: check model_output (convert to F32 for debug)
-        let out_flat = model_output.flatten_all()?.to_dtype(DType::F32)?;
-        let out_min = out_flat.min(0)?.to_scalar::<f32>()?;
-        let out_max = out_flat.max(0)?.to_scalar::<f32>()?;
-        info!(
-            "  Model output range: min={:.4}, max={:.4}",
-            out_min, out_max
-        );
-
-        // Euler step
-        latents = scheduler.step(&model_output.unsqueeze(0)?, &latents, step)?;
-
-        // Debug: check for NaN after step (convert to F32 for debug)
-        let lat_flat = latents.flatten_all()?.to_dtype(DType::F32)?;
-        let lat_min = lat_flat.min(0)?.to_scalar::<f32>()?;
-        let lat_max = lat_flat.max(0)?.to_scalar::<f32>()?;
-        info!("  Latent range: min={:.4}, max={:.4}", lat_min, lat_max);
-        if lat_min.is_nan() || lat_max.is_nan() {
-            warn!("NaN detected after step {}!", step + 1);
+    let video = match args.mode {
+        Mode::T2v => {
+            if !args.negative_prompt.is_empty() || args.guidance_scale > 1.0 {
+                pipeline.generate_with_cfg(&text_emb, &neg_emb, config)?
+            } else {
+                pipeline.generate(&text_emb, config)?
+            }
         }
-    }
-
-    info!("Denoising complete, decoding to video...");
-
-    // Debug: check latent values (convert to F32 for debug output)
-    let lat_flat = latents.flatten_all()?.to_dtype(DType::F32)?;
-    let lat_min = lat_flat.min(0)?.to_scalar::<f32>()?;
-    let lat_max = lat_flat.max(0)?.to_scalar::<f32>()?;
-    info!("Latent range: min={:.4}, max={:.4}", lat_min, lat_max);
-
-    // Denormalize latents before VAE decode
-    // Formula: latents = latents * std + mean
-    // latents shape: (B, C, T, H, W), mean/std shape: (C,)
-    // Reshape mean/std to (1, C, 1, 1, 1) for broadcasting
-    let latents_mean_5d = latents_mean.reshape((1, 128, 1, 1, 1))?;
-    let latents_std_5d = latents_std.reshape((1, 128, 1, 1, 1))?;
-    let latents_denorm = latents
-        .broadcast_mul(&latents_std_5d)?
-        .broadcast_add(&latents_mean_5d)?;
-
-    // Debug: check denormalized latent values (convert to F32 for debug)
-    let denorm_flat = latents_denorm.flatten_all()?.to_dtype(DType::F32)?;
-    let denorm_min = denorm_flat.min(0)?.to_scalar::<f32>()?;
-    let denorm_max = denorm_flat.max(0)?.to_scalar::<f32>()?;
-    info!(
-        "Denormalized latent range: min={:.4}, max={:.4}",
-        denorm_min, denorm_max
-    );
-
-    // Save latents for Python VAE decoding test (use denormalized latents)
-    let latents_path = args.output.join("latents.bin");
-    info!(
-        "Saving latents to {:?} for Python VAE test...",
-        latents_path
-    );
-    write_f32_tensor_with_header(&latents_path, &latents_denorm)?;
-    info!("Latents saved");
-
-    // Decode latents to video with timestep conditioning
-    // Use small timestep value (near end of diffusion) for VAE decode
-    let vae_timestep = Some(0.05);
-    let video = vae_decoder.decode(&latents_denorm, vae_timestep)?;
-    info!("Video tensor shape (raw): {:?}", video.dims());
-
-    // Trim temporal dimension to match requested num_frames
-    // VAE produces: latent_frames * 8 = (num_frames - 1) / 8 * 8 + 8 frames
-    // We want: num_frames frames
-    let (_b, _c, t, _h, _w) = video.dims5()?;
-    let video = if t > config.num_frames {
-        info!("Trimming video from {} to {} frames", t, config.num_frames);
-        video.narrow(2, 0, config.num_frames)?
-    } else {
-        video
+        Mode::I2v => {
+            let image_path = args
+                .image
+                .as_ref()
+                .context("Missing --image for i2v mode")?;
+            let image = image::open(image_path)
+                .with_context(|| format!("Failed to load image {:?}", image_path))?;
+            let cond_item = pipeline.conditioning_item_from_image(&image, config, 1.0)?;
+            pipeline.generate_image_to_video(&text_emb, &[cond_item], config)?
+        }
     };
-    info!("Video tensor shape: {:?}", video.dims());
 
-    // Debug: check video values (convert to F32 for debug)
-    let vid_flat = video.flatten_all()?.to_dtype(DType::F32)?;
-    let vid_min = vid_flat.min(0)?.to_scalar::<f32>()?;
-    let vid_max = vid_flat.max(0)?.to_scalar::<f32>()?;
-    info!("Video range: min={:.4}, max={:.4}", vid_min, vid_max);
-
-    // Save frames
     save_video_frames(&video, &args.output)?;
-
     Ok(())
 }
 
@@ -538,16 +421,6 @@ fn create_vae_config() -> VaeConfig {
         scaling_factor: 1.0,
         timestep_conditioning: true, // LTX-Video uses timestep conditioning
     }
-}
-
-/// Compute latent dimensions from inference config
-/// Formula from diffusers: lat_t = (num_frames - 1) // temporal_compression + 1
-fn compute_latent_dims(config: &InferenceConfig, vae_config: &VaeConfig) -> (usize, usize, usize) {
-    // From diffusers: num_frames = (num_frames - 1) // vae_temporal_compression_ratio + 1
-    let lat_t = (config.num_frames.saturating_sub(1)) / vae_config.temporal_downsample + 1;
-    let lat_h = config.height / vae_config.spatial_downsample;
-    let lat_w = config.width / vae_config.spatial_downsample;
-    (lat_t.max(1), lat_h.max(1), lat_w.max(1))
 }
 
 /// Create text embeddings using T5 encoder

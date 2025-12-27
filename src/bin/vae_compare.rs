@@ -16,14 +16,21 @@ use candle_video::latents_bin::{read_f32_tensor_with_header, write_f32_tensor_wi
 use candle_video::vae::VaeDecoder;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Decode latents.bin with Rust VAE and dump outputs for comparison")]
+#[command(
+    author,
+    version,
+    about = "Decode latents.bin with Rust VAE and dump outputs for comparison"
+)]
 struct Args {
     /// Path to `output/latents.bin` (u64 header + f32 data)
     #[arg(long, default_value = "output/latents.bin")]
     latents: PathBuf,
 
     /// Path to model safetensors (single file). Used to load `vae.decoder` weights.
-    #[arg(long, default_value = "ltxv-2b-0.9.8-distilled/ltxv-2b-0.9.8-distilled.safetensors")]
+    #[arg(
+        long,
+        default_value = "ltxv-2b-0.9.8-distilled/ltxv-2b-0.9.8-distilled.safetensors"
+    )]
     model: PathBuf,
 
     /// Output directory
@@ -42,12 +49,13 @@ struct Args {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive("vae_compare=info".parse()?),
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("vae_compare=info".parse()?),
         )
         .init();
 
     let args = Args::parse();
-    let device = if args.cpu { Device::Cpu } else { Device::Cpu };
+    let device = Device::Cpu;
     let dtype = DType::F32;
 
     std::fs::create_dir_all(&args.out_dir).context("create out_dir")?;
@@ -112,4 +120,3 @@ fn save_video_frames(video: &Tensor, output_dir: &PathBuf, prefix: &str) -> Resu
 
     Ok(())
 }
-

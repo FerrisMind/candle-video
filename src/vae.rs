@@ -53,30 +53,30 @@ pub fn unpatchify(x: &Tensor, patch_size_hw: usize, patch_size_t: usize) -> Resu
 
     // Process each frame separately to avoid B*T folding memory layout issues
     let mut frames = Vec::with_capacity(b * t);
-    
+
     for bi in 0..b {
         for ti in 0..t {
             // Extract frame: [1, C_packed, 1, H, W] -> [1, C_packed, H, W]
-            let frame = x.i((bi..bi+1, .., ti..ti+1, .., ..))?;
+            let frame = x.i((bi..bi + 1, .., ti..ti + 1, .., ..))?;
             let frame = frame.squeeze(2)?;
-            
+
             // Reshape: [1, c*s_t, s_h, s_w, H, W]
             let frame = frame.reshape(&[1, c * s_t, s_h, s_w, h, w][..])?;
-            
+
             // Permute to [1, c*s_t, H, s_h, W, s_w] to match diffusers LTXVideoUpsampler3d
             // (see `tp/diffusers/src/diffusers/models/autoencoders/autoencoder_kl_ltx.py`).
             let frame = frame.permute(&[0, 1, 4, 2, 5, 3][..])?;
             let frame = frame.contiguous()?;
-             
+
             // Flatten: [1, c*s_t, H*s_h, W*s_w]
             let frame = frame.reshape((1, c * s_t, h_new, w_new))?;
             frames.push(frame);
         }
     }
-    
+
     // Stack frames: [B*T, c*s_t, H_new, W_new]
     let x = Tensor::cat(&frames, 0)?;
-    
+
     // Handle temporal unpacking
     if s_t > 1 {
         // Reshape to [B, T, c*s_t, H_new, W_new]
@@ -88,7 +88,7 @@ pub fn unpatchify(x: &Tensor, patch_size_hw: usize, patch_size_t: usize) -> Resu
         // Flatten temporal: [B, c, T*s_t, H_new, W_new]
         let t_new = t * s_t;
         let x = x.contiguous()?.reshape((b, c, t_new, h_new, w_new))?;
-        
+
         // Slice for causal boundary: [:, :, s_t-1:]
         let start_t = s_t - 1;
         if start_t > 0 && t_new > start_t {
@@ -121,30 +121,30 @@ pub fn unpatchify_decoder(x: &Tensor, patch_size_hw: usize, patch_size_t: usize)
 
     // Process each frame separately to avoid B*T folding memory layout issues
     let mut frames = Vec::with_capacity(b * t);
-    
+
     for bi in 0..b {
         for ti in 0..t {
             // Extract frame: [1, C_packed, 1, H, W] -> [1, C_packed, H, W]
-            let frame = x.i((bi..bi+1, .., ti..ti+1, .., ..))?;
+            let frame = x.i((bi..bi + 1, .., ti..ti + 1, .., ..))?;
             let frame = frame.squeeze(2)?;
-            
+
             // Reshape: [1, c*p_t, p, p, H, W]
             let frame = frame.reshape(&[1, c * p_t, p, p, h, w][..])?;
-            
+
             // Permute to [1, c*p_t, H, p_w, W, p_h] - swapped for correct Python mapping
             // This gives output(y,x) = channel[x*p + y] matching Python
             let frame = frame.permute(&[0, 1, 4, 3, 5, 2][..])?;
             let frame = frame.contiguous()?;
-            
+
             // Flatten: [1, c*p_t, H*p, W*p]
             let frame = frame.reshape((1, c * p_t, h_new, w_new))?;
             frames.push(frame);
         }
     }
-    
+
     // Stack frames: [B*T, c*p_t, H_new, W_new]
     let x = Tensor::cat(&frames, 0)?;
-    
+
     // Handle temporal unpacking (for p_t > 1)
     if p_t > 1 {
         let x = x.reshape(&[b, t, c * p_t, h_new, w_new][..])?;

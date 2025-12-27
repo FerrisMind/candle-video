@@ -7,6 +7,14 @@
 use candle_core::{D, DType, Device, Result, Tensor};
 use std::f64::consts::PI;
 
+pub const DIFFUSERS_BASE_NUM_FRAMES: usize = 20;
+pub const DIFFUSERS_BASE_HEIGHT: usize = 2048;
+pub const DIFFUSERS_BASE_WIDTH: usize = 2048;
+pub const DIFFUSERS_THETA: f64 = 10000.0;
+pub const DEFAULT_FRAME_RATE: f64 = 25.0;
+pub const VAE_TEMPORAL_COMPRESSION: f64 = 8.0;
+pub const VAE_SPATIAL_COMPRESSION: f64 = 32.0;
+
 /// Normalized Fractional RoPE for 3D spatiotemporal coordinates
 pub struct FractionalRoPE {
     /// Base frequency for rotary embeddings
@@ -327,7 +335,8 @@ pub fn generate_indices_grid(
 /// - h_coord = h_idx / base_height  
 /// - w_coord = w_idx / base_width
 ///
-/// Default base values are from LTX-Video config: base_num_frames=9, base_h/w=512
+/// Default base values are from diffusers LTXVideoRotaryPosEmbed:
+/// base_num_frames=20, base_height=2048, base_width=2048
 #[allow(clippy::too_many_arguments)]
 pub fn generate_indices_grid_for_diffusers(
     batch_size: usize,
@@ -339,9 +348,9 @@ pub fn generate_indices_grid_for_diffusers(
     base_width: usize,
     patch_size: usize,
     patch_size_t: usize,
-    rope_scale_t: f32,  // rope_interpolation_scale[0] = vae_t_compression / fps
-    rope_scale_h: f32,  // rope_interpolation_scale[1] = vae_s_compression  
-    rope_scale_w: f32,  // rope_interpolation_scale[2] = vae_s_compression
+    rope_scale_t: f32, // rope_interpolation_scale[0] = vae_t_compression / fps
+    rope_scale_h: f32, // rope_interpolation_scale[1] = vae_s_compression
+    rope_scale_w: f32, // rope_interpolation_scale[2] = vae_s_compression
     device: &Device,
 ) -> Result<Tensor> {
     let seq_len = t * h * w;
@@ -355,7 +364,8 @@ pub fn generate_indices_grid_for_diffusers(
     for _b in 0..batch_size {
         // T coordinates
         for ti in 0..t {
-            let t_coord = (ti as f32) * rope_scale_t * (patch_size_t as f32) / (base_num_frames as f32);
+            let t_coord =
+                (ti as f32) * rope_scale_t * (patch_size_t as f32) / (base_num_frames as f32);
             for _hi in 0..h {
                 for _wi in 0..w {
                     indices.push(t_coord);
@@ -368,7 +378,8 @@ pub fn generate_indices_grid_for_diffusers(
         // H coordinates
         for _ti in 0..t {
             for hi in 0..h {
-                let h_coord = (hi as f32) * rope_scale_h * (patch_size as f32) / (base_height as f32);
+                let h_coord =
+                    (hi as f32) * rope_scale_h * (patch_size as f32) / (base_height as f32);
                 for _wi in 0..w {
                     indices.push(h_coord);
                 }
@@ -381,7 +392,8 @@ pub fn generate_indices_grid_for_diffusers(
         for _ti in 0..t {
             for _hi in 0..h {
                 for wi in 0..w {
-                    let w_coord = (wi as f32) * rope_scale_w * (patch_size as f32) / (base_width as f32);
+                    let w_coord =
+                        (wi as f32) * rope_scale_w * (patch_size as f32) / (base_width as f32);
                     indices.push(w_coord);
                 }
             }
@@ -389,6 +401,43 @@ pub fn generate_indices_grid_for_diffusers(
     }
 
     Tensor::from_vec(indices, (batch_size, 3, seq_len), device)
+}
+
+/// Compute rope_interpolation_scale for diffusers LTX pipelines.
+///
+/// Returns (temporal, height, width) scales as f32.
+pub fn diffusers_rope_scales(frame_rate: Option<f64>) -> (f32, f32, f32) {
+    let fr = frame_rate.unwrap_or(DEFAULT_FRAME_RATE);
+    let temporal = (VAE_TEMPORAL_COMPRESSION / fr) as f32;
+    let spatial = VAE_SPATIAL_COMPRESSION as f32;
+    (temporal, spatial, spatial)
+}
+
+/// Generate indices grid using diffusers default constants and scaling.
+pub fn generate_indices_grid_diffusers(
+    batch_size: usize,
+    t: usize,
+    h: usize,
+    w: usize,
+    frame_rate: Option<f64>,
+    device: &Device,
+) -> Result<Tensor> {
+    let (rope_scale_t, rope_scale_h, rope_scale_w) = diffusers_rope_scales(frame_rate);
+    generate_indices_grid_for_diffusers(
+        batch_size,
+        t,
+        h,
+        w,
+        DIFFUSERS_BASE_NUM_FRAMES,
+        DIFFUSERS_BASE_HEIGHT,
+        DIFFUSERS_BASE_WIDTH,
+        1,
+        1,
+        rope_scale_t,
+        rope_scale_h,
+        rope_scale_w,
+        device,
+    )
 }
 
 /// Generate raw indices grid matching diffusers when rope_interpolation_scale=None
@@ -479,6 +528,15 @@ mod tests {
         assert_eq!(grid.dim(0)?, 2); // batch
         assert_eq!(grid.dim(1)?, 3); // t, h, w coordinates
         assert_eq!(grid.dim(2)?, 4 * 8 * 8); // seq_len
+        Ok(())
+    }
+
+    #[test]
+    fn test_indices_grid_diffusers_shape() -> Result<()> {
+        let device = Device::Cpu;
+        let grid = generate_indices_grid_diffusers(1, 2, 3, 4, None, &device)?;
+
+        assert_eq!(grid.dims(), &[1, 3, 2 * 3 * 4]);
         Ok(())
     }
 

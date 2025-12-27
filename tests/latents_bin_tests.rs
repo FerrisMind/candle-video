@@ -18,4 +18,3 @@ fn test_latents_bin_roundtrip_f32() -> Result<()> {
     assert!(diff < 1e-6, "max diff {diff}");
     Ok(())
 }
-

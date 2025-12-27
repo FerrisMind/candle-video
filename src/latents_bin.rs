@@ -10,7 +10,10 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
-pub fn read_f32_tensor_with_header(path: impl AsRef<Path>, device: &Device) -> Result<(Vec<usize>, Tensor)> {
+pub fn read_f32_tensor_with_header(
+    path: impl AsRef<Path>,
+    device: &Device,
+) -> Result<(Vec<usize>, Tensor)> {
     let mut file = File::open(path)?;
 
     let mut u64_buf = [0u8; 8];
@@ -54,4 +57,3 @@ pub fn write_f32_tensor_with_header(path: impl AsRef<Path>, tensor: &Tensor) -> 
 
     Ok(())
 }
-

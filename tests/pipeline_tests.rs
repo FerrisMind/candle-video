@@ -139,10 +139,10 @@ fn test_initialize_noise_shape() -> Result<()> {
     let noise = pipeline.initialize_noise(&inference)?;
 
     // Expected shape: (B, C_latent, T_latent, H_latent, W_latent)
-    // T_latent = 9 / 4 = 2 (temporal downsample)
+    // T_latent = (9 - 1) / 4 + 1 = 3 (temporal downsample)
     // H_latent = 64 / 8 = 8 (spatial downsample)
     // W_latent = 64 / 8 = 8 (spatial downsample)
-    assert_eq!(noise.dims(), &[1, 4, 2, 8, 8]);
+    assert_eq!(noise.dims(), &[1, 4, 3, 8, 8]);
 
     Ok(())
 }
@@ -184,7 +184,7 @@ fn test_compute_latent_dims() {
     let inference = create_test_inference_config();
     let (lat_t, lat_h, lat_w) = pipeline.compute_latent_dims(&inference);
 
-    assert_eq!(lat_t, 2); // 9 / 4 (integer division)
+    assert_eq!(lat_t, 3); // (9 - 1) / 4 + 1
     assert_eq!(lat_h, 8); // 64 / 8
     assert_eq!(lat_w, 8); // 64 / 8
 }
@@ -206,9 +206,32 @@ fn test_compute_latent_dims_larger_video() {
     let inference = InferenceConfig::new(17, 512, 768, 42).unwrap();
     let (lat_t, lat_h, lat_w) = pipeline.compute_latent_dims(&inference);
 
-    assert_eq!(lat_t, 2); // 17 / 8
+    assert_eq!(lat_t, 3); // (17 - 1) / 8 + 1
     assert_eq!(lat_h, 16); // 512 / 32
     assert_eq!(lat_w, 24); // 768 / 32
+}
+
+#[test]
+fn test_compute_latent_dims_diffusers_formula() {
+    let device = create_test_device();
+    let temporal_downsample = 8;
+    let config = PipelineConfig {
+        dit: create_test_dit_config(),
+        vae: VaeConfig {
+            temporal_downsample,
+            spatial_downsample: 32,
+            ..create_test_vae_config()
+        },
+        scheduler: create_test_scheduler_config(),
+    };
+    let pipeline = TextToVideoPipeline::new(device, config).unwrap();
+
+    let num_frames = 25;
+    let inference = InferenceConfig::new(num_frames, 512, 768, 42).unwrap();
+    let (lat_t, _lat_h, _lat_w) = pipeline.compute_latent_dims(&inference);
+
+    let expected_lat_t = (num_frames - 1) / temporal_downsample + 1;
+    assert_eq!(lat_t, expected_lat_t);
 }
 
 // =============================================================================
@@ -945,8 +968,9 @@ fn test_generate_image_to_video_api() -> Result<()> {
     let cond_latents = Tensor::ones((1, 4, 1, lat_h, lat_w), DType::F32, &device)?;
     let cond_item = ConditioningItem::new(cond_latents, 0, 0.9);
 
-    // Use public API
-    let video = pipeline.generate_image_to_video(&text_emb, &[cond_item], &inference)?;
+    // Use mock API (real i2v requires loaded models)
+    let video =
+        pipeline.mock_generate_image_to_video(&text_emb, &[cond_item], &inference, 0.025)?;
 
     assert_eq!(video.dim(0)?, 1);
     assert_eq!(video.dim(1)?, 3);

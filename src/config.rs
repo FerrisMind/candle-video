@@ -170,6 +170,8 @@ impl Default for SchedulerConfig {
 pub struct InferenceConfig {
     /// Number of frames to generate (must be 8N+1)
     pub num_frames: usize,
+    /// Frame rate for RoPE scaling (None = default)
+    pub frame_rate: Option<f64>,
     /// Video height (must be multiple of 32)
     pub height: usize,
     /// Video width (must be multiple of 32)
@@ -204,6 +206,7 @@ impl InferenceConfig {
 
         Ok(Self {
             num_frames,
+            frame_rate: None,
             height,
             width,
             seed,
@@ -221,6 +224,12 @@ impl InferenceConfig {
     /// Set guidance scale
     pub fn with_guidance_scale(mut self, scale: f64) -> Self {
         self.guidance_scale = scale;
+        self
+    }
+
+    /// Set frame rate for RoPE scaling
+    pub fn with_frame_rate(mut self, frame_rate: f64) -> Self {
+        self.frame_rate = Some(frame_rate);
         self
     }
 }

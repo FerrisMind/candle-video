@@ -14,8 +14,8 @@
 
 pub mod config;
 pub mod dit;
-pub mod loader;
 pub mod latents_bin;
+pub mod loader;
 pub mod pipeline;
 pub mod quantized_t5_encoder;
 pub mod rope;

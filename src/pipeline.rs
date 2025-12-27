@@ -39,8 +39,13 @@
 //! ```
 
 use crate::config::{DitConfig, InferenceConfig, SchedulerConfig, VaeConfig};
+use crate::dit::Transformer3DModel;
 use crate::scheduler::RectifiedFlowScheduler;
-use candle_core::{Device, IndexOp, Result, Tensor};
+use crate::vae::{VaeDecoder, VaeEncoder};
+use candle_core::{DType, Device, IndexOp, Result, Tensor};
+use candle_nn::VarBuilder;
+use image::{DynamicImage, imageops::FilterType};
+use std::path::Path;
 
 // =============================================================================
 // Latent Manipulation Utilities
@@ -525,6 +530,11 @@ pub struct TextToVideoPipeline {
     dit_config: DitConfig,
     vae_config: VaeConfig,
     scheduler: RectifiedFlowScheduler,
+    dit_model: Option<Transformer3DModel>,
+    vae_decoder: Option<VaeDecoder>,
+    vae_encoder: Option<VaeEncoder>,
+    latents_mean: Option<Tensor>,
+    latents_std: Option<Tensor>,
 }
 
 impl TextToVideoPipeline {
@@ -541,6 +551,11 @@ impl TextToVideoPipeline {
             dit_config: config.dit,
             vae_config: config.vae,
             scheduler,
+            dit_model: None,
+            vae_decoder: None,
+            vae_encoder: None,
+            latents_mean: None,
+            latents_std: None,
         })
     }
 
@@ -574,6 +589,88 @@ impl TextToVideoPipeline {
     }
 
     // =========================================================================
+    // Model Loading
+    // =========================================================================
+
+    fn stats_key(prefix: Option<&str>, name: &str) -> String {
+        match prefix {
+            Some(p) if !p.is_empty() => format!("{}.{}", p, name),
+            _ => name.to_string(),
+        }
+    }
+
+    /// Load DiT model weights from a safetensors file.
+    pub fn load_dit(&mut self, model_path: impl AsRef<Path>, dtype: DType) -> Result<()> {
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[model_path.as_ref()], dtype, &self.device)?
+        };
+        let vb = vb.pp("model.diffusion_model");
+        let model = Transformer3DModel::new(vb, &self.dit_config)?;
+        self.dit_model = Some(model);
+        Ok(())
+    }
+
+    /// Load VAE decoder weights from a safetensors file.
+    pub fn load_vae_decoder(
+        &mut self,
+        model_path: impl AsRef<Path>,
+        prefix: &str,
+        dtype: DType,
+    ) -> Result<()> {
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[model_path.as_ref()], dtype, &self.device)?
+        };
+        let vb = vb.pp(prefix);
+        let decoder = VaeDecoder::new(vb)?;
+        self.vae_decoder = Some(decoder);
+        Ok(())
+    }
+
+    /// Load VAE encoder weights from a safetensors file.
+    pub fn load_vae_encoder(
+        &mut self,
+        model_path: impl AsRef<Path>,
+        prefix: &str,
+        dtype: DType,
+    ) -> Result<()> {
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[model_path.as_ref()], dtype, &self.device)?
+        };
+        let vb = vb.pp(prefix);
+        let encoder = VaeEncoder::new(vb)?;
+        self.vae_encoder = Some(encoder);
+        Ok(())
+    }
+
+    /// Load per-channel latent statistics (mean/std) for denormalization.
+    pub fn load_latent_stats(
+        &mut self,
+        model_path: impl AsRef<Path>,
+        prefix: Option<&str>,
+        dtype: DType,
+    ) -> Result<()> {
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[model_path.as_ref()], dtype, &self.device)?
+        };
+        let channels = self.vae_config.latent_channels;
+        let mean_key = Self::stats_key(prefix, "per_channel_statistics.mean-of-means");
+        let std_key = Self::stats_key(prefix, "per_channel_statistics.std-of-means");
+
+        let latents_mean = match vb.get((channels,), mean_key.as_str()) {
+            Ok(tensor) => tensor,
+            Err(_) => Tensor::zeros((channels,), dtype, &self.device)?,
+        };
+        let latents_std = match vb.get((channels,), std_key.as_str()) {
+            Ok(tensor) => tensor,
+            Err(_) => Tensor::ones((channels,), dtype, &self.device)?,
+        };
+
+        self.latents_mean = Some(latents_mean);
+        self.latents_std = Some(latents_std);
+        Ok(())
+    }
+
+    // =========================================================================
     // Configuration Mutators
     // =========================================================================
 
@@ -603,7 +700,7 @@ impl TextToVideoPipeline {
     ///
     /// Returns (T_latent, H_latent, W_latent)
     pub fn compute_latent_dims(&self, config: &InferenceConfig) -> (usize, usize, usize) {
-        let lat_t = config.num_frames / self.vae_config.temporal_downsample;
+        let lat_t = (config.num_frames.saturating_sub(1)) / self.vae_config.temporal_downsample + 1;
         let lat_h = config.height / self.vae_config.spatial_downsample;
         let lat_w = config.width / self.vae_config.spatial_downsample;
         (lat_t, lat_h, lat_w)
@@ -709,6 +806,41 @@ impl TextToVideoPipeline {
     pub fn create_timestep_tensor(&self, timestep: f64, batch_size: usize) -> Result<Tensor> {
         let timesteps = vec![timestep as f32; batch_size];
         Tensor::from_vec(timesteps, (batch_size,), &self.device)
+    }
+
+    fn require_dit(&self) -> Result<&Transformer3DModel> {
+        self.dit_model
+            .as_ref()
+            .ok_or_else(|| candle_core::Error::Msg("DiT model not loaded".to_string()))
+    }
+
+    fn require_vae_decoder(&self) -> Result<&VaeDecoder> {
+        self.vae_decoder
+            .as_ref()
+            .ok_or_else(|| candle_core::Error::Msg("VAE decoder not loaded".to_string()))
+    }
+
+    fn require_latent_stats(&self) -> Result<(&Tensor, &Tensor)> {
+        let mean = self
+            .latents_mean
+            .as_ref()
+            .ok_or_else(|| candle_core::Error::Msg("Latent mean not loaded".to_string()))?;
+        let std = self
+            .latents_std
+            .as_ref()
+            .ok_or_else(|| candle_core::Error::Msg("Latent std not loaded".to_string()))?;
+        Ok((mean, std))
+    }
+
+    fn denormalize_latents(&self, latents: &Tensor) -> Result<Tensor> {
+        let (mean, std) = self.require_latent_stats()?;
+        let channels = self.vae_config.latent_channels;
+        let dtype = latents.dtype();
+
+        let mean = mean.reshape((1, channels, 1, 1, 1))?.to_dtype(dtype)?;
+        let std = std.reshape((1, channels, 1, 1, 1))?.to_dtype(dtype)?;
+
+        latents.broadcast_mul(&std)?.broadcast_add(&mean)
     }
 
     // =========================================================================
@@ -892,10 +1024,61 @@ impl TextToVideoPipeline {
     ///
     /// # Note
     /// Currently uses mock operations. Full implementation requires loaded DiT and VAE models.
-    pub fn generate(&self, text_embeddings: &Tensor, config: &InferenceConfig) -> Result<Tensor> {
-        // For now, delegate to mock implementation
-        // TODO: Implement with actual loaded models
-        self.mock_generate(text_embeddings, config)
+    pub fn generate(
+        &mut self,
+        text_embeddings: &Tensor,
+        config: &InferenceConfig,
+    ) -> Result<Tensor> {
+        let dtype = text_embeddings.dtype();
+
+        let (lat_t, lat_h, lat_w) = self.compute_latent_dims(config);
+        let mut latents = self.initialize_noise(config)?.to_dtype(dtype)?;
+
+        let sample_shape = (1, self.vae_config.latent_channels, lat_t, lat_h, lat_w);
+        self.scheduler.set_timesteps_with_shape(
+            self.scheduler.num_steps(),
+            Some(sample_shape),
+            None,
+            None,
+        )?;
+
+        let indices_grid = crate::rope::generate_indices_grid_diffusers(
+            1,
+            lat_t,
+            lat_h,
+            lat_w,
+            config.frame_rate,
+            &self.device,
+        )?;
+
+        let num_steps = self.scheduler.num_steps();
+        for step_idx in 0..num_steps {
+            let timestep = self.scheduler.timesteps()[step_idx];
+            let timestep_tensor = Tensor::new(&[timestep as f32], &self.device)?.to_dtype(dtype)?;
+
+            let velocity = self.require_dit()?.forward(
+                &latents,
+                &indices_grid,
+                Some(text_embeddings),
+                &timestep_tensor,
+                None,
+                None,
+                None,
+                None,
+            )?;
+
+            latents = self.scheduler.step(&velocity, &latents, step_idx)?;
+        }
+
+        let latents = self.denormalize_latents(&latents)?;
+        let decode_timestep = if self.vae_config.timestep_conditioning {
+            Some(0.05)
+        } else {
+            None
+        };
+
+        self.require_vae_decoder()?
+            .decode(&latents, decode_timestep)
     }
 
     /// Generate video with CFG
@@ -905,19 +1088,122 @@ impl TextToVideoPipeline {
     /// * `negative_embeddings` - Negative (unconditional) text embeddings
     /// * `config` - Inference configuration
     pub fn generate_with_cfg(
-        &self,
+        &mut self,
         positive_embeddings: &Tensor,
         negative_embeddings: &Tensor,
         config: &InferenceConfig,
     ) -> Result<Tensor> {
-        // For now, delegate to mock implementation
-        // TODO: Implement with actual loaded models
-        self.mock_generate_with_cfg(positive_embeddings, negative_embeddings, config)
+        let dtype = positive_embeddings.dtype();
+
+        let (lat_t, lat_h, lat_w) = self.compute_latent_dims(config);
+        let mut latents = self.initialize_noise(config)?.to_dtype(dtype)?;
+
+        let sample_shape = (1, self.vae_config.latent_channels, lat_t, lat_h, lat_w);
+        self.scheduler.set_timesteps_with_shape(
+            self.scheduler.num_steps(),
+            Some(sample_shape),
+            None,
+            None,
+        )?;
+
+        let indices_grid = crate::rope::generate_indices_grid_diffusers(
+            1,
+            lat_t,
+            lat_h,
+            lat_w,
+            config.frame_rate,
+            &self.device,
+        )?;
+
+        let cfg_embeddings =
+            self.prepare_cfg_embeddings(positive_embeddings, negative_embeddings)?;
+        let num_steps = self.scheduler.num_steps();
+        for step_idx in 0..num_steps {
+            let timestep = self.scheduler.timesteps()[step_idx];
+            let timestep_tensor = self.create_timestep_tensor(timestep, 2)?.to_dtype(dtype)?;
+
+            let cfg_latents = self.duplicate_for_cfg(&latents)?;
+            let velocity = self.require_dit()?.forward(
+                &cfg_latents,
+                &indices_grid,
+                Some(&cfg_embeddings),
+                &timestep_tensor,
+                None,
+                None,
+                None,
+                None,
+            )?;
+
+            let guided_velocity = self.apply_cfg(&velocity)?;
+            latents = self.scheduler.step(&guided_velocity, &latents, step_idx)?;
+        }
+
+        let latents = self.denormalize_latents(&latents)?;
+        let decode_timestep = if self.vae_config.timestep_conditioning {
+            Some(0.05)
+        } else {
+            None
+        };
+
+        self.require_vae_decoder()?
+            .decode(&latents, decode_timestep)
     }
 
     // =========================================================================
     // Image-to-Video Generation
     // =========================================================================
+
+    fn image_to_tensor(
+        image: &DynamicImage,
+        height: usize,
+        width: usize,
+        device: &Device,
+    ) -> Result<Tensor> {
+        let resized = image.resize_exact(width as u32, height as u32, FilterType::Triangle);
+        let rgb = resized.to_rgb8();
+
+        let mut data = vec![0f32; 3 * height * width];
+        for y in 0..height {
+            for x in 0..width {
+                let pixel = rgb.get_pixel(x as u32, y as u32);
+                let r = (pixel[0] as f32 / 255.0) * 2.0 - 1.0;
+                let g = (pixel[1] as f32 / 255.0) * 2.0 - 1.0;
+                let b = (pixel[2] as f32 / 255.0) * 2.0 - 1.0;
+
+                let idx = y * width + x;
+                data[idx] = r;
+                data[height * width + idx] = g;
+                data[2 * height * width + idx] = b;
+            }
+        }
+
+        Tensor::from_vec(data, (1, 3, 1, height, width), device)
+    }
+
+    /// Encode a conditioning image into VAE latents for i2v.
+    pub fn conditioning_item_from_image(
+        &self,
+        image: &DynamicImage,
+        config: &InferenceConfig,
+        strength: f32,
+    ) -> Result<ConditioningItem> {
+        let encoder = self
+            .vae_encoder
+            .as_ref()
+            .ok_or_else(|| candle_core::Error::Msg("VAE encoder not loaded".to_string()))?;
+        let (mean, std) = self.require_latent_stats()?;
+
+        let image_tensor = Self::image_to_tensor(image, config.height, config.width, &self.device)?;
+        let latents = crate::vae::vae_encode(
+            encoder,
+            &image_tensor,
+            Some(mean),
+            Some(std),
+            self.vae_config.scaling_factor,
+        )?;
+
+        Ok(ConditioningItem::new(latents, 0, strength))
+    }
 
     /// Prepare conditioning latents from conditioning items
     ///
@@ -1082,14 +1368,104 @@ impl TextToVideoPipeline {
     /// * `conditioning_items` - Encoded conditioning frames
     /// * `config` - Inference configuration
     pub fn generate_image_to_video(
-        &self,
+        &mut self,
         text_embeddings: &Tensor,
         conditioning_items: &[ConditioningItem],
         config: &InferenceConfig,
     ) -> Result<Tensor> {
-        // Default noise scale for motion continuity
+        let dtype = text_embeddings.dtype();
+
+        let (lat_t, lat_h, lat_w) = self.compute_latent_dims(config);
+        let init_noise = self.initialize_noise(config)?.to_dtype(dtype)?;
+
+        let (mut latents, conditioning_mask) =
+            self.prepare_conditioning_latents(&init_noise, conditioning_items)?;
+        let init_latents = latents.clone();
+
+        let sample_shape = (1, self.vae_config.latent_channels, lat_t, lat_h, lat_w);
+        self.scheduler.set_timesteps_with_shape(
+            self.scheduler.num_steps(),
+            Some(sample_shape),
+            None,
+            None,
+        )?;
+
+        let indices_grid = crate::rope::generate_indices_grid_diffusers(
+            1,
+            lat_t,
+            lat_h,
+            lat_w,
+            config.frame_rate,
+            &self.device,
+        )?;
+
+        let patch_size = self.dit_config.patch_size;
+        let patch_size_t = self.dit_config.patch_size_t.unwrap_or(1);
         let noise_scale = 0.025;
-        self.mock_generate_image_to_video(text_embeddings, conditioning_items, config, noise_scale)
+        let num_steps = self.scheduler.num_steps();
+
+        for step_idx in 0..num_steps {
+            let timestep = self.scheduler.timesteps()[step_idx];
+
+            let packed = pack_latents(&latents, patch_size, patch_size_t)?;
+            let token_timesteps = compute_token_timesteps(timestep, &conditioning_mask)?;
+            let init_packed = pack_latents(&init_latents, patch_size, patch_size_t)?;
+            let noised_packed = add_noise_to_conditioning_latents(
+                timestep,
+                &init_packed,
+                &packed,
+                noise_scale,
+                &conditioning_mask,
+            )?;
+
+            let noised = unpack_latents(
+                &noised_packed,
+                lat_t,
+                lat_h,
+                lat_w,
+                patch_size,
+                patch_size_t,
+            )?;
+            let timestep_tensor = Tensor::new(&[timestep as f32], &self.device)?.to_dtype(dtype)?;
+            let velocity = self.require_dit()?.forward(
+                &noised,
+                &indices_grid,
+                Some(text_embeddings),
+                &timestep_tensor,
+                None,
+                None,
+                None,
+                None,
+            )?;
+            let velocity_packed = pack_latents(&velocity, patch_size, patch_size_t)?;
+
+            let denoised_packed = self.scheduler.step_per_token(
+                &velocity_packed,
+                &noised_packed,
+                &token_timesteps,
+            )?;
+            let result_packed =
+                apply_conditioning_mask(&denoised_packed, &packed, timestep, &conditioning_mask)?;
+
+            latents = unpack_latents(
+                &result_packed,
+                lat_t,
+                lat_h,
+                lat_w,
+                patch_size,
+                patch_size_t,
+            )?;
+        }
+
+        let latents = self.denormalize_latents(&latents)?;
+        let decode_timestep = if self.vae_config.timestep_conditioning {
+            Some(0.05)
+        } else {
+            None
+        };
+
+        self.require_vae_decoder()?
+            .decode(&latents, decode_timestep)
     }
 }
 
@@ -1146,7 +1522,7 @@ mod tests {
         let (lat_t, lat_h, lat_w) = pipeline.compute_latent_dims(&inference_config);
 
         // With default config: temporal_downsample=8, spatial_downsample=32
-        assert_eq!(lat_t, 2); // 17 / 8 = 2
+        assert_eq!(lat_t, 3); // (17 - 1) / 8 + 1 = 3
         assert_eq!(lat_h, 16); // 512 / 32 = 16
         assert_eq!(lat_w, 24); // 768 / 32 = 24
     }

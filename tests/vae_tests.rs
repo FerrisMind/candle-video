@@ -162,9 +162,7 @@ fn test_unpatchify_upsampler_axis_order_matches_diffusers() -> Result<()> {
                 let packed_ch = (((0 * s_t + t_off) * s_h + h_off) * s_w + w_off) as f32;
                 let expected = src_t as f32 * 100.0 + packed_ch;
 
-                let actual = output
-                    .i((0, 0, t_out, y_out, x_out))?
-                    .to_scalar::<f32>()?;
+                let actual = output.i((0, 0, t_out, y_out, x_out))?.to_scalar::<f32>()?;
                 assert!(
                     (actual - expected).abs() < 1e-6,
                     "mismatch at t_out={t_out}, y_out={y_out}, x_out={x_out}: expected {expected}, got {actual}"

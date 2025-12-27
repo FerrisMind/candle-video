@@ -350,7 +350,15 @@ fn test_basic_transformer_block_forward() -> Result<()> {
     )?;
     let timestep = Tensor::randn(0f32, 1.0, (batch, 1, 6 * config.hidden_size), &device)?;
 
-    let out = block.forward(&x, None, Some(&encoder_hidden), Some(&timestep), None, None, None)?;
+    let out = block.forward(
+        &x,
+        None,
+        Some(&encoder_hidden),
+        Some(&timestep),
+        None,
+        None,
+        None,
+    )?;
 
     assert_eq!(out.dims(), x.dims());
 
