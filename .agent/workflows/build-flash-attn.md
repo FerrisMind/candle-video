@@ -12,64 +12,72 @@ This workflow describes how to build candle-video with CUDA Flash Attention supp
 2. **Visual Studio 2022** - Install with "Desktop development with C++" workload
 3. **Rust** - Install via rustup
 
-## Quick Build
+## Quick Build (with prebuilt kernels)
+
+If you have prebuilt kernels in `prebuilt/libflashattention.a`:
 
 // turbo
-1. Open "Developer Command Prompt for VS 2022" (not PowerShell!)
+1. Run the build script:
+```cmd
+build_flash_attn.cmd
+```
 
-2. Navigate to project directory:
+This takes ~3 seconds instead of 15+ minutes!
+
+## First-Time Build (compiling CUDA kernels)
+
+// turbo
+1. Open "Developer Command Prompt for VS 2022"
+
+2. Navigate to project:
 ```cmd
 cd C:\candle-video
 ```
 
-// turbo
 3. Set CUDA environment:
 ```cmd
 set CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6
 set PATH=%CUDA_PATH%\bin;%PATH%
 ```
 
-4. Build with flash-attn:
+4. Start initial build (CUDA kernels will compile):
 ```cmd
-cargo build --release --features flash-attn
+cargo check --lib --features flash-attn
+```
+This will fail at linking step - that's expected!
+
+5. Create static library manually:
+```cmd
+for /d %D in (target\debug\build\candle-flash-attn-*) do lib /OUT:"%D\out\libflashattention.a" "%D\out\*.o"
 ```
 
-## Alternative: Use Build Script
-
-Run the provided build script:
+6. Complete the build:
 ```cmd
-build_flash_attn.cmd
+cargo build --lib --features flash-attn
+```
+
+7. Save prebuilt kernels for future use:
+```cmd
+mkdir prebuilt
+for /d %D in (target\debug\build\candle-flash-attn-*) do copy "%D\out\libflashattention.a" prebuilt\
 ```
 
 ## Troubleshooting
 
 ### nvcc not found
-Ensure CUDA bin directory is in PATH:
-```cmd
-set PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin;%PATH%
-```
+- Use Developer Command Prompt for VS 2022, not regular CMD
+- Ensure CUDA bin is in PATH
 
-### cl.exe not found
-Use Developer Command Prompt, not regular CMD/PowerShell.
+### nvcc linking error
+- This is expected on Windows
+- Use the `lib.exe` workaround shown above
 
-### CUDA version mismatch
-Check your CUDA version:
-```cmd
-nvcc --version
-```
-Update `build_env.cmd` and `build_env.ps1` if needed.
+### Type mismatch errors
+- Ensure all candle dependencies use git version with same tag
+- Check Cargo.toml uses `git = "..."` not `version = "..."`
 
-## Build Without Flash Attention
+## Notes
 
-If you don't need Flash Attention (uses standard attention):
-```cmd
-cargo build --release
-```
-
-## Available Features
-
-- `flash-attn` - Flash Attention v2 (requires CUDA)
-- `cudnn` - cuDNN acceleration (requires cuDNN)
-- `mkl` - Intel MKL for CPU (x86_64 only)
-- `nccl` - Multi-GPU support
-- `all-gpu` - All GPU features combined
+- CUDA kernel compilation takes 15-20 minutes on first build
+- After first build, `libflashattention.a` (~240MB) is cached
+- Keep `prebuilt/` directory to skip recompilation

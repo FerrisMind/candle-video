@@ -68,3 +68,4 @@ pub use vae::{
     TimeEmbedder, Upsampler, VaeDecoder, VaeEncoder, causal_pad, patchify, spatial_pad, unpatchify,
     vae_encode,
 };
+
