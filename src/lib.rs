@@ -16,6 +16,7 @@ pub mod config;
 pub mod dit;
 pub mod latents_bin;
 pub mod loader;
+pub mod memory_efficient;
 pub mod pipeline;
 pub mod quantized_t5_encoder;
 pub mod rope;
@@ -69,3 +70,5 @@ pub use vae::{
     vae_encode,
 };
 
+// Memory-efficient operations exports
+pub use memory_efficient::{MemoryEfficientConfig, chunked_attention, chunked_attention_kv};

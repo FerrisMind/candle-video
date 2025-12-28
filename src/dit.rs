@@ -7,6 +7,7 @@
 //! - Transformer3DModel for full video diffusion
 
 use crate::config::DitConfig;
+use crate::memory_efficient::{MemoryEfficientConfig, chunked_attention};
 use crate::rope::FractionalRoPE;
 use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{
@@ -218,6 +219,8 @@ pub struct Attention {
     is_cross_attention: bool,
     use_rope: bool,
     use_flash_attn: bool,
+    /// Memory efficiency configuration for chunked attention
+    memory_config: MemoryEfficientConfig,
 }
 
 impl Attention {
@@ -258,8 +261,15 @@ impl Attention {
             is_cross_attention,
             use_rope: !is_cross_attention, // RoPE only for self-attention
             use_flash_attn: config.use_flash_attention,
+            memory_config: MemoryEfficientConfig::balanced(),
         })
     }
+    
+    /// Set memory efficiency configuration
+    pub fn set_memory_config(&mut self, config: MemoryEfficientConfig) {
+        self.memory_config = config;
+    }
+
 
     /// Apply rotary position embedding (multi-head format: batch, heads, seq, head_dim)
     #[allow(dead_code)]
@@ -403,23 +413,16 @@ impl Attention {
             let v = value.transpose(1, 2)?;
             flash_attn(&q, &k, &v, self.scale as f32, false)?.transpose(1, 2)?
         } else {
-            // K^T: [batch, heads, head_dim, seq_kv]
-            let key_t = key.transpose(2, 3)?.contiguous()?;
-            // Use affine to multiply by scale while preserving dtype (BF16)
-            let attn_weights = query.matmul(&key_t)?.affine(self.scale, 0.0)?;
-
-            // Apply attention mask if provided
-            let attn_weights = if let Some(mask) = attention_mask {
-                attn_weights.broadcast_add(mask)?
-            } else {
-                attn_weights
-            };
-
-            let attn_probs = candle_nn::ops::softmax(&attn_weights, D::Minus1)?;
-
-            // Apply attention to values: [batch, heads, seq_q, seq_kv] @ [batch, heads, seq_kv, head_dim]
-            // Result: [batch, heads, seq_q, head_dim]
-            attn_probs.matmul(&value)?
+            // Use memory-efficient chunked attention for large sequences
+            // This reduces peak memory from O(seq²) to O(seq × chunk_size)
+            chunked_attention(
+                &query,
+                &key,
+                &value,
+                self.scale,
+                attention_mask,
+                &self.memory_config,
+            )?
         };
 
         // Reshape back: (batch, heads, seq, head_dim) -> (batch, seq, hidden_dim)

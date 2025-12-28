@@ -1023,8 +1023,8 @@ impl TextToVideoPipeline {
     /// * `text_embeddings` - Pre-computed text embeddings from T5 encoder
     /// * `config` - Inference configuration (frames, dimensions, etc.)
     ///
-    /// # Note
-    /// Currently uses mock operations. Full implementation requires loaded DiT and VAE models.
+    /// # Panics
+    /// Panics if DiT or VAE models are not loaded.
     #[instrument(skip(self, text_embeddings, config), fields(
         width = config.width,
         height = config.height,
