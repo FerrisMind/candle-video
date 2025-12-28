@@ -113,6 +113,10 @@ struct Args {
     #[arg(long = "fp8")]
     fp8_precision: bool,
 
+    /// Use flash-attention (requires build with --features flash-attn)
+    #[arg(long)]
+    use_flash_attn: bool,
+
     /// Separate VAE model path (optional, uses embedded VAE from main model if not provided)
     #[arg(long)]
     vae_path: Option<PathBuf>,
@@ -202,6 +206,11 @@ fn main() -> Result<()> {
     // Validate num_frames
     if args.num_frames < 1 {
         anyhow::bail!("num_frames must be at least 1 (got {}).", args.num_frames);
+    }
+
+    if args.use_flash_attn {
+        #[cfg(not(feature = "flash-attn"))]
+        warn!("--use-flash-attn set but binary not built with feature flash-attn.");
     }
 
     // Create inference configuration
@@ -308,7 +317,7 @@ fn run_full_generation(
     };
 
     let pipeline_config = PipelineConfig {
-        dit: create_dit_config(),
+        dit: create_dit_config(args.use_flash_attn),
         vae: create_vae_config(),
         scheduler: scheduler_config,
     };
@@ -390,7 +399,7 @@ fn find_model_file(model_path: &PathBuf) -> Result<PathBuf> {
 }
 
 /// Create DiT configuration for LTX-Video 2B
-fn create_dit_config() -> DitConfig {
+fn create_dit_config(use_flash_attn: bool) -> DitConfig {
     DitConfig {
         patch_size: 1,          // From model config
         patch_size_t: Some(1),  // From model config
@@ -400,7 +409,7 @@ fn create_dit_config() -> DitConfig {
         num_heads: 32,          // num_attention_heads
         caption_channels: 4096, // T5-XXL output dimension
         mlp_ratio: 4.0,         // 2048 * 4 = 8192 inner dim
-        use_flash_attention: false,
+        use_flash_attention: use_flash_attn,
         timestep_scale_multiplier: Some(1000.0), // LTX-Video 2B uses 1000x scaling
     }
 }

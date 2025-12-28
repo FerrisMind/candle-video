@@ -8,10 +8,26 @@
 
 use crate::config::DitConfig;
 use crate::rope::FractionalRoPE;
-use candle_core::{D, Device, IndexOp, Result, Tensor};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{
     LayerNorm, LayerNormConfig, Linear, Module, VarBuilder, layer_norm, linear, linear_no_bias,
 };
+
+#[cfg(feature = "flash-attn")]
+fn flash_attn(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<Tensor> {
+    candle_flash_attn::flash_attn(q, k, v, softmax_scale, causal)
+}
+
+#[cfg(not(feature = "flash-attn"))]
+fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Tensor> {
+    unimplemented!("compile with '--features flash-attn'")
+}
 
 // ===========================================================================
 // Skip Layer Strategy (for STG - Spatio-Temporal Guidance)
@@ -201,6 +217,7 @@ pub struct Attention {
     #[allow(dead_code)]
     is_cross_attention: bool,
     use_rope: bool,
+    use_flash_attn: bool,
 }
 
 impl Attention {
@@ -240,6 +257,7 @@ impl Attention {
             scale,
             is_cross_attention,
             use_rope: !is_cross_attention, // RoPE only for self-attention
+            use_flash_attn: config.use_flash_attention,
         })
     }
 
@@ -369,25 +387,40 @@ impl Attention {
             .transpose(1, 2)?
             .contiguous()?;
 
+        let use_flash_attn = self.use_flash_attn
+            && attention_mask.is_none()
+            && matches!(hidden_states.device(), Device::Cuda(_))
+            && matches!(query.dtype(), DType::F16 | DType::BF16);
+
         // Scaled dot-product attention
         // Q: [batch, heads, seq_q, head_dim]
-        // K: [batch, heads, seq_kv, head_dim] -> K^T: [batch, heads, head_dim, seq_kv]
-        let key_t = key.transpose(2, 3)?.contiguous()?;
-        // Use affine to multiply by scale while preserving dtype (BF16)
-        let attn_weights = query.matmul(&key_t)?.affine(self.scale, 0.0)?;
-
-        // Apply attention mask if provided
-        let attn_weights = if let Some(mask) = attention_mask {
-            attn_weights.broadcast_add(mask)?
+        // K: [batch, heads, seq_kv, head_dim]
+        // V: [batch, heads, seq_kv, head_dim]
+        let attn_output = if use_flash_attn {
+            // flash-attn expects (batch, seq, heads, head_dim)
+            let q = query.transpose(1, 2)?;
+            let k = key.transpose(1, 2)?;
+            let v = value.transpose(1, 2)?;
+            flash_attn(&q, &k, &v, self.scale as f32, false)?.transpose(1, 2)?
         } else {
-            attn_weights
+            // K^T: [batch, heads, head_dim, seq_kv]
+            let key_t = key.transpose(2, 3)?.contiguous()?;
+            // Use affine to multiply by scale while preserving dtype (BF16)
+            let attn_weights = query.matmul(&key_t)?.affine(self.scale, 0.0)?;
+
+            // Apply attention mask if provided
+            let attn_weights = if let Some(mask) = attention_mask {
+                attn_weights.broadcast_add(mask)?
+            } else {
+                attn_weights
+            };
+
+            let attn_probs = candle_nn::ops::softmax(&attn_weights, D::Minus1)?;
+
+            // Apply attention to values: [batch, heads, seq_q, seq_kv] @ [batch, heads, seq_kv, head_dim]
+            // Result: [batch, heads, seq_q, head_dim]
+            attn_probs.matmul(&value)?
         };
-
-        let attn_probs = candle_nn::ops::softmax(&attn_weights, D::Minus1)?;
-
-        // Apply attention to values: [batch, heads, seq_q, seq_kv] @ [batch, heads, seq_kv, head_dim]
-        // Result: [batch, heads, seq_q, head_dim]
-        let attn_output = attn_probs.matmul(&value)?;
 
         // Reshape back: (batch, heads, seq, head_dim) -> (batch, seq, hidden_dim)
         let attn_output = attn_output.transpose(1, 2)?.contiguous()?.reshape((

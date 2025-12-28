@@ -8,9 +8,11 @@ license = "Apache-2.0"
 repository = "https://github.com/FerrisMind/candle-video"
 
 [dependencies]
-candle-core = { version = "=0.9.2-alpha.2", features = ["cuda"] }
-candle-nn = "=0.9.2-alpha.2"
-candle-transformers = "=0.9.2-alpha.2"
+# Use git for all candle dependencies to ensure type compatibility with flash-attn
+candle-core = { git = "https://github.com/huggingface/candle", tag = "0.9.2-alpha.2", features = ["cuda"] }
+candle-nn = { git = "https://github.com/huggingface/candle", tag = "0.9.2-alpha.2" }
+candle-transformers = { git = "https://github.com/huggingface/candle", tag = "0.9.2-alpha.2" }
+candle-flash-attn = { git = "https://github.com/huggingface/candle", tag = "0.9.2-alpha.2", optional = true }
 safetensors = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -26,6 +28,18 @@ glob = "0.3"
 
 [features]
 default = []
+# GPU Acceleration
+flash-attn = ["dep:candle-flash-attn"]
+# cuDNN for faster convolutions (requires CUDA)
+cudnn = ["candle-core/cudnn"]
+# Intel MKL for CPU acceleration (Linux/Windows x86_64)
+mkl = ["candle-core/mkl"]
+# Apple Accelerate for Metal acceleration (macOS)
+accelerate = ["candle-core/accelerate"]
+# NCCL for multi-GPU support
+nccl = ["candle-core/nccl"]
+# All GPU optimizations (for maximum performance)
+all-gpu = ["flash-attn", "cudnn", "nccl"]
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
@@ -55,7 +69,6 @@ path = "tests/text_encoder_tests.rs"
 [[test]]
 name = "dit_tests"
 path = "tests/dit_tests.rs"
-
 
 [[test]]
 name = "scheduler_tests"

@@ -58,6 +58,7 @@ fn create_test_scheduler_config() -> SchedulerConfig {
         num_train_timesteps: 1000,
         guidance_scale: 3.0,
         timestep_spacing: "linspace".to_string(),
+        sigma_schedule: None,
         shift: None,
         use_dynamic_shifting: false,
         base_shift: 0.5,

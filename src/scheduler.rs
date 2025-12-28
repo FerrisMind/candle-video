@@ -7,6 +7,7 @@
 //! Key features:
 //! - Euler solver for ODE integration
 //! - Multiple timestep spacing strategies (linspace, linear_quadratic)
+//! - Multiple sigma schedules (linspace, karras, exponential, beta)
 //! - Resolution-dependent timestep shifting (SD3 style)
 //! - Classifier-Free Guidance (CFG) support
 //! - Stochastic sampling option
@@ -76,6 +77,18 @@ impl RectifiedFlowScheduler {
             "linear_quadratic" => Self::linear_quadratic_schedule(num_steps),
             _ => Self::linspace_schedule(num_steps), // Default to linspace
         };
+
+        // Apply sigma schedule transformation if configured
+        // This is applied BEFORE shifting for better low-step quality
+        if let Some(ref sigma_schedule) = config.sigma_schedule {
+            let (sigma_min, sigma_max) = (0.0001, 1.0);
+            timesteps = match sigma_schedule.as_str() {
+                "karras" => Self::karras_sigmas(num_steps, sigma_min, sigma_max),
+                "exponential" => Self::exponential_sigmas(num_steps, sigma_min, sigma_max),
+                "beta" => Self::beta_sigmas(num_steps, 0.6, 0.6), // Default alpha/beta for LTX
+                _ => timesteps,
+            };
+        }
 
         // Apply shift if configured (not using dynamic shifting)
         if !config.use_dynamic_shifting {
@@ -252,6 +265,156 @@ impl RectifiedFlowScheduler {
             .iter()
             .map(|omz| 1.0 - omz / scale_factor)
             .collect()
+    }
+
+    // =========================================================================
+    // Sigma Schedule Strategies (from diffusers)
+    // =========================================================================
+
+    /// Karras et al. sigma schedule
+    ///
+    /// Produces sigmas that are more concentrated at high noise levels,
+    /// improving sample quality especially at low step counts.
+    ///
+    /// Reference: "Elucidating the Design Space of Diffusion-Based Generative Models"
+    ///
+    /// # Arguments
+    /// * `num_steps` - Number of inference steps
+    /// * `sigma_min` - Minimum sigma value
+    /// * `sigma_max` - Maximum sigma value (typically 1.0 for flow matching)
+    pub fn karras_sigmas(num_steps: usize, sigma_min: f64, sigma_max: f64) -> Vec<f64> {
+        if num_steps == 0 {
+            return vec![];
+        }
+        if num_steps == 1 {
+            return vec![sigma_max];
+        }
+
+        let rho = 7.0; // Karras paper default
+        let min_inv_rho = sigma_min.powf(1.0 / rho);
+        let max_inv_rho = sigma_max.powf(1.0 / rho);
+
+        (0..num_steps)
+            .map(|i| {
+                let t = i as f64 / (num_steps - 1) as f64;
+                (max_inv_rho + t * (min_inv_rho - max_inv_rho)).powf(rho)
+            })
+            .collect()
+    }
+
+    /// Exponential sigma schedule
+    ///
+    /// Produces sigmas spaced exponentially between min and max,
+    /// providing more fine-grained control at low noise levels.
+    ///
+    /// # Arguments
+    /// * `num_steps` - Number of inference steps
+    /// * `sigma_min` - Minimum sigma value
+    /// * `sigma_max` - Maximum sigma value
+    pub fn exponential_sigmas(num_steps: usize, sigma_min: f64, sigma_max: f64) -> Vec<f64> {
+        if num_steps == 0 {
+            return vec![];
+        }
+        if num_steps == 1 {
+            return vec![sigma_max];
+        }
+
+        let log_min = sigma_min.max(1e-10).ln();
+        let log_max = sigma_max.ln();
+
+        (0..num_steps)
+            .map(|i| {
+                let t = i as f64 / (num_steps - 1) as f64;
+                (log_max + t * (log_min - log_max)).exp()
+            })
+            .collect()
+    }
+
+    /// Beta distribution sigma schedule
+    ///
+    /// Uses the quantile function of a Beta distribution to place sigmas,
+    /// allowing flexible control over the distribution shape via alpha/beta.
+    ///
+    /// # Arguments
+    /// * `num_steps` - Number of inference steps
+    /// * `alpha` - Alpha parameter (controls left skew, typical: 0.6)
+    /// * `beta` - Beta parameter (controls right skew, typical: 0.6)
+    pub fn beta_sigmas(num_steps: usize, alpha: f64, beta: f64) -> Vec<f64> {
+        if num_steps == 0 {
+            return vec![];
+        }
+        if num_steps == 1 {
+            return vec![1.0];
+        }
+
+        // Approximate the regularized incomplete beta function using
+        // simple numerical integration (trapezoidal rule)
+        // For production use, consider using the `statrs` crate
+        let beta_cdf = |x: f64, a: f64, b: f64| -> f64 {
+            if x <= 0.0 {
+                return 0.0;
+            }
+            if x >= 1.0 {
+                return 1.0;
+            }
+
+            // Numerical integration with 1000 steps
+            let n = 1000;
+            let dx = x / n as f64;
+            let mut sum = 0.0;
+            for i in 0..n {
+                let t = (i as f64 + 0.5) * dx;
+                sum += t.powf(a - 1.0) * (1.0 - t).powf(b - 1.0) * dx;
+            }
+
+            // Normalize by Beta function B(a,b)
+            let beta_fn = Self::log_gamma(a) + Self::log_gamma(b) - Self::log_gamma(a + b);
+            (sum / beta_fn.exp()).min(1.0)
+        };
+
+        // Inverse CDF via binary search
+        let beta_ppf = |p: f64, a: f64, b: f64| -> f64 {
+            let mut low = 0.0;
+            let mut high = 1.0;
+            for _ in 0..50 {
+                let mid = (low + high) / 2.0;
+                if beta_cdf(mid, a, b) < p {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
+            }
+            (low + high) / 2.0
+        };
+
+        (0..num_steps)
+            .map(|i| {
+                let t = (i as f64 + 0.5) / num_steps as f64;
+                1.0 - beta_ppf(t, alpha, beta)
+            })
+            .collect()
+    }
+
+    /// Lanczos approximation for log-gamma function
+    fn log_gamma(x: f64) -> f64 {
+        let coefficients = [
+            76.18009172947146,
+            -86.50532032941677,
+            24.01409824083091,
+            -1.231739572450155,
+            0.001208650973866179,
+            -0.000005395239384953,
+        ];
+
+        let tmp = x + 5.5;
+        let tmp = tmp - (x + 0.5) * tmp.ln();
+        let mut ser = 1.000000000190015;
+
+        for (i, &coef) in coefficients.iter().enumerate() {
+            ser += coef / (x + 1.0 + i as f64);
+        }
+
+        -tmp + (2.5066282746310005 * ser / x).ln()
     }
 
     /// Get the timesteps for inference
@@ -777,5 +940,105 @@ mod tests {
             }
         }
         assert!(any_diff, "Shift should modify sigma values");
+    }
+
+    #[test]
+    fn test_karras_sigmas() {
+        let sigmas = RectifiedFlowScheduler::karras_sigmas(10, 0.0001, 1.0);
+
+        assert_eq!(sigmas.len(), 10);
+        // First sigma should be max (1.0)
+        assert!(
+            (sigmas[0] - 1.0).abs() < 1e-6,
+            "First sigma should be 1.0, got {}",
+            sigmas[0]
+        );
+        // Last sigma should be near min
+        assert!(
+            sigmas[9] < 0.01,
+            "Last sigma should be near min, got {}",
+            sigmas[9]
+        );
+        // Should be monotonically decreasing
+        for i in 1..sigmas.len() {
+            assert!(
+                sigmas[i] < sigmas[i - 1],
+                "Karras sigmas not monotonically decreasing at {}: {} >= {}",
+                i,
+                sigmas[i],
+                sigmas[i - 1]
+            );
+        }
+    }
+
+    #[test]
+    fn test_exponential_sigmas() {
+        let sigmas = RectifiedFlowScheduler::exponential_sigmas(10, 0.0001, 1.0);
+
+        assert_eq!(sigmas.len(), 10);
+        // First sigma should be max (1.0)
+        assert!(
+            (sigmas[0] - 1.0).abs() < 1e-6,
+            "First sigma should be 1.0, got {}",
+            sigmas[0]
+        );
+        // Last sigma should be near min
+        assert!(
+            sigmas[9] < 0.01,
+            "Last sigma should be near min, got {}",
+            sigmas[9]
+        );
+        // Should be monotonically decreasing
+        for i in 1..sigmas.len() {
+            assert!(
+                sigmas[i] < sigmas[i - 1],
+                "Exponential sigmas not monotonically decreasing at {}: {} >= {}",
+                i,
+                sigmas[i],
+                sigmas[i - 1]
+            );
+        }
+    }
+
+    #[test]
+    fn test_beta_sigmas() {
+        let sigmas = RectifiedFlowScheduler::beta_sigmas(10, 0.6, 0.6);
+
+        assert_eq!(sigmas.len(), 10);
+        // Should be in valid range
+        for sigma in &sigmas {
+            assert!(
+                *sigma >= 0.0 && *sigma <= 1.0,
+                "Beta sigma out of range: {}",
+                sigma
+            );
+        }
+        // Should be approximately monotonically decreasing (beta can have slight variations)
+        let mut decreasing_count = 0;
+        for i in 1..sigmas.len() {
+            if sigmas[i] <= sigmas[i - 1] {
+                decreasing_count += 1;
+            }
+        }
+        assert!(
+            decreasing_count >= sigmas.len() - 2,
+            "Beta sigmas should be mostly decreasing"
+        );
+    }
+
+    #[test]
+    fn test_karras_schedule_integration() {
+        let config = SchedulerConfig {
+            num_inference_steps: 8,
+            sigma_schedule: Some("karras".to_string()),
+            use_dynamic_shifting: false,
+            ..Default::default()
+        };
+        let scheduler = RectifiedFlowScheduler::new(config);
+        let sigmas = scheduler.sigmas();
+
+        assert_eq!(sigmas.len(), 9); // 8 steps + terminal 0
+        // Terminal should be 0
+        assert!((sigmas[8]).abs() < 1e-6);
     }
 }

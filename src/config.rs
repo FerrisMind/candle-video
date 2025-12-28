@@ -116,6 +116,12 @@ pub struct SchedulerConfig {
     pub guidance_scale: f64,
     /// Timestep spacing type: "linspace" or "linear_quadratic"
     pub timestep_spacing: String,
+    /// Sigma schedule strategy: "linspace" (default), "karras", "exponential", "beta"
+    /// - karras: Better quality at low step counts (8-10 steps)
+    /// - exponential: More fine-grained control at low noise levels
+    /// - beta: Flexible distribution via alpha/beta parameters
+    #[serde(default)]
+    pub sigma_schedule: Option<String>,
     /// Shift value for timestep schedule (None = no shift, 1.0 = identity)
     #[serde(default)]
     pub shift: Option<f64>,
@@ -155,6 +161,7 @@ impl Default for SchedulerConfig {
             num_train_timesteps: 1000,
             guidance_scale: 3.0,
             timestep_spacing: "linspace".to_string(),
+            sigma_schedule: None, // None = use timestep_spacing directly
             shift: None,
             use_dynamic_shifting: true, // Enable dynamic shifting by default
             base_shift: 0.95,

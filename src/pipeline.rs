@@ -46,6 +46,7 @@ use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use candle_nn::VarBuilder;
 use image::{DynamicImage, imageops::FilterType};
 use std::path::Path;
+use tracing::{debug, info, info_span, instrument};
 
 // =============================================================================
 // Latent Manipulation Utilities
@@ -1024,11 +1025,18 @@ impl TextToVideoPipeline {
     ///
     /// # Note
     /// Currently uses mock operations. Full implementation requires loaded DiT and VAE models.
+    #[instrument(skip(self, text_embeddings, config), fields(
+        width = config.width,
+        height = config.height,
+        frames = config.num_frames,
+        steps = config.num_inference_steps
+    ))]
     pub fn generate(
         &mut self,
         text_embeddings: &Tensor,
         config: &InferenceConfig,
     ) -> Result<Tensor> {
+        info!("Starting video generation (no CFG)");
         let dtype = text_embeddings.dtype();
 
         let (lat_t, lat_h, lat_w) = self.compute_latent_dims(config);
@@ -1052,8 +1060,12 @@ impl TextToVideoPipeline {
         )?;
 
         let num_steps = self.scheduler.num_steps();
+        let _denoising_span = info_span!("denoising_loop", total_steps = num_steps).entered();
+
         for step_idx in 0..num_steps {
             let timestep = self.scheduler.timesteps()[step_idx];
+            debug!(step = step_idx, sigma = timestep, "Denoising step");
+
             let timestep_tensor = Tensor::new(&[timestep as f32], &self.device)?.to_dtype(dtype)?;
 
             let velocity = self.require_dit()?.forward(
@@ -1069,6 +1081,8 @@ impl TextToVideoPipeline {
 
             latents = self.scheduler.step(&velocity, &latents, step_idx)?;
         }
+
+        info!("Denoising complete, decoding latents");
 
         let latents = self.denormalize_latents(&latents)?;
         let decode_timestep = if self.vae_config.timestep_conditioning {
@@ -1087,12 +1101,20 @@ impl TextToVideoPipeline {
     /// * `positive_embeddings` - Positive (conditional) text embeddings
     /// * `negative_embeddings` - Negative (unconditional) text embeddings
     /// * `config` - Inference configuration
+    #[instrument(skip(self, positive_embeddings, negative_embeddings, config), fields(
+        width = config.width,
+        height = config.height,
+        frames = config.num_frames,
+        steps = config.num_inference_steps,
+        guidance_scale = self.scheduler.guidance_scale()
+    ))]
     pub fn generate_with_cfg(
         &mut self,
         positive_embeddings: &Tensor,
         negative_embeddings: &Tensor,
         config: &InferenceConfig,
     ) -> Result<Tensor> {
+        info!("Starting video generation with CFG");
         let dtype = positive_embeddings.dtype();
 
         let (lat_t, lat_h, lat_w) = self.compute_latent_dims(config);
@@ -1118,8 +1140,17 @@ impl TextToVideoPipeline {
         let cfg_embeddings =
             self.prepare_cfg_embeddings(positive_embeddings, negative_embeddings)?;
         let num_steps = self.scheduler.num_steps();
+        let _denoising_span = info_span!("denoising_loop_cfg", total_steps = num_steps).entered();
+
         for step_idx in 0..num_steps {
             let timestep = self.scheduler.timesteps()[step_idx];
+            debug!(
+                step = step_idx,
+                sigma = timestep,
+                progress_pct = (step_idx as f32 / num_steps as f32) * 100.0,
+                "CFG denoising step"
+            );
+
             let timestep_tensor = self.create_timestep_tensor(timestep, 2)?.to_dtype(dtype)?;
 
             let cfg_latents = self.duplicate_for_cfg(&latents)?;
@@ -1137,6 +1168,8 @@ impl TextToVideoPipeline {
             let guided_velocity = self.apply_cfg(&velocity)?;
             latents = self.scheduler.step(&guided_velocity, &latents, step_idx)?;
         }
+
+        info!("Denoising complete, decoding latents");
 
         let latents = self.denormalize_latents(&latents)?;
         let decode_timestep = if self.vae_config.timestep_conditioning {
