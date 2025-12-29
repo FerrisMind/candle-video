@@ -124,6 +124,10 @@ struct Args {
     /// Enable mock mode (for testing without loading models)
     #[arg(long)]
     mock: bool,
+
+    /// Save denormalized latents before VAE decode (for debugging)
+    #[arg(long)]
+    save_latents: bool,
 }
 
 /// Main entry point for LTX-Video generation
@@ -346,7 +350,23 @@ fn run_full_generation(
 
     let video = match args.mode {
         Mode::T2v => {
-            if !args.negative_prompt.is_empty() || args.guidance_scale > 1.0 {
+            if args.save_latents {
+                // Generate latents only (for debugging)
+                info!("Generating latents (--save-latents mode)...");
+                let latents = pipeline.generate_latents_with_cfg(&text_emb, &neg_emb, config)?;
+
+                // Save latents to binary file
+                let latents_path = args.output.join("latents.bin");
+                save_latents_bin(&latents, &latents_path)?;
+                info!("Latents saved to {:?}", latents_path);
+                info!(
+                    "To test with diffusers VAE: python scripts/test_rust_latents_with_diffusers_vae.py {:?}",
+                    latents_path
+                );
+
+                // Then decode with our VAE
+                pipeline.decode_latents(&latents)?
+            } else if !args.negative_prompt.is_empty() || args.guidance_scale > 1.0 {
                 pipeline.generate_with_cfg(&text_emb, &neg_emb, config)?
             } else {
                 pipeline.generate(&text_emb, config)?
@@ -599,5 +619,30 @@ fn save_video_frames(video: &Tensor, output_dir: &PathBuf) -> Result<()> {
         output_dir
     );
 
+    Ok(())
+}
+
+/// Save latents to binary format for debugging with Python/diffusers
+fn save_latents_bin(latents: &Tensor, path: &std::path::Path) -> Result<()> {
+    use std::io::Write;
+
+    let latents = latents.to_dtype(DType::F32)?;
+    let shape = latents.dims();
+    let data: Vec<f32> = latents.flatten_all()?.to_vec1()?;
+
+    let mut file = std::fs::File::create(path)?;
+
+    // Write header: ndims (u64), then each dimension (u64)
+    file.write_all(&(shape.len() as u64).to_le_bytes())?;
+    for &dim in shape {
+        file.write_all(&(dim as u64).to_le_bytes())?;
+    }
+
+    // Write data as f32
+    for val in data {
+        file.write_all(&val.to_le_bytes())?;
+    }
+
+    info!("Saved latents shape {:?} to {:?}", shape, path);
     Ok(())
 }

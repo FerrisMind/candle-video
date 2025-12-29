@@ -72,8 +72,8 @@ tramp
 # =============================================================================
 # ML Models & Large Files
 # =============================================================================
-# LTX-Video model weights (large files)
-/ltxv-2b-0.9.8-distilled/
+# Model weights (large files)
+/models/
 *.safetensors
 *.bin
 !Cargo.lock

@@ -113,35 +113,6 @@ impl FeedForward {
 }
 
 // ===========================================================================
-// RMS Norm
-// ===========================================================================
-
-/// Root Mean Square Layer Normalization
-pub struct RMSNorm {
-    weight: Tensor,
-    eps: f64,
-}
-
-impl RMSNorm {
-    pub fn new(vb: VarBuilder, dim: usize, eps: f64) -> Result<Self> {
-        // Load weight from file (should be BF16 natively) - no F32 fallback
-        let weight = vb.get(dim, "weight")?;
-        Ok(Self { weight, eps })
-    }
-
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Compute RMS normalization natively in input dtype (BF16)
-        let variance = x.sqr()?.mean_keepdim(D::Minus1)?;
-        // Use affine_add to add eps while preserving dtype (BF16)
-        let var_eps = variance.affine(1.0, self.eps)?;
-        let x_normed = x.broadcast_div(&var_eps.sqrt()?)?;
-        // Force weight to match x_normed dtype
-        let weight = self.weight.to_dtype(x_normed.dtype())?;
-        x_normed.broadcast_mul(&weight)
-    }
-}
-
-// ===========================================================================
 // RMS Norm (No Weight) - for elementwise_affine=False
 // ===========================================================================
 
@@ -157,11 +128,21 @@ impl RMSNormNoWeight {
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Compute RMS normalization natively in input dtype (BF16)
-        let variance = x.sqr()?.mean_keepdim(D::Minus1)?;
-        // Use affine to add eps while preserving dtype (BF16)
-        let var_eps = variance.affine(1.0, self.eps)?;
-        x.broadcast_div(&var_eps.sqrt()?)
+        let input_dtype = x.dtype();
+
+        // Compute in F32 for precision (matching diffusers)
+        let internal_dtype = match input_dtype {
+            DType::F16 | DType::BF16 => DType::F32,
+            d => d,
+        };
+
+        let x_f32 = x.to_dtype(internal_dtype)?;
+        let hidden_size = x.dim(D::Minus1)?;
+        let variance = (x_f32.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+        let x_normed = x_f32.broadcast_div(&(variance + self.eps)?.sqrt()?)?;
+
+        // Convert back to input dtype
+        x_normed.to_dtype(input_dtype)
     }
 }
 
@@ -169,10 +150,10 @@ impl RMSNormNoWeight {
 // QK Normalization
 // ===========================================================================
 
-/// Query-Key normalization (either LayerNorm or RMSNorm)
+/// Query-Key normalization using LayerNorm
+/// For rms_norm: uses LayerNorm::rms_norm() which is pure tensor ops (no CUDA CustomOp)
 pub enum QKNorm {
     LayerNorm(LayerNorm),
-    RMSNorm(RMSNorm),
     Identity,
 }
 
@@ -184,8 +165,11 @@ impl QKNorm {
                 Ok(Self::LayerNorm(ln))
             }
             Some("rms_norm") => {
-                let rms = RMSNorm::new(vb, dim, 1e-5)?;
-                Ok(Self::RMSNorm(rms))
+                // Use LayerNorm::rms_norm() which is pure tensor ops
+                // This avoids the CUDA CustomOp issue (no cuda implementation for rms-norm)
+                let weight = vb.get(dim, "weight")?;
+                let ln = LayerNorm::rms_norm(weight, 1e-5);
+                Ok(Self::LayerNorm(ln))
             }
             _ => Ok(Self::Identity),
         }
@@ -194,7 +178,6 @@ impl QKNorm {
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         match self {
             Self::LayerNorm(ln) => ln.forward(x),
-            Self::RMSNorm(rms) => rms.forward(x),
             Self::Identity => Ok(x.clone()),
         }
     }
@@ -264,12 +247,11 @@ impl Attention {
             memory_config: MemoryEfficientConfig::balanced(),
         })
     }
-    
+
     /// Set memory efficiency configuration
     pub fn set_memory_config(&mut self, config: MemoryEfficientConfig) {
         self.memory_config = config;
     }
-
 
     /// Apply rotary position embedding (multi-head format: batch, heads, seq, head_dim)
     #[allow(dead_code)]

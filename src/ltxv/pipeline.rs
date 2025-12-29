@@ -801,11 +801,16 @@ impl TextToVideoPipeline {
 
     /// Create timestep tensor for batch
     ///
+    /// Diffusers LTX-Video uses timesteps scaled by 1000 (i.e., [0, 1000] range).
+    /// Our scheduler returns sigmas in [0, 1] range, so we scale here.
+    ///
     /// # Arguments
-    /// * `timestep` - Timestep value
+    /// * `timestep` - Timestep value (sigma from scheduler, 0.0 to 1.0)
     /// * `batch_size` - Number of samples in batch
     pub fn create_timestep_tensor(&self, timestep: f64, batch_size: usize) -> Result<Tensor> {
-        let timesteps = vec![timestep as f32; batch_size];
+        // Scale timestep from [0, 1] to [0, 1000] as expected by DiT embeddings
+        let scaled_timestep = (timestep * 1000.0) as f32;
+        let timesteps = vec![scaled_timestep; batch_size];
         Tensor::from_vec(timesteps, (batch_size,), &self.device)
     }
 
@@ -1084,6 +1089,7 @@ impl TextToVideoPipeline {
 
         info!("Denoising complete, decoding latents");
 
+        // DiT returns 5D latents [B, C, T, H, W] - no unpack needed
         let latents = self.denormalize_latents(&latents)?;
         let decode_timestep = if self.vae_config.timestep_conditioning {
             Some(0.05)
@@ -1171,6 +1177,7 @@ impl TextToVideoPipeline {
 
         info!("Denoising complete, decoding latents");
 
+        // DiT returns 5D latents [B, C, T, H, W] - no unpack needed
         let latents = self.denormalize_latents(&latents)?;
         let decode_timestep = if self.vae_config.timestep_conditioning {
             Some(0.05)
@@ -1180,6 +1187,107 @@ impl TextToVideoPipeline {
 
         self.require_vae_decoder()?
             .decode(&latents, decode_timestep)
+    }
+
+    /// Generate denormalized latents (without VAE decoding)
+    ///
+    /// Use this for debugging to get latents that can be decoded by external VAE.
+    /// Returns latents in shape [B, C, T, H, W] ready for VAE decode.
+    pub fn generate_latents_with_cfg(
+        &mut self,
+        positive_embeddings: &Tensor,
+        negative_embeddings: &Tensor,
+        config: &InferenceConfig,
+    ) -> Result<Tensor> {
+        let dtype = positive_embeddings.dtype();
+
+        let (lat_t, lat_h, lat_w) = self.compute_latent_dims(config);
+        let mut latents = self.initialize_noise(config)?.to_dtype(dtype)?;
+
+        let sample_shape = (1, self.vae_config.latent_channels, lat_t, lat_h, lat_w);
+        self.scheduler.set_timesteps_with_shape(
+            self.scheduler.num_steps(),
+            Some(sample_shape),
+            None,
+            None,
+        )?;
+
+        let indices_grid = crate::rope::generate_indices_grid_diffusers(
+            1,
+            lat_t,
+            lat_h,
+            lat_w,
+            config.frame_rate,
+            &self.device,
+        )?;
+
+        let cfg_embeddings =
+            self.prepare_cfg_embeddings(positive_embeddings, negative_embeddings)?;
+        let num_steps = self.scheduler.num_steps();
+
+        for step_idx in 0..num_steps {
+            let timestep = self.scheduler.timesteps()[step_idx];
+
+            // Debug logging for first and last step
+            if step_idx == 0 || step_idx == num_steps - 1 {
+                let flat = latents.flatten_all()?.to_dtype(candle_core::DType::F32)?;
+                let min_val: f32 = flat.min(0)?.to_scalar()?;
+                let max_val: f32 = flat.max(0)?.to_scalar()?;
+                info!(
+                    step = step_idx,
+                    timestep = timestep,
+                    latents_min = min_val,
+                    latents_max = max_val,
+                    "Denoising step debug"
+                );
+            }
+
+            let timestep_tensor = self.create_timestep_tensor(timestep, 2)?.to_dtype(dtype)?;
+
+            let cfg_latents = self.duplicate_for_cfg(&latents)?;
+            let velocity = self.require_dit()?.forward(
+                &cfg_latents,
+                &indices_grid,
+                Some(&cfg_embeddings),
+                &timestep_tensor,
+                None,
+                None,
+                None,
+                None,
+            )?;
+
+            // Debug velocity range
+            if step_idx == 0 || step_idx == num_steps - 1 {
+                let flat = velocity.flatten_all()?.to_dtype(candle_core::DType::F32)?;
+                let min_val: f32 = flat.min(0)?.to_scalar()?;
+                let max_val: f32 = flat.max(0)?.to_scalar()?;
+                info!(
+                    step = step_idx,
+                    velocity_min = min_val,
+                    velocity_max = max_val,
+                    "Velocity debug"
+                );
+            }
+
+            let guided_velocity = self.apply_cfg(&velocity)?;
+            latents = self.scheduler.step(&guided_velocity, &latents, step_idx)?;
+        }
+
+        // Return denormalized latents (ready for VAE decode)
+        self.denormalize_latents(&latents)
+    }
+
+    /// Decode pre-computed latents with VAE
+    ///
+    /// Use for debugging after generate_latents_with_cfg.
+    pub fn decode_latents(&self, latents: &Tensor) -> Result<Tensor> {
+        let decode_timestep = if self.vae_config.timestep_conditioning {
+            Some(0.05)
+        } else {
+            None
+        };
+
+        self.require_vae_decoder()?.decode(latents, decode_timestep)
     }
 
     // =========================================================================

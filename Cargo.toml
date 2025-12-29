@@ -7,12 +7,16 @@ description = "LTX-Video integration for Candle framework"
 license = "Apache-2.0"
 repository = "https://github.com/FerrisMind/candle-video"
 
+[lib]
+name = "candle_video"
+path = "src/lib.rs"
+
 [dependencies]
-# Use git for all candle dependencies to ensure type compatibility with flash-attn
-candle-core = { git = "https://github.com/huggingface/candle", tag = "0.9.2-alpha.2", features = ["cuda"] }
-candle-nn = { git = "https://github.com/huggingface/candle", tag = "0.9.2-alpha.2" }
-candle-transformers = { git = "https://github.com/huggingface/candle", tag = "0.9.2-alpha.2" }
-candle-flash-attn = { git = "https://github.com/huggingface/candle", tag = "0.9.2-alpha.2", optional = true }
+# Use git for all candle dependencies from latest main branch
+candle-core = { version = "0.9.2-alpha.2", features = ["cuda"] }
+candle-nn = { version = "0.9.2-alpha.2", features = ["cuda"] }
+candle-transformers = { version = "0.9.2-alpha.2" }
+candle-flash-attn = { version = "0.9.2-alpha.2", optional = true }
 safetensors = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -53,6 +57,18 @@ path = "src/bin/ltx_video.rs"
 [[bin]]
 name = "check-t5-shapes"
 path = "src/bin/check_t5_shapes.rs"
+
+[[bin]]
+name = "vae-test"
+path = "src/bin/vae_test.rs"
+
+[[bin]]
+name = "debug-rope"
+path = "src/bin/debug_rope.rs"
+
+[[bin]]
+name = "export-embeddings"
+path = "src/bin/export_embeddings.rs"
 
 [[test]]
 name = "integration"
