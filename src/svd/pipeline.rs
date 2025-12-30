@@ -301,24 +301,24 @@ impl SvdPipeline {
             debug!(noise_pred_shape = ?noise_pred.dims(), "Before scheduler step");
             
             // Debug: print tensor statistics to identify where values become zero
-            if let Ok(np_f32) = noise_pred.to_dtype(candle_core::DType::F32) {
-                if let Ok(flat) = np_f32.flatten_all() {
-                    let min = flat.min(0).ok().and_then(|t| t.to_scalar::<f32>().ok());
-                    let max = flat.max(0).ok().and_then(|t| t.to_scalar::<f32>().ok());
-                    println!("    noise_pred: min={:?}, max={:?}", min, max);
-                }
+            if let Ok(np_f32) = noise_pred.to_dtype(candle_core::DType::F32)
+                && let Ok(flat) = np_f32.flatten_all()
+            {
+                let min = flat.min(0).ok().and_then(|t| t.to_scalar::<f32>().ok());
+                let max = flat.max(0).ok().and_then(|t| t.to_scalar::<f32>().ok());
+                println!("    noise_pred: min={:?}, max={:?}", min, max);
             }
             
             let output = self.scheduler.step(&noise_pred, i, &latents)?;
             latents = output.prev_sample;
             
             // Debug: latents after scheduler step
-            if let Ok(lat_f32) = latents.to_dtype(candle_core::DType::F32) {
-                if let Ok(flat) = lat_f32.flatten_all() {
-                    let min = flat.min(0).ok().and_then(|t| t.to_scalar::<f32>().ok());
-                    let max = flat.max(0).ok().and_then(|t| t.to_scalar::<f32>().ok());
-                    println!("    latents: min={:?}, max={:?}", min, max);
-                }
+            if let Ok(lat_f32) = latents.to_dtype(candle_core::DType::F32)
+                && let Ok(flat) = lat_f32.flatten_all()
+            {
+                let min = flat.min(0).ok().and_then(|t| t.to_scalar::<f32>().ok());
+                let max = flat.max(0).ok().and_then(|t| t.to_scalar::<f32>().ok());
+                println!("    latents: min={:?}, max={:?}", min, max);
             }
         }
 

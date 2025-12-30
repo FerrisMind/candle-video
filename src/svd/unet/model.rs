@@ -13,17 +13,16 @@ use crate::svd::config::SvdUnetConfig;
 
 /// Debug helper: check tensor for NaN/Inf and print if found
 fn debug_check_tensor(name: &str, tensor: &Tensor) {
-    if std::env::var("DEBUG_UNET").is_ok() {
-        if let Ok(f32_tensor) = tensor.to_dtype(DType::F32) {
-            if let Ok(flat) = f32_tensor.flatten_all() {
-                let has_nan = flat.to_vec1::<f32>().map(|v| v.iter().any(|x| x.is_nan())).unwrap_or(false);
-                let has_inf = flat.to_vec1::<f32>().map(|v| v.iter().any(|x| x.is_infinite())).unwrap_or(false);
-                let min = flat.min(0).ok().and_then(|t| t.to_scalar::<f32>().ok());
-                let max = flat.max(0).ok().and_then(|t| t.to_scalar::<f32>().ok());
-                if has_nan || has_inf {
-                    println!("    [UNET] {} has NaN={}, Inf={}, min={:?}, max={:?}", name, has_nan, has_inf, min, max);
-                }
-            }
+    if std::env::var("DEBUG_UNET").is_ok()
+        && let Ok(f32_tensor) = tensor.to_dtype(DType::F32)
+        && let Ok(flat) = f32_tensor.flatten_all()
+    {
+        let has_nan = flat.to_vec1::<f32>().map(|v| v.iter().any(|x| x.is_nan())).unwrap_or(false);
+        let has_inf = flat.to_vec1::<f32>().map(|v| v.iter().any(|x| x.is_infinite())).unwrap_or(false);
+        let min = flat.min(0).ok().and_then(|t| t.to_scalar::<f32>().ok());
+        let max = flat.max(0).ok().and_then(|t| t.to_scalar::<f32>().ok());
+        if has_nan || has_inf {
+            println!("    [UNET] {} has NaN={}, Inf={}, min={:?}, max={:?}", name, has_nan, has_inf, min, max);
         }
     }
 }
