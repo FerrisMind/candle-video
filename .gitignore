@@ -92,6 +92,9 @@ tramp
 /output/
 /scripts/output/
 
+# Prebuilt build logs (may contain sensitive env vars)
+prebuilt/*/output
+
 # Debug data
 *.npy
 *.npz
