@@ -114,15 +114,16 @@ impl Attention {
             let end = std::cmp::min(i + chunk_size, seq_len);
             let q_chunk = q.narrow(2, i, end - i)?; // [B, H, Chunk, D]
 
-            // attn = (q_chunk @ k.t) * scale
-            // Perform softmax in F32 for stability
-            let attn_weights = (q_chunk.matmul(&k)? * self.scale)?;
-            let attn_weights = attn_weights.to_dtype(DType::F32)?;
+            // Compute attention in F32 for numerical stability in FP16 mode
+            // Cast Q and K to F32 before matmul to prevent overflow
+            let q_f32 = q_chunk.to_dtype(DType::F32)?;
+            let k_f32 = k.to_dtype(DType::F32)?;
+            let attn_weights = (q_f32.matmul(&k_f32)? * self.scale)?;
             let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
-            let attn_weights = attn_weights.to_dtype(q.dtype())?;
-
-            // out = attn @ v
-            let out_chunk = attn_weights.matmul(&v)?;
+            
+            // Cast V to F32 for matmul, then back to original dtype
+            let v_f32 = v.to_dtype(DType::F32)?;
+            let out_chunk = attn_weights.matmul(&v_f32)?.to_dtype(q.dtype())?;
             chunks.push(out_chunk);
         }
 
@@ -237,35 +238,26 @@ impl TemporalBasicTransformerBlock {
     pub fn forward(
         &self,
         hidden_states: &Tensor,
-        encoder_hidden_states: Option<&Tensor>,
+        encoder_hidden_states: Option<&Tensor>,  // [B*S, seq_len, D] where S=H*W
         num_frames: usize,
     ) -> Result<Tensor> {
         let (batch_frames, seq_len, dim) = hidden_states.dims3()?;
         let batch_size = batch_frames / num_frames;
 
-        // Reshape for temporal: [B*S, T, C]
+        // Reshape for temporal: [B*F, S, C] -> [B*S, F, C]
+        // where F = num_frames, S = seq_len (H*W)
         let h = hidden_states
             .reshape((batch_size, num_frames, seq_len, dim))?
-            .permute((0, 2, 1, 3))?
-            .reshape((batch_size * seq_len, num_frames, dim))?;
+            .permute((0, 2, 1, 3))?  // [B, S, F, C]
+            .reshape((batch_size * seq_len, num_frames, dim))?;  // [B*S, F, C]
 
-        // Also reshape encoder_hidden_states if present: [B*T, 1, D] -> [B*S, T, D] (repeated)
-        let encoder_hs_temporal = encoder_hidden_states.map(|ehs| {
-            // ehs: [B*T, 1, D] -> reshape to [B, T, D] -> repeat for S -> [B*S, T, D]
-            let d = ehs.dim(2).unwrap();
-            ehs.reshape((batch_size, num_frames, d))
-                .unwrap()
-                .unsqueeze(1)
-                .unwrap() // [B, 1, T, D]
-                .repeat((1, seq_len, 1, 1))
-                .unwrap() // [B, S, T, D]
-                .reshape((batch_size * seq_len, num_frames, d))
-                .unwrap()
-        });
+        // encoder_hidden_states is already [B*S, enc_seq_len, D] from parent transformer
+        // It will be used for cross-attention where Q has seq_len=num_frames, K/V have seq_len=enc_seq_len
 
-        // FF_in
+        // FF_in with residual connection
         let residual = &h;
         let h = self.ff_in.forward(&self.norm_in.forward(&h)?)?;
+        // is_res = True in diffusers (dim == time_mix_inner_dim for SVD)
         let h = (h + residual)?;
 
         // Self-attention
@@ -273,21 +265,22 @@ impl TemporalBasicTransformerBlock {
         let h = self.attn1.forward(&self.norm1.forward(&h)?, None)?;
         let h = (h + residual)?;
 
-        // Cross-attention
+        // Cross-attention (with encoder_hidden_states as context)
         let residual = &h;
         let h = self
             .attn2
-            .forward(&self.norm2.forward(&h)?, encoder_hs_temporal.as_ref())?;
+            .forward(&self.norm2.forward(&h)?, encoder_hidden_states)?;
         let h = (h + residual)?;
 
-        // FF
+        // FF with residual
         let residual = &h;
         let h = self.ff.forward(&self.norm3.forward(&h)?)?;
+        // is_res = True in diffusers
         let h = (h + residual)?;
 
-        // Reshape back: [B*T, S, C]
+        // Reshape back: [B*S, F, C] -> [B*F, S, C]
         h.reshape((batch_size, seq_len, num_frames, dim))?
-            .permute((0, 2, 1, 3))?
+            .permute((0, 2, 1, 3))?  // [B, F, S, C]
             .reshape((batch_frames, seq_len, dim))
     }
 }
@@ -405,6 +398,28 @@ impl TransformerSpatioTemporalModel {
         let batch_size = batch_frames / num_frames;
         let residual = hidden_states;
 
+        // Prepare time_context for temporal cross-attention from encoder_hidden_states
+        // diffusers: takes first frame's encoder states, broadcasts it to all H*W positions
+        let time_context = encoder_hidden_states.map(|ehs| {
+            // ehs: [B*T, 1, D] -> reshape to [B, T, 1, D] -> take first frame [:, 0] -> [B, 1, D]
+            let d = ehs.dim(2).unwrap();
+            let first_frame_ehs = ehs
+                .reshape((batch_size, num_frames, 1, d))
+                .unwrap()
+                .narrow(1, 0, 1)  // Take first frame
+                .unwrap()
+                .squeeze(1)  // [B, 1, D]
+                .unwrap();
+            // Broadcast to [B, H*W, 1, D] -> reshape to [B*H*W, 1, D]
+            first_frame_ehs
+                .unsqueeze(1)  // [B, 1, 1, D]
+                .unwrap()
+                .repeat((1, h * w, 1, 1))  // [B, H*W, 1, D]
+                .unwrap()
+                .reshape((batch_size * h * w, 1, d))  // [B*H*W, 1, D]
+                .unwrap()
+        });
+
         // Normalize and reshape to sequence
         let hidden_states = self
             .norm
@@ -414,34 +429,36 @@ impl TransformerSpatioTemporalModel {
 
         let mut hidden_states = self.proj_in.forward(&hidden_states)?;
 
-        // Create time position embedding - [B*T, in_channels]
-        // Use sinusoidal embedding instead of repeating scalars
-        let time_indices = Tensor::arange(0f32, num_frames as f32, hidden_states.device())?
+        // Create time position embedding for each frame
+        // diffusers: time_proj(arange(num_frames)) -> [T, C] in F32, then cast to hidden_states dtype
+        let num_frames_emb = Tensor::arange(0f32, num_frames as f32, hidden_states.device())?
+            .repeat(batch_size)?  // [B*T]
+            .reshape((batch_size * num_frames,))?;
+        
+        // get_timestep_embedding always returns F32, cast to match hidden_states
+        let t_emb = get_timestep_embedding(&num_frames_emb, self.in_channels)?
             .to_dtype(hidden_states.dtype())?;
 
-        // get_timestep_embedding returns [T, C]
-        let time_emb = get_timestep_embedding(&time_indices, self.in_channels)?;
-
-        let time_emb = time_emb
-            .unsqueeze(0)? // [1, T, C]
-            .repeat((batch_size, 1, 1))? // [B, T, C]
-            .reshape((batch_size * num_frames, self.in_channels))?; // [B*T, C]
-
-        let time_context = self.time_pos_embed.forward(&time_emb)?; // [B*T, in_channels]
-
-        // Reshape for spatial broadcast: [B*T, 1, C] -> broadcast with [B*T, H*W, C]
-        let time_context = time_context.unsqueeze(1)?; // [B*T, 1, C]
-        hidden_states = hidden_states.broadcast_add(&time_context)?;
+        let emb = self.time_pos_embed.forward(&t_emb)?;  // [B*T, C]
+        let emb = emb.unsqueeze(1)?;  // [B*T, 1, C] for broadcast
 
         // Apply transformer blocks with mixing
+        // diffusers order: spatial -> add emb -> temporal -> time_mixer
         for (spatial_block, temporal_block) in self
             .transformer_blocks
             .iter()
             .zip(&self.temporal_transformer_blocks)
         {
+            // 1. Spatial block
             let h_spatial = spatial_block.forward(&hidden_states, encoder_hidden_states)?;
-            let h_temporal =
-                temporal_block.forward(&hidden_states, encoder_hidden_states, num_frames)?;
+            
+            // 2. Add time position embedding AFTER spatial block
+            let hidden_states_mix = h_spatial.broadcast_add(&emb)?;
+            
+            // 3. Temporal block (uses time_context for cross-attention)
+            let h_temporal = temporal_block.forward(&hidden_states_mix, time_context.as_ref(), num_frames)?;
+            
+            // 4. Mix spatial and temporal
             hidden_states = self.time_mixer.forward(&h_spatial, &h_temporal)?;
         }
 

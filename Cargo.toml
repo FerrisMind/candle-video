@@ -70,6 +70,10 @@ path = "src/bin/debug_rope.rs"
 name = "export-embeddings"
 path = "src/bin/export_embeddings.rs"
 
+[[bin]]
+name = "svd"
+path = "src/bin/svd.rs"
+
 [[test]]
 name = "integration"
 path = "tests/integration.rs"

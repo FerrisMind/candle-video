@@ -114,7 +114,9 @@ impl SvdPipeline {
         // 1. Encode input image with CLIP (requires 224x224)
         // Use bilinear for smoother interpolation (diffusers uses antialiased resize)
         let clip_image = image.interpolate2d(224, 224)?;
-        let image_normalized = normalize_for_clip(&clip_image, &self.device)?;
+        // Input image is in [-1, 1], but CLIP expects [0, 1] for normalization
+        let clip_image_01 = ((clip_image + 1.0)? / 2.0)?;
+        let image_normalized = normalize_for_clip(&clip_image_01, &self.device)?;
         let image_embeddings = self.image_encoder.forward(&image_normalized)?;
         // NOTE on shape convention:
         // Diffusers uses [B, 1, D] at API level and expands internally in UNet.
