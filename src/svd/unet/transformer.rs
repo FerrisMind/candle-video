@@ -94,24 +94,40 @@ impl Attention {
             .reshape((batch, seq_len, self.heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;  // [B, H, S_q, D]
-        let k = k
+        
+        // Prepare K^T and V once (not per chunk!)
+        let k_t = k
             .reshape((batch, (), self.heads, self.head_dim))?
             .transpose(1, 2)?
-            .contiguous()?;  // [B, H, S_k, D]
+            .transpose(2, 3)?  // [B, H, D, S_k] - transposed for matmul
+            .contiguous()?;
         let v = v
             .reshape((batch, (), self.heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;  // [B, H, S_k, D]
 
-        // Attention: Q @ K^T * scale -> softmax -> @ V
-        // Single matmul like diffusers (no chunking for speed)
-        let attn_scores = (q.matmul(&k.transpose(2, 3)?)? * self.scale)?;
-        
-        // upcast_softmax: softmax in F32 for numerical stability
-        let attn_probs = candle_nn::ops::softmax_last_dim(&attn_scores.to_dtype(DType::F32)?)?
-            .to_dtype(attn_scores.dtype())?;
+        // Chunked attention to fit in memory
+        // chunk_size=64 is good balance for A100 and RTX 3060
+        let chunk_size = 64;
+        let mut chunks = Vec::new();
 
-        let out = attn_probs.matmul(&v)?;
+        for i in (0..seq_len).step_by(chunk_size) {
+            let end = std::cmp::min(i + chunk_size, seq_len);
+            let q_chunk = q.narrow(2, i, end - i)?; // [B, H, Chunk, D]
+
+            // Attention scores: Q_chunk @ K^T * scale
+            let attn_scores = (q_chunk.matmul(&k_t)? * self.scale)?;
+            
+            // upcast_softmax: softmax in F32 for numerical stability
+            let attn_probs = candle_nn::ops::softmax_last_dim(&attn_scores.to_dtype(DType::F32)?)?
+                .to_dtype(attn_scores.dtype())?;
+
+            // Output: attn_probs @ V
+            let out_chunk = attn_probs.matmul(&v)?;
+            chunks.push(out_chunk);
+        }
+
+        let out = Tensor::cat(&chunks, 2)?; // [B, H, S, D]
 
         // Reshape back: [B, H, S, D] -> [B, S, H*D]
         let out = out
