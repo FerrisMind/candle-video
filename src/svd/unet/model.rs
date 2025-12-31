@@ -1,4 +1,3 @@
-
 //! UNet Spatio-Temporal Condition Model for SVD
 //!
 //! Main UNet architecture for Stable Video Diffusion.

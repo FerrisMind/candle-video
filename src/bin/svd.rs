@@ -154,18 +154,15 @@ fn main() -> Result<()> {
     let prefer_fp16 = true;
     let (paths, is_fp16) = find_model_paths(model_dir, prefer_fp16)?;
 
-    // Force F32 for numerical stability - FP16 causes NaN/Inf in UNet
-    // attention layers due to overflow with large activations in SVD.
-    // The FP16 weights will be automatically upcast during VarBuilder loading.
-    let dtype = DType::F32;
+    // Use FP16 for inference - matching diffusers behavior
+    // Numerical stability is handled by:
+    // - upcast_softmax in attention layers
+    // - F32 upcast in scheduler step
+    let dtype = if is_fp16 { DType::F16 } else { DType::F32 };
     println!(
         "Dtype: {:?} (weights are {})",
         dtype,
-        if is_fp16 {
-            "FP16 -> upcast to F32"
-        } else {
-            "F32"
-        }
+        if is_fp16 { "FP16" } else { "F32" }
     );
 
     println!("  UNet: {}", paths.unet.display());
