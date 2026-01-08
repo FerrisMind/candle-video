@@ -103,7 +103,7 @@ prebuilt/*/output
 *.png
 *.jpg
 *.jpeg
-*.gif
+# *.gif
 *.mp4
 *.webm
 *.avi
