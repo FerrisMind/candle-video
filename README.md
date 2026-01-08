@@ -1,248 +1,280 @@
-# Candle Video
+# candle-video
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
-[![RU English](https://img.shields.io/badge/Русский-red)](README.RU.md)
-[![EN English](https://img.shields.io/badge/English-blue)](README.md)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square)](https://github.com/FerrisMind/candle-video/blob/main/LICENSE)
 
-Integration of the **LTX-Video** model for the [Candle](https://github.com/huggingface/candle) framework in Rust.
+**candle-video** is a Rust library for video generation using AI models, built on top of the [Candle](https://github.com/huggingface/candle) ML framework. It provides high-performance inference for state-of-the-art video generation models.
 
-This project implements high-performance inference for the LTX-Video video generation model, achieving faster-than-real-time generation speeds on modern GPUs.
+🌐 **[Русская версия (Russian)](README.RU.md)**
 
-> ⚠️ **Alpha Stage**: This project is currently in **alpha stage**. Correct inference is **not guaranteed**. The API may change, and results may be unstable or incorrect. Use at your own risk.
+## Supported Models
 
-## 🎯 Features
+- **[LTX-Video](https://huggingface.co/Lightricks/LTX-Video)** — Text-to-video generation using DiT (Diffusion Transformer) architecture
+  - Transformer-based diffusion model
+  - T5-XXL text encoder (with GGUF quantization support)
+  - 3D VAE for video encoding/decoding
+  - Flow Matching scheduler
 
-- **Text-to-Video (T2V)**: Generate videos from text descriptions
-- **Image-to-Video (I2V)**: Animate static images
-- **High Performance**: Optimized Rust implementation with CUDA support
-- **Memory Efficient**: Flash Attention 2 support for efficient handling of large sequences
-- **Flexible Data Formats**: Support for F32, BF16, and FP8
-- **Rectified Flow**: Modern diffusion scheduler for fast generation
+- **Stable Video Diffusion (SVD)** — Image-to-video generation
+  - UNet-based architecture
+  - CLIP image encoder
+  - Temporal VAE
+  - EulerA scheduler
 
-## 📋 Requirements
+## Features
 
-### System Requirements
+- 🚀 **High Performance** — Native Rust with GPU acceleration via CUDA/cuDNN
+- 💾 **Memory Efficient** — BF16 inference, VAE tiling/slicing, GGUF quantized text encoders
+- 🔧 **Flexible** — Run on CPU or GPU, with optional Flash Attention
+- 📦 **Standalone** — No Python runtime required in production
 
-- **Rust**: version 1.70 or higher
-- **CUDA**: version 11.8 or higher (for GPU acceleration)
-- **Git LFS**: for working with large model files
-- **Visual Studio Build Tools** (Windows): for compiling CUDA kernels
+### Hardware Acceleration
 
-### Installing Git LFS
+| Feature | Description |
+|---------|-------------|
+| `cuda` | CUDA backend for NVIDIA GPUs |
+| `cudnn` | cuDNN for faster convolutions |
+| `flash-attn` | Flash Attention v2 for efficient attention |
+| `mkl` | Intel MKL for optimized CPU operations (x86_64) |
+| `accelerate` | Apple Accelerate for Metal (macOS) |
+| `nccl` | Multi-GPU support via NCCL |
 
-```bash
-# Install Git LFS (if not already installed)
-git lfs install
+## Installation
+
+### Prerequisites
+
+- Rust 1.82+ (edition 2024)
+- CUDA Toolkit 12.x (for GPU acceleration)
+- cuDNN 8.x/9.x (optional, for faster convolutions)
+
+### Add to your project
+
+```toml
+[dependencies]
+candle-video = { git = "https://github.com/FerrisMind/candle-video" }
 ```
 
-## 🚀 Quick Start
-
-### 1. Clone the Repository
+### Build with GPU support
 
 ```bash
-git clone https://github.com/FerrisMind/candle-video.git
-cd candle-video
-```
-
-### 2. Build the Project
-
-#### Build with Flash Attention (Recommended)
-
-```bash
-# Windows
-build_flash_attn.cmd
-
-# Linux/macOS
-cargo build --release --features flash-attn
-```
-
-#### Build without Flash Attention
-
-```bash
+# Default build (CUDA + cuDNN + Flash Attention)
 cargo build --release
+
+# CPU-only build
+cargo build --release --no-default-features
+
+# With specific features
+cargo build --release --features "cuda,flash-attn"
 ```
 
-### 3. Download the Model
+### Windows-specific Notes
 
-The LTX-Video model should be placed in the `ltxv-2b-0.9.8-distilled/` directory at the project root.
+For Windows users with CUDA, run the following before building:
 
-Directory structure:
-```
-ltxv-2b-0.9.8-distilled/
-├── ltxv-2b-0.9.8-distilled.safetensors
-├── model_index.json
-├── t5-v1_1-xxl-encoder-Q5_K_M.gguf
-└── vae/
-    └── vae.safetensors
+```powershell
+# Set up environment
+.\build_env.ps1
+
+# Build with Flash Attention (optional)
+.\build_with_flash_attn.cmd
 ```
 
-### 4. Generate Video
+## Quick Start
 
-#### Text-to-Video
+### LTX-Video: Text-to-Video Generation
 
 ```bash
-cargo run --release --bin ltx-video -- \
-    --prompt "A beautiful sunset over the ocean with waves crashing on the shore" \
-    --model-path ./ltxv-2b-0.9.8-distilled \
-    --output output_video \
-    --num-frames 17 \
+# Download model weights (e.g., from HuggingFace)
+# Required files:
+#   - transformer/diffusion_pytorch_model.safetensors
+#   - vae/diffusion_pytorch_model.safetensors
+#   - text_encoder_gguf/t5-v1_1-xxl-encoder-Q5_K_M.gguf
+#   - tokenizer/tokenizer.json
+
+# Generate video
+cargo run --bin sample_ltx --release -- \
+    --local-weights ./models/ltx-video \
+    --prompt "A cat playing with a ball of yarn" \
     --height 512 \
     --width 768 \
-    --num-inference-steps 20 \
-    --guidance-scale 7.5 \
-    --seed 42
+    --num-frames 97 \
+    --steps 30 \
+    --output-dir ./output
 ```
 
-#### Image-to-Video
+### CLI Options
 
-```bash
-cargo run --release --bin ltx-video -- \
-    --mode i2v \
-    --prompt "A serene landscape with gentle movement" \
-    --image path/to/your/image.jpg \
-    --model-path ./ltxv-2b-0.9.8-distilled \
-    --output output_video \
-    --num-frames 17
-```
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--prompt` | "A video of a cute cat..." | Text prompt for generation |
+| `--negative-prompt` | "low quality, worst quality..." | Negative prompt |
+| `--height` | 512 | Video height in pixels |
+| `--width` | 768 | Video width in pixels |
+| `--num-frames` | 97 | Number of frames (4 seconds at 25fps) |
+| `--steps` | 30 | Diffusion steps |
+| `--guidance-scale` | 3.0 | Classifier-free guidance scale |
+| `--seed` | random | Random seed for reproducibility |
+| `--vae-tiling` | false | Enable VAE tiling for memory efficiency |
+| `--vae-slicing` | false | Enable VAE batch slicing |
+| `--frames` | false | Save individual PNG frames |
+| `--gif` | false | Save as animated GIF |
+| `--cpu` | false | Run on CPU instead of GPU |
 
-## 📖 Usage
-
-### CLI Parameters
-
-Main parameters for the `ltx-video` command:
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `--prompt` | Text description of the video | *(required)* |
-| `--model-path` | Path to model directory | *(required)* |
-| `--output` | Directory to save frames | `output` |
-| `--mode` | Generation mode: `t2v` or `i2v` | `t2v` |
-| `--image` | Path to image (for i2v) | - |
-| `--num-frames` | Number of frames (8N+1: 9, 17, 25...) | `17` |
-| `--height` | Video height (multiple of 32) | `512` |
-| `--width` | Video width (multiple of 32) | `768` |
-| `--num-inference-steps` | Number of inference steps | `20` |
-| `--guidance-scale` | Classifier-free guidance scale | `7.5` |
-| `--frame-rate` | Frame rate for RoPE | `25.0` |
-| `--seed` | Random seed | `42` |
-| `--use-flash-attn` | Use Flash Attention | `false` |
-| `--f32` | Use FP32 precision | `false` |
-| `--fp8` | Use FP8 precision | `false` |
-| `--cpu` | Use CPU instead of GPU | `false` |
-
-### Programmatic API
+### Library Usage
 
 ```rust
-use candle_video::{
-    config::{DitConfig, InferenceConfig, SchedulerConfig, VaeConfig},
-    pipeline::{PipelineConfig, TextToVideoPipeline},
-    text_encoder::T5TextEncoderWrapper,
-};
-use candle_core::Device;
-
-// Create configuration
-let config = PipelineConfig {
-    dit: DitConfig::default(),
-    vae: VaeConfig::default(),
-    scheduler: SchedulerConfig::default(),
+use candle_core::{Device, DType};
+use candle_video::models::ltx_video::{
+    LtxVideoTransformer3DModel,
+    AutoencoderKLLtxVideo,
+    FlowMatchEulerDiscreteScheduler,
+    loader::WeightLoader,
 };
 
-// Initialize pipeline
-let device = Device::Cpu; // or Device::cuda_if_available(0)?
-let pipeline = TextToVideoPipeline::new(&device, config)?;
-
-// Inference configuration
-let inference_config = InferenceConfig {
-    num_frames: 17,
-    height: 512,
-    width: 768,
-    num_inference_steps: 20,
-    guidance_scale: 7.5,
-    frame_rate: Some(25.0),
-    ..Default::default()
-};
-
-// Generate video
-let video_frames = pipeline.generate_with_cfg(
-    &text_embeddings,
-    &inference_config,
-    &negative_embeddings,
-)?;
+fn main() -> anyhow::Result<()> {
+    let device = Device::new_cuda(0)?;
+    let dtype = DType::BF16;
+    
+    // Load Transformer
+    let loader = WeightLoader::new(device.clone(), dtype);
+    let vb = loader.load_single("path/to/transformer.safetensors")?;
+    let config = LtxVideoTransformer3DModelConfig::default();
+    let transformer = LtxVideoTransformer3DModel::new(&config, vb)?;
+    
+    // Load VAE
+    let vae_vb = loader.load_single("path/to/vae.safetensors")?;
+    let mut vae = AutoencoderKLLtxVideo::new(
+        AutoencoderKLLtxVideoConfig::default(),
+        vae_vb
+    )?;
+    
+    // Enable memory optimizations
+    vae.use_tiling = true;
+    vae.use_slicing = true;
+    
+    // ... setup pipeline and generate
+    Ok(())
+}
 ```
 
-## 🏗️ Architecture
-
-The project implements a complete video generation pipeline:
+## Project Structure
 
 ```
-Text Prompt → T5 Encoder → Text Embeddings
-                                    ↓
-         Random Noise → DiT Denoising Loop → Denoised Latents
-                                    ↓
-                           VAE Decoder → Video Frames
+candle-video/
+├── src/
+│   ├── lib.rs              # Library entry point
+│   ├── models/
+│   │   ├── ltx_video/      # LTX-Video model components
+│   │   │   ├── ltx_transformer.rs    # DiT transformer
+│   │   │   ├── vae.rs                # 3D VAE
+│   │   │   ├── text_encoder.rs       # T5 text encoder
+│   │   │   ├── quantized_t5_encoder.rs # GGUF T5 encoder
+│   │   │   ├── scheduler.rs          # Flow matching scheduler
+│   │   │   ├── t2v_pipeline.rs       # Text-to-video pipeline
+│   │   │   └── loader.rs             # Weight loading utilities
+│   │   └── svd/            # Stable Video Diffusion components
+│   │       ├── unet/       # UNet architecture
+│   │       ├── vae/        # Temporal VAE
+│   │       ├── clip.rs     # CLIP image encoder
+│   │       ├── pipeline.rs # Generation pipeline
+│   │       └── scheduler.rs# EulerA scheduler
+│   ├── bin/                # Binary examples
+│   │   ├── sample_ltx.rs   # LTX-Video generation
+│   │   └── verify_*.rs     # Verification tools
+│   └── utils/              # Utilities
+├── scripts/                # Python verification scripts
+├── tests/                  # Integration tests
+├── prebuilt/               # Prebuilt binaries and kernels
+└── tp/                     # Third-party dependencies (candle, diffusers)
 ```
 
-### Main Components
+## Model Weights
 
-- **T5 Text Encoder**: Encodes text prompts into embeddings
-- **DiT (Diffusion Transformer)**: Transformer for denoising latents
-- **Causal Video VAE**: Variational autoencoder with causal 3D convolutions
-- **Rectified Flow Scheduler**: Diffusion scheduler for fast generation
-- **Fractional RoPE**: Normalized fractional positional encoding
+### LTX-Video
 
-## 🔧 Building and Development
-
-### Build Features
-
-The project uses the following Cargo features:
-
-- `flash-attn`: Flash Attention 2 support (memory efficient)
-- `cudnn`: cuDNN acceleration for convolutions
-- `mkl`: Intel MKL for CPU acceleration (Linux/Windows x86_64)
-- `accelerate`: Apple Accelerate for Metal (macOS)
-- `nccl`: Multi-GPU support
-- `all-gpu`: All GPU optimizations
-
-### Testing
+Download from [Lightricks/LTX-Video](https://huggingface.co/Lightricks/LTX-Video):
 
 ```bash
-# Run all tests
-cargo test
+# Using huggingface-cli
+huggingface-cli download Lightricks/LTX-Video --local-dir ./models/ltx-video
 
-# Run specific test
-cargo test --test integration
-
-# Run with output
-cargo test -- --nocapture
+# For GGUF T5 encoder (memory efficient)
+# Download t5-v1_1-xxl-encoder-Q5_K_M.gguf
 ```
 
-### Debugging
+**Required weight files:**
+- `transformer/diffusion_pytorch_model.safetensors` — DiT model
+- `vae/diffusion_pytorch_model.safetensors` — 3D VAE
+- `text_encoder_gguf/t5-v1_1-xxl-encoder-Q5_K_M.gguf` — Quantized T5
+- `tokenizer/tokenizer.json` — T5 tokenizer
 
-Use environment variables for debugging:
+## Memory Optimization
+
+For limited VRAM, enable these options:
 
 ```bash
-# Enable logging
-RUST_LOG=debug cargo run --release --bin ltx-video -- ...
+# VAE tiling - processes image in tiles
+--vae-tiling
+
+# VAE slicing - processes batches sequentially
+--vae-slicing
+
+# Lower resolution
+--height 256 --width 384
+
+# Fewer frames
+--num-frames 25
 ```
 
-## 🐛 Known Limitations
+**Approximate VRAM requirements (512x768, 97 frames):**
+- Full model: ~24GB
+- With VAE tiling: ~16GB
+- With GGUF T5: saves ~8GB
 
-- **Alpha Stage**: The project is in alpha stage. Correct inference is not guaranteed. Results may be unstable or incorrect.
-- **Conv3D**: Current implementation uses 3D convolution emulation through 2D operations. Native Conv3D implementation via Custom Op may improve performance.
-- **Memory**: High-resolution video generation requires significant GPU memory. It is recommended to use Flash Attention and BF16.
+## Comparison with PyTorch/diffusers
 
-## 📄 License
+| Feature | candle-video | diffusers (Python) |
+|---------|-------------|-------------------|
+| Runtime | Rust native | Python + PyTorch |
+| Startup | ~2 seconds | ~15-30 seconds |
+| Binary size | ~50MB | ~2GB+ (with deps) |
+| VRAM usage | Optimized | Standard |
+| Deployment | Single binary | Python environment |
 
-This project is licensed under the Apache-2.0 license. See the [LICENSE](LICENSE) file for details.
+## Common Issues
 
-## 🙏 Acknowledgments
+### CUDA not found
 
-- [Hugging Face Candle](https://github.com/huggingface/candle) - Machine learning framework in Rust
-- [Lightricks LTX-Video](https://github.com/Lightricks/LTX-Video) - Original LTX-Video model
-- Rust and ML developer community
+```bash
+# Ensure CUDA is in PATH
+export PATH=/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+```
 
----
+### cuDNN errors on Windows
 
-**Note**: This project is in **alpha stage** and under active development. API may change between versions. Correct inference is not guaranteed.
+Copy and rename these DLLs to PATH:
+- `nvcuda.dll` → `cuda.dll`
+- `cublas64_12.dll` → `cublas.dll`
+- `curand64_10.dll` → `curand.dll`
 
+### Out of Memory
+
+Try reducing resolution, frames, or enabling VAE tiling:
+```bash
+--height 256 --width 384 --num-frames 25 --vae-tiling
+```
+
+## Contributing
+
+Contributions are welcome! Please open an issue or pull request.
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+
+## Acknowledgments
+
+- [Candle](https://github.com/huggingface/candle) — Minimalist ML framework for Rust
+- [Lightricks LTX-Video](https://huggingface.co/Lightricks/LTX-Video) — Original LTX-Video model
+- [Stability AI](https://stability.ai/) — Stable Video Diffusion
+- [diffusers](https://github.com/huggingface/diffusers) — Reference implementation

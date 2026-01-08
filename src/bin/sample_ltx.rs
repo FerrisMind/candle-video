@@ -65,7 +65,7 @@ struct Args {
     guidance_scale: f32,
 
     /// Use VAE tiling (spatial)
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = false)]
     vae_tiling: bool,
 
     /// Use VAE slicing (batch)

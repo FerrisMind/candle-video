@@ -1151,15 +1151,9 @@ impl LtxVideoUpsampler3d {
         let h1 = h1.reshape(&[b, c_out, t2, st, h2 * sh, w2 * sw])?;
         // flatten(2, 3) -> [B, C', T*st, H*sh, W*sw]
         let h1 = h1.reshape(&[b, c_out, t2 * st, h2 * sh, w2 * sw])?;
-        if DEBUG_VAE {
-            println!("[DEBUG] after flatten: {:?}", h1.dims());
-        }
 
         // slice: [:, :, st-1:]
         let h1 = h1.i((.., .., (st - 1).., .., ..))?;
-        if DEBUG_VAE {
-            println!("[DEBUG] upsampler output (after slice): {:?}", h1.dims());
-        }
 
         let h1 = if let Some(r) = residual {
             h1.add(&r)?
@@ -1632,24 +1626,11 @@ impl LtxVideoDecoder3d {
         let p = self.patch_size; // 4
         let pt = self.patch_size_t; // 1
         let out_c = c / (pt * p * p); // 48 / 16 = 3
-
-        println!(
-            "[DEBUG] unpatchify input: [{}, {}, {}, {}, {}]",
-            b, c, f, h, w
-        );
-        println!(
-            "[DEBUG] unpatchify params: out_c={}, pt={}, p={}",
-            out_c, pt, p
-        );
-
-        // reshape to [B, out_c, pt, p, p, F, H, W]
         let x = x.reshape(&[b, out_c, pt, p, p, f, h, w])?;
-        println!("[DEBUG] after reshape: {:?}", x.dims());
 
         // permute(0, 1, 5, 2, 6, 4, 7, 3) -> [B, C, F, pt, H, p, W, p]
         let x = x.permute(vec![0, 1, 5, 2, 6, 4, 7, 3])?;
         let x = x.contiguous()?;
-        println!("[DEBUG] after permute: {:?}", x.dims());
 
         // After permute shape: [B, C, F, pt, H, p, W, p]
         // Python flattens: flatten(6, 7).flatten(4, 5).flatten(2, 3)
@@ -1657,15 +1638,12 @@ impl LtxVideoDecoder3d {
 
         // flatten(6, 7): merge dimensions 6 and 7 -> [B, C, F, pt, H, p, W*p]
         let x = x.reshape(&[b, out_c, f, pt, h, p, w * p])?;
-        println!("[DEBUG] after flatten(6,7): {:?}", x.dims());
 
         // flatten(4, 5): merge dimensions 4 and 5 -> [B, C, F, pt, H*p, W*p]
         let x = x.reshape(&[b, out_c, f, pt, h * p, w * p])?;
-        println!("[DEBUG] after flatten(4,5): {:?}", x.dims());
 
         // flatten(2, 3): merge dimensions 2 and 3 -> [B, C, F*pt, H*p, W*p]
         let x = x.reshape(&[b, out_c, f * pt, h * p, w * p])?;
-        println!("[DEBUG] unpatchify output: {:?}", x.dims());
 
         Ok(x)
     }
@@ -2165,13 +2143,7 @@ impl AutoencoderKLLtxVideo {
             for j in (0..width).step_by(self.tile_sample_stride_width) {
                 let h_end = (i + self.tile_sample_min_height).min(height);
                 let w_end = (j + self.tile_sample_min_width).min(width);
-                let tile = x.i((
-                    ..,
-                    ..,
-                    ..,
-                    i..h_end,
-                    j..w_end,
-                ))?;
+                let tile = x.i((.., .., .., i..h_end, j..w_end))?;
                 let mut enc = self.encoder.forward(&tile, train)?;
                 if let Some(ref qc) = self.quant_conv {
                     enc = qc.forward(&enc)?;
@@ -2242,13 +2214,7 @@ impl AutoencoderKLLtxVideo {
             for j in (0..width).step_by(tile_latent_stride_w) {
                 let h_end = (i + tile_latent_min_h).min(height);
                 let w_end = (j + tile_latent_min_w).min(width);
-                let tile = z.i((
-                    ..,
-                    ..,
-                    ..,
-                    i..h_end,
-                    j..w_end,
-                ))?;
+                let tile = z.i((.., .., .., i..h_end, j..w_end))?;
                 let dec = self.decoder.forward(&tile, temb, train)?;
                 row.push(dec);
             }
@@ -2277,13 +2243,7 @@ impl AutoencoderKLLtxVideo {
 
                 let h_slice = self.tile_sample_stride_height.min(tile.dim(3)?);
                 let w_slice = self.tile_sample_stride_width.min(tile.dim(4)?);
-                let sliced_tile = tile.i((
-                    ..,
-                    ..,
-                    ..,
-                    0..h_slice,
-                    0..w_slice,
-                ))?;
+                let sliced_tile = tile.i((.., .., .., 0..h_slice, 0..w_slice))?;
                 result_row.push(sliced_tile);
             }
             result_rows.push(cat_dim(&result_row, 4)?);
@@ -2334,17 +2294,26 @@ impl AutoencoderKLLtxVideo {
             row.push(tile);
         }
 
+        // Python logic:
+        // for i, tile in enumerate(row):
+        //     if i > 0:
+        //         tile = self.blend_t(row[i - 1], tile, blend_num_frames)
+        //         result_row.append(tile[:, :, :stride, :, :])  # Take FIRST stride frames
+        //     else:
+        //         result_row.append(tile[:, :, :stride+1, :, :])  # First tile: stride+1 frames
         let mut result_row: Vec<Tensor> = Vec::with_capacity(row.len());
         for (idx, tile) in row.iter().enumerate() {
-            let mut tile = tile.clone();
-            if idx > 0 {
-                tile = self.blend_t(&row[idx - 1], &tile, blend_t)?;
-                tile = tile.i((.., .., tile_latent_stride_t.., .., ..))?;
-                result_row.push(tile);
+            let tile = if idx > 0 {
+                let blended = self.blend_t(&row[idx - 1], tile, blend_t)?;
+                // Take FIRST stride frames (not last!)
+                let end = tile_latent_stride_t.min(blended.dim(2)?);
+                blended.i((.., .., 0..end, .., ..))?
             } else {
-                tile = tile.i((.., .., (tile_latent_stride_t + 1).., .., ..))?;
-                result_row.push(tile);
-            }
+                // First tile: keep stride + 1 frames
+                let end = (tile_latent_stride_t + 1).min(tile.dim(2)?);
+                tile.i((.., .., 0..end, .., ..))?
+            };
+            result_row.push(tile);
         }
 
         let enc = cat_dim(&result_row, 2)?;
@@ -2369,13 +2338,13 @@ impl AutoencoderKLLtxVideo {
         let tile_latent_stride_t =
             self.tile_sample_stride_num_frames / self.temporal_compression_ratio;
 
-        // В python blendnumframes в decode считается в sample-frames [file:1]
+        // Python: blend_num_frames = tile_sample_min - tile_sample_stride = 16 - 8 = 8
         let blend_t_sample = self
             .tile_sample_min_num_frames
             .saturating_sub(self.tile_sample_stride_num_frames);
 
         let mut row: Vec<Tensor> = Vec::new();
-        for i in (0..num_frames).step_by(tile_latent_stride_t) {
+        for (loop_idx, i) in (0..num_frames).step_by(tile_latent_stride_t).enumerate() {
             let t_end = (i + tile_latent_min_t + 1).min(num_frames);
             let tile = z.i((.., .., i..t_end, .., ..))?;
 
@@ -2387,27 +2356,42 @@ impl AutoencoderKLLtxVideo {
                 self.decoder.forward(&tile, temb, train)?
             };
 
-            // python: if i == 0: decoded = decoded[:, :, -1:] [file:1]
-            let decoded = if i == 0 {
-                let t = decoded.dims5()?.2;
-                decoded.i((.., .., (t - 1)..t, .., ..))?
+            // Python: if i > 0: decoded = decoded[:, :, :-1, :, :]
+            // Remove last sample frame from all tiles except first
+            let decoded = if loop_idx > 0 {
+                let t = decoded.dim(2)?;
+                if t > 1 {
+                    decoded.i((.., .., 0..(t - 1), .., ..))?
+                } else {
+                    decoded
+                }
             } else {
                 decoded
             };
+
             row.push(decoded);
         }
 
+        // Python logic:
+        // for i, tile in enumerate(row):
+        //     if i > 0:
+        //         tile = self.blend_t(row[i - 1], tile, blend_num_frames)
+        //         tile = tile[:, :, :stride, :, :]  # Take FIRST stride frames
+        //     else:
+        //         tile = tile[:, :, :stride+1, :, :]  # First tile: stride+1 frames
         let mut result_row: Vec<Tensor> = Vec::with_capacity(row.len());
         for (idx, tile) in row.iter().enumerate() {
-            let mut tile = tile.clone();
-            if idx > 0 {
-                tile = self.blend_t(&row[idx - 1], &tile, blend_t_sample)?;
-                tile = tile.i((.., .., self.tile_sample_stride_num_frames.., .., ..))?;
-                result_row.push(tile);
+            let tile = if idx > 0 {
+                let blended = self.blend_t(&row[idx - 1], tile, blend_t_sample)?;
+                // Take FIRST stride frames (not last!)
+                let end = self.tile_sample_stride_num_frames.min(blended.dim(2)?);
+                blended.i((.., .., 0..end, .., ..))?
             } else {
-                tile = tile.i((.., .., (self.tile_sample_stride_num_frames + 1).., .., ..))?;
-                result_row.push(tile);
-            }
+                // First tile: keep stride + 1 frames
+                let end = (self.tile_sample_stride_num_frames + 1).min(tile.dim(2)?);
+                tile.i((.., .., 0..end, .., ..))?
+            };
+            result_row.push(tile);
         }
 
         let dec = cat_dim(&result_row, 2)?;
