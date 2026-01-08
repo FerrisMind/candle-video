@@ -3,7 +3,7 @@ use candle_core::safetensors::MmapedSafetensors;
 use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {
-    let file = PathBuf::from(r"c:\candle-video\models\models--Lightricks--LTX-Video-0.9.5\snapshots\e58e28c39631af4d1468ee57a853764e11c1d37e\vae\diffusion_pytorch_model.safetensors");
+    let file = PathBuf::from(r"c:\candle-video\models\models--Lightricks--LTX-Video-0.9.5\vae\diffusion_pytorch_model.safetensors");
     let tensors = MmapedSafetensors::new(file)?;
     let mut keys: Vec<_> = tensors.tensors().iter().map(|(k, _)| k.clone()).collect();
     keys.sort();

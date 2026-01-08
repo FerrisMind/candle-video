@@ -212,7 +212,19 @@ impl TimestepEmbedder {
     }
 
     pub fn forward(&self, t: &Tensor) -> Result<Tensor> {
+        // Debug: print weight info
+        if DEBUG_VAE
+            && let Ok(w) = self.linear_1.weight().flatten_all()?.to_vec1::<f32>()
+        {
+            println!(
+                "[DEBUG] TimestepEmbedder linear_1 weight first 5: {:?}",
+                &w[..5.min(w.len())]
+            );
+        }
         let h = self.linear_1.forward(t)?;
+        if DEBUG_VAE && let Ok(vals) = h.flatten_all()?.to_vec1::<f32>() {
+            println!("[DEBUG] TimestepEmbedder after linear_1 first 5: {:?}", &vals[..5.min(vals.len())]);
+        }
         let h = silu(&h)?;
         self.linear_2.forward(&h)
     }
@@ -234,6 +246,12 @@ impl CombinedTimestepEmbedder {
     pub fn forward(&self, timestep: &Tensor, hidden_dtype: DType) -> Result<Tensor> {
         // timestep -> sinusoidal -> MLP
         let timesteps_proj = get_timestep_embedding(timestep, 256)?;
+        
+        if DEBUG_VAE && let Ok(vals) = timesteps_proj.flatten_all()?.to_vec1::<f32>() {
+            println!("[DEBUG] Rust sinusoidal embedding first 10: {:?}", &vals[..10.min(vals.len())]);
+            println!("[DEBUG] Rust sinusoidal embedding mean: {:.6}", vals.iter().sum::<f32>() / vals.len() as f32);
+        }
+        
         self.timestep_embedder
             .forward(&timesteps_proj.to_dtype(hidden_dtype)?)
     }
@@ -1630,13 +1648,18 @@ impl LtxVideoDecoder3d {
             println!("[DEBUG] conv_in output min/max: {:.4}/{:.4}", vals.iter().cloned().fold(f32::INFINITY, f32::min), vals.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
         }
 
-        // NOTE: In Python, mid_block and up_blocks receive the RAW temb (e.g., 0.05).
-        // Each block's internal time_embedder applies its own transformation.
-        // The decoder-level timestep_scale_multiplier is ONLY used for the global 
-        // time_embedder/scale_shift_table applied AFTER all up_blocks (before conv_out).
-        // So we pass the raw temb to mid_block and up_blocks.
-        let temb_for_blocks = temb.map(|t| t.flatten_all()).transpose()?;
-        let temb_for_blocks_ref = temb_for_blocks.as_ref();
+        // CRITICAL: Python applies timestep_scale_multiplier at the START of decoder.forward(),
+        // BEFORE passing to mid_block and up_blocks. Each block's internal time_embedder
+        // then receives the SCALED temb value.
+        let temb_scaled = if let (Some(tsm), Some(t)) = (&self.timestep_scale_multiplier, temb) {
+            let t_flat = t.flatten_all()?;
+            Some(t_flat.broadcast_mul(tsm)?)
+        } else if let Some(t) = temb {
+            Some(t.flatten_all()?)
+        } else {
+            None
+        };
+        let temb_for_blocks_ref = temb_scaled.as_ref();
 
         h = self.mid_block.forward(&h, temb_for_blocks_ref, train)?;
         
@@ -1669,20 +1692,14 @@ impl LtxVideoDecoder3d {
         }
         
         // Apply global time_embedder + scale_shift_table if present
-        if let (Some(te), Some(sst), Some(t)) = (&self.time_embedder, &self.scale_shift_table, temb) {
+        // NOTE: temb_scaled already has timestep_scale_multiplier applied from earlier
+        if let (Some(te), Some(sst), Some(temb_s)) = (&self.time_embedder, &self.scale_shift_table, &temb_scaled) {
             println!("[DEBUG] Applying global scale_shift with temb");
-            // Apply timestep_scale_multiplier (default 1000.0 if missing)
-            let t_flat = t.flatten_all()?;
-            let temb_scaled = if let Some(tsm) = &self.timestep_scale_multiplier {
-                 println!("[DEBUG] timestep_scale_multiplier: {:?}", tsm.to_vec0::<f32>());
-                 t_flat.broadcast_mul(tsm)?
-            } else {
-                 println!("[DEBUG] timestep_scale_multiplier: default 1000.0");
-                 let tsm = Tensor::new(&[1000.0f32], t_flat.device())?.to_dtype(t_flat.dtype())?;
-                 t_flat.broadcast_mul(&tsm)?
-            };
+            if DEBUG_VAE && let Ok(vals) = temb_s.flatten_all()?.to_vec1::<f32>() {
+                println!("[DEBUG] decoder time_embedder input (scaled temb): {:?}", &vals[..5.min(vals.len())]);
+            }
 
-            let temb_proj = te.forward(&temb_scaled, h.dtype())?;
+            let temb_proj = te.forward(temb_s, h.dtype())?;
             
             // temb_proj: (B, 256) = (B, 2*128)
             // reshape to (B, 2, 128) and add scale_shift_table (2, 128)

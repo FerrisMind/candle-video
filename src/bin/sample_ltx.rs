@@ -249,6 +249,36 @@ fn main() -> anyhow::Result<()> {
         Box::new(LtxVideoProcessor::new(VaeConfig { scaling_factor: 1.0, timestep_conditioning: true })),
     );
 
+    // 4b. Prepare deterministic latents
+    use candle_video::utils::deterministic_rng::Pcg32;
+    let mut rng = Pcg32::new(42, 1442695040888963407);
+    
+    // Config values for LTX Video
+    let vae_spatial_compression = 32;
+    let vae_temporal_compression = 8;
+    let transformer_spatial_patch = 1;
+    let transformer_temporal_patch = 1;
+    
+    let height = args.height;
+    let width = args.width;
+    let num_frames = args.num_frames;
+    
+    let latent_height = height / vae_spatial_compression;
+    let latent_width = width / vae_spatial_compression;
+    let latent_frames = (num_frames - 1) / vae_temporal_compression + 1;
+    let channels = 128; // T5/Transformer hidden dim? No, transformer in_channels.
+    
+    // [B, C, F, H, W]
+    let shape = (1, channels, latent_frames, latent_height, latent_width);
+    println!("Generating deterministic latents with shape {:?}...", shape);
+    let latents_unpacked = rng.randn(shape, &device)?;
+    
+    let latents_packed = LtxPipeline::pack_latents(
+        &latents_unpacked, 
+        transformer_spatial_patch, 
+        transformer_temporal_patch
+    )?;
+
     // 5. Run Generation
     println!("Generating video with pre-computed embeddings...");
     let video_out = pipeline.call(
@@ -263,7 +293,7 @@ fn main() -> anyhow::Result<()> {
         3.0,
         0.0,
         1,
-        None,
+        Some(latents_packed), // Pass packed latents
         Some(prompt_embeds),
         Some(prompt_attention_mask),
         Some(negative_prompt_embeds),

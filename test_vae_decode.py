@@ -8,15 +8,16 @@ from safetensors import safe_open
 from diffusers.models.autoencoders.autoencoder_kl_ltx import AutoencoderKLLTXVideo
 
 # Load config
-config_path = r'c:\candle-video\models\models--Lightricks--LTX-Video-0.9.5\snapshots\e58e28c39631af4d1468ee57a853764e11c1d37e\vae\config.json'
-weights_path = r'c:\candle-video\models\models--Lightricks--LTX-Video-0.9.5\snapshots\e58e28c39631af4d1468ee57a853764e11c1d37e\vae\diffusion_pytorch_model.safetensors'
+config_path = r'c:\candle-video\models\models--Lightricks--LTX-Video-0.9.5\vae\config.json'
+weights_path = r'c:\candle-video\models\models--Lightricks--LTX-Video-0.9.5\vae\diffusion_pytorch_model.safetensors'
 
 # Load VAE
 print("Loading VAE...")
 vae = AutoencoderKLLTXVideo.from_pretrained(
-    r'c:\candle-video\models\models--Lightricks--LTX-Video-0.9.5\snapshots\e58e28c39631af4d1468ee57a853764e11c1d37e',
+    r'c:\candle-video\models\models--Lightricks--LTX-Video-0.9.5',
     subfolder='vae',
-    torch_dtype=torch.float32
+    torch_dtype=torch.float32,
+    local_files_only=True
 )
 vae.eval()
 
@@ -67,6 +68,7 @@ with torch.no_grad():
 # Print captured outputs for comparison
 if "conv_in" in captured_outputs:
     conv_in_out = captured_outputs["conv_in"]
+    np.save('conv_in_python.npy', conv_in_out.numpy())
     print(f"\nConv_in output shape: {conv_in_out.shape}")
     print(f"Conv_in output mean: {conv_in_out.mean().item():.4f}")
     print(f"Conv_in output first 5: {conv_in_out.flatten()[:5].tolist()}")
