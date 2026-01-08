@@ -4,6 +4,12 @@
 
 **candle-video** is a Rust library for video generation using AI models, built on top of the [Candle](https://github.com/huggingface/candle) ML framework. It provides high-performance inference for state-of-the-art video generation models.
 
+## Demonstration
+
+**Prompt:** *The waves crash against the jagged rocks of the shoreline, sending spray high into the air. The rocks are a dark gray color, with sharp edges and deep crevices. The water is a clear blue-green, with white foam where the waves break against the rocks. The sky is a light gray, with a few white clouds dotting the horizon.*
+
+![Waves and Rocks](file:///c:/candle-video/examples/ltx-video/video_without_tiling.gif)
+
 🌐 **[Русская версия (Russian)](README.RU.md)**
 
 ## Supported Models
@@ -82,24 +88,42 @@ For Windows users with CUDA, run the following before building:
 
 ### LTX-Video: Text-to-Video Generation
 
-```bash
-# Download model weights (e.g., from HuggingFace)
-# Required files:
-#   - transformer/diffusion_pytorch_model.safetensors
-#   - vae/diffusion_pytorch_model.safetensors
-#   - text_encoder_gguf/t5-v1_1-xxl-encoder-Q5_K_M.gguf
-#   - tokenizer/tokenizer.json
+#### 1. Automatic usage (Recommended)
+Weights will be automatically downloaded from [oxide-lab/LTX-Video-0.9.5](https://huggingface.co/oxide-lab/LTX-Video-0.9.5).
 
-# Generate video
-cargo run --bin sample_ltx --release -- \
+```bash
+cargo run --example ltx-video --release --features flash-attn,cudnn -- \
+    --prompt "A serene mountain lake at sunset, photorealistic, 4k" \
+    --width 768 --height 512 --num-frames 97 \
+    --steps 30
+```
+
+#### 2. Manual usage (Local weights)
+If you already have weights, provide the path:
+
+```bash
+cargo run --example ltx-video --release --features flash-attn,cudnn -- \
     --local-weights ./models/ltx-video \
     --prompt "A cat playing with a ball of yarn" \
-    --height 512 \
-    --width 768 \
-    --num-frames 97 \
-    --steps 30 \
-    --output-dir ./output
+    --vae-tiling
 ```
+# Fast preview (384x256, 25 frames)
+cargo run --example ltx-video --release --features flash-attn,cudnn -- \
+    --local-weights ./models/ltx-video \
+    --prompt "A futuristic cityscape with flying cars" \
+    --height 256 \
+    --width 384 \
+    --num-frames 25 \
+    --steps 20
+
+# Low VRAM mode (with VAE tiling)
+cargo run --example ltx-video --release --features flash-attn,cudnn -- \
+    --local-weights ./models/ltx-video \
+    --prompt "A majestic eagle soaring over snow-capped mountains" \
+    --vae-tiling --vae-slicing
+```
+
+See [examples/ltx-video](examples/ltx-video/README.md) for more details.
 
 ### CLI Options
 
@@ -107,17 +131,20 @@ cargo run --bin sample_ltx --release -- \
 |----------|---------|-------------|
 | `--prompt` | "A video of a cute cat..." | Text prompt for generation |
 | `--negative-prompt` | "low quality, worst quality..." | Negative prompt |
-| `--height` | 512 | Video height in pixels |
-| `--width` | 768 | Video width in pixels |
-| `--num-frames` | 97 | Number of frames (4 seconds at 25fps) |
+| `--height` | 512 | Video height (must be divisible by 32) |
+| `--width` | 768 | Video width (must be divisible by 32) |
+| `--num-frames` | 97 | Number of frames (should be 8n + 1) |
 | `--steps` | 30 | Diffusion steps |
 | `--guidance-scale` | 3.0 | Classifier-free guidance scale |
+| `--local-weights` | (None) | Path to local model weights (required) |
+| `--output-dir` | "output" | Directory to save results |
 | `--seed` | random | Random seed for reproducibility |
 | `--vae-tiling` | false | Enable VAE tiling for memory efficiency |
 | `--vae-slicing` | false | Enable VAE batch slicing |
-| `--frames` | false | Save individual PNG frames |
-| `--gif` | false | Save as animated GIF |
+| `--frames` | false | Save individual PNG frames (disables GIF) |
+| `--gif` | true | Save as animated GIF (default) |
 | `--cpu` | false | Run on CPU instead of GPU |
+| `--model-id` | "Lightricks/LTX-Video" | HF model ID (for tokenizer download) |
 
 ### Library Usage
 
@@ -177,14 +204,16 @@ candle-video/
 │   │       ├── clip.rs     # CLIP image encoder
 │   │       ├── pipeline.rs # Generation pipeline
 │   │       └── scheduler.rs# EulerA scheduler
-│   ├── bin/                # Binary examples
-│   │   ├── sample_ltx.rs   # LTX-Video generation
-│   │   └── verify_*.rs     # Verification tools
 │   └── utils/              # Utilities
+├── examples/               # Usage examples (run with --example)
+│   ├── ltx_video/          # Text-to-video example
+│   │   ├── main.rs         # Entry point
+│   │   └── README.md       # Detailed guide
+│   └── verify/             # Verification and debug tools
 ├── scripts/                # Python verification scripts
 ├── tests/                  # Integration tests
-├── prebuilt/               # Prebuilt binaries and kernels
-└── tp/                     # Third-party dependencies (candle, diffusers)
+├── prebuilt/               # Prebuilt kernels (optional)
+└── tp/                     # Third-party submodules
 ```
 
 ## Model Weights

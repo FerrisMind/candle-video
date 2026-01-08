@@ -141,31 +141,30 @@ impl Tokenizer for DummyTokenizer {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    println!("LTX-Video Text-to-Video Generation");
+    println!("==================================");
+    println!("Prompt: {}", args.prompt);
+    println!("Size: {}x{} [{} frames]", args.width, args.height, args.num_frames);
+    println!("Steps: {}", args.steps);
+    println!("Guidance scale: {:.2}", args.guidance_scale);
 
     let device = if args.cpu {
         Device::Cpu
     } else {
         Device::new_cuda(0).unwrap_or(Device::Cpu)
     };
-    println!("Running on device: {:?}", device);
-    let _ = std::io::stdout().flush();
 
     // Generate random seed if not provided
     let seed = args.seed.unwrap_or_else(|| {
         use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let random_seed = now.as_secs() ^ (now.subsec_nanos() as u64);
-        println!(
-            "Using random seed: {} (use --seed {} to reproduce)",
-            random_seed, random_seed
-        );
-        random_seed
+        now.as_secs() ^ (now.subsec_nanos() as u64)
     });
-    if args.seed.is_some() {
-        println!("Using specified seed: {}", seed);
-    }
+    device.set_seed(seed)?;
+    println!("Device: {:?}", device);
+    println!("Seed: {}", seed);
 
-    let dtype = DType::BF16; // BF16 for memory efficiency (matches diffusers/ComfyUI)
+    let dtype = DType::BF16;
 
     // 1. Locate weights
     let (transformer_file, vae_file, t5_file, tokenizer_file) =
@@ -236,21 +235,39 @@ fn main() -> anyhow::Result<()> {
 
             (transformer, vae, t5, tokenizer)
         } else {
-            anyhow::bail!("Please provide --local-weights for now to use snapshot files");
+            println!("\nDownloading models from HuggingFace: oxide-lab/LTX-Video-0.9.5");
+            let api = Api::new()?;
+            let repo = api.repo(Repo::with_revision(
+                "oxide-lab/LTX-Video-0.9.5".into(),
+                RepoType::Model,
+                "main".into(),
+            ));
+
+            let transformer = repo.get("transformer/diffusion_pytorch_model.safetensors")?;
+            let _ = repo.get("transformer/config.json")?;
+
+            let vae = repo.get("vae/diffusion_pytorch_model.safetensors")?;
+            let _ = repo.get("vae/config.json")?;
+
+            let t5 = repo.get("text_encoder_gguf/t5-v1_1-xxl-encoder-Q5_K_M.gguf")?;
+
+            let tokenizer = repo.get("text_encoder_gguf/tokenizer.json")?;
+
+            (transformer, vae, t5, tokenizer)
         };
 
-    // 2. Step 1: Encode prompts with T5
-    println!("Step 1: Encoding prompts with T5...");
-    let _ = std::io::stdout().flush();
+    if args.local_weights.is_some() {
+        println!("\nLoading models from local path: {}", args.local_weights.as_ref().unwrap());
+    }
 
+    // 2. Step 1: Encode prompts with T5
+    println!("Encoding prompt...");
     let (
         prompt_embeds,
         prompt_attention_mask,
         negative_prompt_embeds,
         negative_prompt_attention_mask,
     ) = {
-        println!("  Loading T5 from {:?}", t5_file);
-        let _ = std::io::stdout().flush();
         let t5_model = QuantizedT5EncoderModel::load(&t5_file, &device)?;
 
         let tokenizer_hf =
@@ -265,13 +282,9 @@ fn main() -> anyhow::Result<()> {
         let (n_ids, n_mask) =
             tokenizer_adapter.encode_batch(std::slice::from_ref(&args.negative_prompt), 128)?;
 
-        println!("  Forwarding T5...");
-        let _ = std::io::stdout().flush();
         let p_emb = t5_model.forward(&p_ids, Some(&p_mask))?;
         let n_emb = t5_model.forward(&n_ids, Some(&n_mask))?;
 
-        println!("  T5 finished, unloading...");
-        let _ = std::io::stdout().flush();
         (
             p_emb,
             p_mask.to_dtype(DType::F32)?,
@@ -282,8 +295,8 @@ fn main() -> anyhow::Result<()> {
     // T5 and tokenizer are dropped here
 
     // 3. Step 2: Load Transformer and VAE for generation
-    println!("Step 2: Loading Transformer and VAE...");
-    let _ = std::io::stdout().flush();
+    // 3. Step 2: Load Transformer and VAE for generation
+    println!("Loading models...");
 
     // VAE
     let vae_load = WeightLoader::new(device.clone(), dtype);
@@ -293,7 +306,6 @@ fn main() -> anyhow::Result<()> {
         let f = std::fs::File::open(vae_dir.join("config.json"))?;
         serde_json::from_reader(f)?
     } else {
-        println!("VAE config not found, using default");
         AutoencoderKLLtxVideoConfig::default()
     };
     vae_config.timestep_conditioning = true;
@@ -347,7 +359,6 @@ fn main() -> anyhow::Result<()> {
 
     // [B, C, F, H, W]
     let shape = (1, channels, latent_frames, latent_height, latent_width);
-    println!("Generating deterministic latents with shape {:?}...", shape);
     let latents_unpacked = rng.randn(shape, &device)?;
 
     let latents_packed = LtxPipeline::pack_latents(
@@ -357,7 +368,7 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     // 5. Run Generation
-    println!("Generating video with pre-computed embeddings...");
+    println!("\nStarting denoising loop ({} steps)...", args.steps);
     let video_out = pipeline.call(
         None, // prompt
         None, // negative_prompt
@@ -383,7 +394,6 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     // 5. Save output
-    println!("Saving video to {}...", args.output_dir);
     if !Path::new(&args.output_dir).exists() {
         std::fs::create_dir_all(&args.output_dir)?;
     }
@@ -406,13 +416,11 @@ fn main() -> anyhow::Result<()> {
 
     // Exclusive mode: --frames saves ONLY frames
     if args.frames {
-        println!("Saving PNG frames to {}...", args.output_dir);
         for (j, data) in frame_data.iter().enumerate() {
             let filename = format!("{}/frame_{:04}.png", args.output_dir, j);
             image::save_buffer(&filename, data, w as u32, h as u32, image::ColorType::Rgb8)?;
         }
-        println!("Saved {} frames to {}", frame_data.len(), args.output_dir);
-        println!("Done! (Only frames saved)");
+        println!("\nDone! Saved {} frames to {}", frame_data.len(), args.output_dir);
         return Ok(());
     }
 
@@ -442,11 +450,9 @@ fn main() -> anyhow::Result<()> {
         for frame in frames {
             encoder.write_frame(&frame)?;
         }
-
-        println!("Saved GIF to {}", gif_path);
+        println!("\nDone! Saved GIF to {}", gif_path);
     }
 
-    println!("Done!");
     Ok(())
 }
 

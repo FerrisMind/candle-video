@@ -54,3 +54,77 @@ all-gpu = ["flash-attn", "cudnn", "nccl"]
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3.0"
 bytemuck = "1.0"
+
+# =============================================================================
+# Examples
+# =============================================================================
+
+[[example]]
+name = "ltx-video"
+path = "examples/ltx-video/main.rs"
+
+# Verification examples
+[[example]]
+name = "verify-dit"
+path = "examples/verify/verify_dit.rs"
+
+[[example]]
+name = "verify-vae"
+path = "examples/verify/verify_vae.rs"
+
+[[example]]
+name = "verify-vae-encoder"
+path = "examples/verify/verify_vae_encoder.rs"
+
+[[example]]
+name = "verify-vae-roundtrip"
+path = "examples/verify/verify_vae_roundtrip.rs"
+
+[[example]]
+name = "verify-vae-tiling"
+path = "examples/verify/verify_vae_tiling.rs"
+
+[[example]]
+name = "verify-pipeline"
+path = "examples/verify/verify_pipeline.rs"
+
+[[example]]
+name = "verify-scheduler"
+path = "examples/verify/verify_scheduler.rs"
+
+[[example]]
+name = "verify-rng"
+path = "examples/verify/verify_rng.rs"
+
+# Debug utilities
+[[example]]
+name = "debug-t5"
+path = "examples/debug/debug_t5.rs"
+
+[[example]]
+name = "debug-vae"
+path = "examples/debug/debug_vae.rs"
+
+[[example]]
+name = "inspect-t5"
+path = "examples/debug/inspect_t5.rs"
+
+[[example]]
+name = "inspect-vae-weights"
+path = "examples/debug/inspect_vae_weights.rs"
+
+[[example]]
+name = "dump-t5-embeddings"
+path = "examples/debug/dump_t5_embeddings.rs"
+
+[[example]]
+name = "check-t5-shapes"
+path = "examples/debug/check_t5_shapes.rs"
+
+[[example]]
+name = "list-gguf-tensors"
+path = "examples/debug/list_gguf_tensors.rs"
+
+[[example]]
+name = "test-rng"
+path = "examples/debug/test_rng.rs"

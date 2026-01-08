@@ -82,24 +82,33 @@ cargo build --release --features "cuda,flash-attn"
 
 ### LTX-Video: Генерация видео из текста
 
-```bash
-# Скачайте веса модели (например, с HuggingFace)
-# Необходимые файлы:
-#   - transformer/diffusion_pytorch_model.safetensors
-#   - vae/diffusion_pytorch_model.safetensors
-#   - text_encoder_gguf/t5-v1_1-xxl-encoder-Q5_K_M.gguf
-#   - tokenizer/tokenizer.json
+#### 1. Автоматический запуск (Рекомендуется)
+Веса будут автоматически скачаны из [oxide-lab/LTX-Video-0.9.5](https://huggingface.co/oxide-lab/LTX-Video-0.9.5).
 
-# Генерация видео
-cargo run --bin sample_ltx --release -- \
+```bash
+cargo run --example ltx-video --release --features flash-attn,cudnn -- \
+    --prompt "Спокойное горное озеро на закате, фотореализм, 4к" \
+    --width 768 --height 512 --num-frames 97 \
+    --steps 30
+```
+
+#### 2. Ручной запуск (Локальные веса)
+Если у вас уже есть веса, укажите путь к ним:
+
+```bash
+cargo run --example ltx-video --release --features flash-attn,cudnn -- \
     --local-weights ./models/ltx-video \
     --prompt "Кот играет с клубком ниток" \
-    --height 512 \
-    --width 768 \
-    --num-frames 97 \
-    --steps 30 \
-    --output-dir ./output
+    --vae-tiling
 ```
+# Режим экономии памяти (с тайлингом VAE)
+cargo run --example ltx-video --release --features flash-attn,cudnn -- \
+    --local-weights ./models/ltx-video \
+    --prompt "Величественный орел, парящий над заснеженными горами" \
+    --vae-tiling --vae-slicing
+```
+
+Подробности в [examples/ltx-video](examples/ltx-video/README.md).
 
 ### Параметры командной строки
 
@@ -107,17 +116,20 @@ cargo run --bin sample_ltx --release -- \
 |----------|--------------|----------|
 | `--prompt` | "A video of a cute cat..." | Текстовый промпт |
 | `--negative-prompt` | "low quality, worst quality..." | Негативный промпт |
-| `--height` | 512 | Высота видео в пикселях |
-| `--width` | 768 | Ширина видео в пикселях |
-| `--num-frames` | 97 | Количество кадров (4 секунды при 25fps) |
+| `--height` | 512 | Высота (должна быть кратна 32) |
+| `--width` | 768 | Ширина (должна быть кратна 32) |
+| `--num-frames` | 97 | Количество кадров (формат 8n + 1) |
 | `--steps` | 30 | Количество шагов диффузии |
 | `--guidance-scale` | 3.0 | Масштаб classifier-free guidance |
+| `--local-weights` | (Нет) | Путь к локальным весам (обязателен) |
+| `--output-dir` | "output" | Директория для сохранения результатов |
 | `--seed` | случайный | Сид для воспроизводимости |
 | `--vae-tiling` | false | Включить тайлинг VAE для экономии памяти |
 | `--vae-slicing` | false | Включить слайсинг VAE для батчей |
-| `--frames` | false | Сохранять отдельные PNG кадры |
-| `--gif` | false | Сохранить как анимированный GIF |
+| `--frames` | false | Сохранять PNG кадры (отключает GIF) |
+| `--gif` | true | Сохранить как анимированный GIF (по умолчанию) |
 | `--cpu` | false | Запуск на CPU вместо GPU |
+| `--model-id` | "Lightricks/LTX-Video" | ID модели HF (для скачивания токенизатора) |
 
 ### Использование как библиотеки
 
@@ -177,14 +189,16 @@ candle-video/
 │   │       ├── clip.rs     # CLIP энкодер изображений
 │   │       ├── pipeline.rs # Пайплайн генерации
 │   │       └── scheduler.rs# EulerA планировщик
-│   ├── bin/                # Примеры бинарников
-│   │   ├── sample_ltx.rs   # Генерация LTX-Video
-│   │   └── verify_*.rs     # Инструменты верификации
 │   └── utils/              # Утилиты
+├── examples/               # Примеры использования (запуск через --example)
+│   ├── ltx_video/          # Пример генерации видео
+│   │   ├── main.rs         # Точка входа
+│   │   └── README.md       # Подробное описание
+│   └── verify/             # Инструменты верификации и отладки
 ├── scripts/                # Python скрипты для верификации
 ├── tests/                  # Интеграционные тесты
-├── prebuilt/               # Прекомпилированные бинарники и ядра
-└── tp/                     # Сторонние зависимости (candle, diffusers)
+├── prebuilt/               # Прекомпилированные ядра
+└── tp/                     # Сторонние подмодули
 ```
 
 ## Веса моделей

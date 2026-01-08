@@ -1,5 +1,4 @@
 use candle_core::{DType, Device, Result, Tensor};
-use std::io::Write;
 
 #[derive(Debug, Clone)]
 pub struct SchedulerConfig {
@@ -576,14 +575,6 @@ impl<'a> LtxPipeline<'a> {
             .to_device(latents.device())?
             .to_dtype(latents.dtype())?;
 
-        // Debug prints
-        if let Ok(m_vec) = mean.flatten_all()?.to_vec1::<f32>() {
-            println!("Pipeline denorm mean[0]: {}", m_vec[0]);
-        }
-        if let Ok(s_vec) = std.flatten_all()?.to_vec1::<f32>() {
-            println!("Pipeline denorm std[0]: {}", s_vec[0]);
-        }
-        println!("Pipeline scaling_factor: {}", scaling_factor);
 
         let x = latents.broadcast_mul(&std)?;
         let x = x
@@ -672,8 +663,6 @@ impl<'a> LtxPipeline<'a> {
         let effective_batch = batch_size * num_videos_per_prompt;
 
         // text embeddings
-        println!("  Encoding prompt...");
-        let _ = std::io::stdout().flush();
         let dtype = self.text_encoder.dtype();
         let prompt_in = prompt
             .clone()
@@ -704,8 +693,6 @@ impl<'a> LtxPipeline<'a> {
         }
 
         // latents
-        println!("  Preparing latents...");
-        let _ = std::io::stdout().flush();
         let num_channels_latents = self.transformer.config().in_channels;
         let mut latents = self.prepare_latents(
             effective_batch,
@@ -749,8 +736,6 @@ impl<'a> LtxPipeline<'a> {
             .saturating_sub(num_inference_steps * self.scheduler.order());
 
         // micro-conditions
-        println!("  Starting denoising loop ({} steps)", ts.len());
-        let _ = std::io::stdout().flush();
         let rope_interpolation_scale = (
             (self.vae_temporal_compression_ratio as f32) / (frame_rate as f32),
             self.vae_spatial_compression_ratio as f32,
@@ -765,8 +750,7 @@ impl<'a> LtxPipeline<'a> {
 
             self.current_timestep = Some(t);
 
-            println!("Denoising step {}/{} (t={})", i, ts.len(), t);
-            let _ = std::io::stdout().flush();
+            println!("Step {}/{}: t={}", i + 1, ts.len(), t);
 
             // Sequential CFG: run uncond and cond passes separately to save memory
             let noise_pred = if self.do_classifier_free_guidance() {
@@ -833,14 +817,8 @@ impl<'a> LtxPipeline<'a> {
                     .to_dtype(DType::F32)?
             };
 
-            if let Ok(np_vec) = noise_pred.flatten_all()?.to_vec1::<f32>() {
-                println!("  noise_pred[0..5]: {:?}", &np_vec[0..5]);
-            }
 
             latents = self.scheduler.step(&noise_pred, t, &latents)?;
-            if let Ok(l_vec) = latents.flatten_all()?.to_vec1::<f32>() {
-                println!("  latents statistics - first 5: {:?}", &l_vec[0..5]);
-            }
 
             if i == ts.len() - 1
                 || ((i + 1) > num_warmup_steps && (i + 1) % self.scheduler.order() == 0)
