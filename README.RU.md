@@ -71,19 +71,7 @@ cargo build --release
 cargo build --release --no-default-features
 
 # С выбранными фичами
-cargo build --release --features "cuda,flash-attn"
-```
-
-### Примечания для Windows
-
-Для пользователей Windows с CUDA выполните перед сборкой:
-
-```powershell
-# Настройка окружения
-.\build_env.ps1
-
-# Сборка с Flash Attention (опционально)
-.\build_with_flash_attn.cmd
+cargo build --release --features "cudnn,flash-attn"
 ```
 
 ## Быстрый старт
@@ -95,9 +83,7 @@ cargo build --release --features "cuda,flash-attn"
 
 ```bash
 cargo run --example ltx-video --release --features flash-attn,cudnn -- \
-    --prompt "Спокойное горное озеро на закате, фотореализм, 4к" \
-    --width 768 --height 512 --num-frames 97 \
-    --steps 30
+    --prompt "A futuristic cityscape with flying cars"
 ```
 
 #### 2. Ручной запуск (Локальные веса)
@@ -106,13 +92,14 @@ cargo run --example ltx-video --release --features flash-attn,cudnn -- \
 ```bash
 cargo run --example ltx-video --release --features flash-attn,cudnn -- \
     --local-weights ./models/ltx-video \
-    --prompt "Кот играет с клубком ниток" \
+    --prompt "A futuristic cityscape with flying cars" \
     --vae-tiling
 ```
 # Режим экономии памяти (с тайлингом VAE)
+```bash
 cargo run --example ltx-video --release --features flash-attn,cudnn -- \
     --local-weights ./models/ltx-video \
-    --prompt "Величественный орел, парящий над заснеженными горами" \
+    --prompt "A futuristic cityscape with flying cars" \
     --vae-tiling --vae-slicing
 ```
 
@@ -248,8 +235,8 @@ huggingface-cli download Lightricks/LTX-Video --local-dir ./models/ltx-video
 ```
 
 **Примерные требования VRAM (512x768, 97 кадров):**
-- Полная модель: ~24GB
-- C VAE тайлингом: ~16GB
+- Полная модель: ~8-12GB
+- C VAE тайлингом: ~8GB
 - С GGUF T5: экономия ~8GB
 
 ## Сравнение с PyTorch/diffusers

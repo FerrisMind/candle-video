@@ -71,19 +71,7 @@ cargo build --release
 cargo build --release --no-default-features
 
 # With specific features
-cargo build --release --features "cuda,flash-attn"
-```
-
-### Windows-specific Notes
-
-For Windows users with CUDA, run the following before building:
-
-```powershell
-# Set up environment
-.\build_env.ps1
-
-# Build with Flash Attention (optional)
-.\build_with_flash_attn.cmd
+cargo build --release --features "cudnn,flash-attn"
 ```
 
 ## Quick Start
@@ -95,9 +83,7 @@ Weights will be automatically downloaded from [oxide-lab/LTX-Video-0.9.5](https:
 
 ```bash
 cargo run --example ltx-video --release --features flash-attn,cudnn -- \
-    --prompt "A serene mountain lake at sunset, photorealistic, 4k" \
-    --width 768 --height 512 --num-frames 97 \
-    --steps 30
+    --prompt "A serene mountain lake at sunset, photorealistic, 4k"
 ```
 
 #### 2. Manual usage (Local weights)
@@ -110,6 +96,7 @@ cargo run --example ltx-video --release --features flash-attn,cudnn -- \
     --vae-tiling
 ```
 # Fast preview (384x256, 25 frames)
+```bash
 cargo run --example ltx-video --release --features flash-attn,cudnn -- \
     --local-weights ./models/ltx-video \
     --prompt "A futuristic cityscape with flying cars" \
@@ -117,8 +104,9 @@ cargo run --example ltx-video --release --features flash-attn,cudnn -- \
     --width 384 \
     --num-frames 25 \
     --steps 20
-
+```
 # Low VRAM mode (with VAE tiling)
+```bash
 cargo run --example ltx-video --release --features flash-attn,cudnn -- \
     --local-weights ./models/ltx-video \
     --prompt "A majestic eagle soaring over snow-capped mountains" \
@@ -257,8 +245,8 @@ For limited VRAM, enable these options:
 ```
 
 **Approximate VRAM requirements (512x768, 97 frames):**
-- Full model: ~24GB
-- With VAE tiling: ~16GB
+- Full model: ~8-12GB
+- With VAE tiling: ~8GB
 - With GGUF T5: saves ~8GB
 
 ## Comparison with PyTorch/diffusers

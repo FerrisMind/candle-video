@@ -23,9 +23,7 @@ LTX-Video is a powerful text-to-video generation model developed by Lightricks, 
 
 ```bash
 cargo run --example ltx-video --release --features flash-attn,cudnn -- \
-    --prompt "A serene mountain lake at sunset, photorealistic, 4k" \
-    --width 768 --height 512 --num-frames 97 \
-    --steps 30
+    --prompt "A serene mountain lake at sunset, photorealistic, 4k"
 ```
 
 ### Using Local Weights
@@ -79,15 +77,7 @@ cargo run --example ltx-video --release --features flash-attn,cudnn -- \
 
 - **Flash Attention**: Highly recommended for NVIDIA GPUs to reduce memory usage and increase speed.
 - **BF16 Inference**: The model runs in Brain Float 16 by default for optimal performance.
-- **Memory**: 97 frames at 512x768 requires ~24GB VRAM without optimizations, ~16GB with VAE tiling.
-
-## Example Outputs
-
-### With VAE Tiling
-![VAE Tiling Example](video_with_tiling2.gif)
-
-### Without Tiling
-![Standard Example](video_without_tiling.gif)
+- **Memory**: 97 frames at 512x768 requires ~8-12GB VRAM without optimizations, ~8GB with VAE tiling.
 
 ## Technical Details
 
