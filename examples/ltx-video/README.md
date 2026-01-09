@@ -23,6 +23,11 @@ LTX-Video is a powerful text-to-video generation model developed by Lightricks, 
 
 ## Running the Model
 
+### Demo
+
+<img src="https://raw.githubusercontent.com/FerrisMind/candle-video/main/examples/ltx-video/output/Demo1.gif" width=50% alt="Demo1" /><br>
+<br><img src="https://raw.githubusercontent.com/FerrisMind/candle-video/main/examples/ltx-video/output/Demo2.gif" width=50 alt="Demo2" /><br>
+
 ### Basic Usage (Auto-download from HuggingFace)
 
 ```bash

@@ -76,6 +76,10 @@ cargo build --release --features "cudnn,flash-attn"
 
 ### LTX-Video: Text-to-Video Generation
 
+#### Demo
+
+<img src="https://raw.githubusercontent.com/FerrisMind/candle-video/main/examples/ltx-video/output/Demo1.gif" width=50% alt="Demo1" /><br>
+
 #### 1. Automatic usage (Recommended)
 Weights will be automatically downloaded from [oxide-lab/LTX-Video-0.9.5](https://huggingface.co/oxide-lab/LTX-Video-0.9.5).
 
