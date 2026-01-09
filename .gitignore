@@ -5,6 +5,13 @@
 Cargo.lock
 **/*.rs.bk
 
+# Build scripts (local only)
+build_env.cmd
+build_env.ps1
+build_flash_attn.cmd
+build_with_flash_attn.cmd
+check_vae_keys.py
+
 # =============================================================================
 # Python
 # =============================================================================
@@ -76,7 +83,6 @@ tramp
 /models/
 *.safetensors
 *.bin
-!Cargo.lock
 *.gguf
 *.ckpt
 *.pt
@@ -155,3 +161,8 @@ README.HF.md
 /reference_output/
 /roundtrip_output/
 /notebooks/
+
+# =============================================================================
+# Agent / Workflows (local only)
+# =============================================================================
+/.agent/
