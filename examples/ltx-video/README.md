@@ -27,7 +27,7 @@ LTX-Video is a powerful text-to-video generation model developed by Lightricks, 
 #### 1. T2V
 <img src="https://raw.githubusercontent.com/FerrisMind/candle-video/main/examples/ltx-video/output/Demo1.gif" width=75% alt="Demo1" /><br>
 
-#### 1. T2V with key `--seed`
+#### 2. T2V with key `--seed`
 
 <img src="https://raw.githubusercontent.com/FerrisMind/candle-video/main/examples/ltx-video/output/Demo2.gif" width=75% alt="Demo2" />
 
