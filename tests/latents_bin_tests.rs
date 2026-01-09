@@ -1,3 +1,7 @@
+//! NOTE: This test uses legacy imports and is disabled.
+
+#![cfg(feature = "legacy_tests")]
+
 use candle_core::{DType, Device, Result, Tensor};
 use candle_video::{read_f32_tensor_with_header, write_f32_tensor_with_header};
 

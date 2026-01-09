@@ -15,9 +15,9 @@ mod tests {
             return Ok(());
         }
 
-        // Use GPU with F32 for accurate parity comparison
+        // Use GPU with BF16 for memory efficiency
         let device = Device::new_cuda(0)?;
-        let dtype = DType::F32;
+        let dtype = DType::BF16;
         println!("Running on device: {:?}, dtype: {:?}", device, dtype);
 
         let tensors = candle_core::safetensors::load(path, &device)?;

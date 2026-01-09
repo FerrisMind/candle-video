@@ -51,7 +51,9 @@ mod tests {
         let tensors = candle_core::safetensors::load(path, &device)?;
 
         // Load Python reference
-        let py_linspace = tensors.get("freq_linspace").expect("freq_linspace not found");
+        let py_linspace = tensors
+            .get("freq_linspace")
+            .expect("freq_linspace not found");
         let py_freq_base = tensors.get("freq_base").expect("freq_base not found");
         let py_freq_final = tensors.get("freq_final").expect("freq_final not found");
 
@@ -67,52 +69,88 @@ mod tests {
 
         // Step 1: linspace from 0 to 1
         let rust_linspace = linspace(0.0, 1.0, steps, &device)?;
-        
+
         println!("\n--- Linspace Comparison ---");
-        println!("Rust linspace first 5: {:?}", rust_linspace.narrow(0, 0, 5)?.to_vec1::<f32>()?);
-        println!("Python linspace first 5: {:?}", py_linspace.narrow(0, 0, 5)?.to_vec1::<f32>()?);
-        
+        println!(
+            "Rust linspace first 5: {:?}",
+            rust_linspace.narrow(0, 0, 5)?.to_vec1::<f32>()?
+        );
+        println!(
+            "Python linspace first 5: {:?}",
+            py_linspace.narrow(0, 0, 5)?.to_vec1::<f32>()?
+        );
+
         let linspace_mse = compute_mse(&rust_linspace, py_linspace)?;
         let linspace_max_diff = compute_max_diff(&rust_linspace, py_linspace)?;
         println!("Linspace MSE: {:.2e}", linspace_mse);
         println!("Linspace max diff: {:.2e}", linspace_max_diff);
-        
-        assert!(linspace_mse < 1e-10, "Linspace MSE too large: {}", linspace_mse);
+
+        assert!(
+            linspace_mse < 1e-10,
+            "Linspace MSE too large: {}",
+            linspace_mse
+        );
 
         // Step 2: theta ** linspace
         // exp(linspace * ln(theta)) = theta ** linspace
         let theta_ln = theta.ln() as f32;
         let rust_freq_base = (rust_linspace.affine(theta_ln as f64, 0.0)?).exp()?;
-        
+
         println!("\n--- Freq Base (theta ** linspace) Comparison ---");
-        println!("Rust freq_base first 5: {:?}", rust_freq_base.narrow(0, 0, 5)?.to_vec1::<f32>()?);
-        println!("Python freq_base first 5: {:?}", py_freq_base.narrow(0, 0, 5)?.to_vec1::<f32>()?);
-        println!("Rust freq_base last 5: {:?}", rust_freq_base.narrow(0, 336, 5)?.to_vec1::<f32>()?);
-        println!("Python freq_base last 5: {:?}", py_freq_base.narrow(0, 336, 5)?.to_vec1::<f32>()?);
-        
+        println!(
+            "Rust freq_base first 5: {:?}",
+            rust_freq_base.narrow(0, 0, 5)?.to_vec1::<f32>()?
+        );
+        println!(
+            "Python freq_base first 5: {:?}",
+            py_freq_base.narrow(0, 0, 5)?.to_vec1::<f32>()?
+        );
+        println!(
+            "Rust freq_base last 5: {:?}",
+            rust_freq_base.narrow(0, 336, 5)?.to_vec1::<f32>()?
+        );
+        println!(
+            "Python freq_base last 5: {:?}",
+            py_freq_base.narrow(0, 336, 5)?.to_vec1::<f32>()?
+        );
+
         let freq_base_mse = compute_mse(&rust_freq_base, py_freq_base)?;
         let freq_base_max_diff = compute_max_diff(&rust_freq_base, py_freq_base)?;
         println!("Freq base MSE: {:.2e}", freq_base_mse);
         println!("Freq base max diff: {:.2e}", freq_base_max_diff);
-        
+
         // MSE < 1e-5 is acceptable for F32 precision with large values (up to 10000)
         // The max diff is ~0.01 which is 0.0001% relative error for values ~10000
-        assert!(freq_base_mse < 1e-5, "Freq base MSE too large: {}", freq_base_mse);
+        assert!(
+            freq_base_mse < 1e-5,
+            "Freq base MSE too large: {}",
+            freq_base_mse
+        );
 
         // Step 3: * pi/2
         let rust_freq_final = rust_freq_base.affine(std::f64::consts::PI / 2.0, 0.0)?;
-        
+
         println!("\n--- Freq Final (* pi/2) Comparison ---");
-        println!("Rust freq_final first 5: {:?}", rust_freq_final.narrow(0, 0, 5)?.to_vec1::<f32>()?);
-        println!("Python freq_final first 5: {:?}", py_freq_final.narrow(0, 0, 5)?.to_vec1::<f32>()?);
-        
+        println!(
+            "Rust freq_final first 5: {:?}",
+            rust_freq_final.narrow(0, 0, 5)?.to_vec1::<f32>()?
+        );
+        println!(
+            "Python freq_final first 5: {:?}",
+            py_freq_final.narrow(0, 0, 5)?.to_vec1::<f32>()?
+        );
+
         let freq_final_mse = compute_mse(&rust_freq_final, py_freq_final)?;
         let freq_final_max_diff = compute_max_diff(&rust_freq_final, py_freq_final)?;
         println!("Freq final MSE: {:.2e}", freq_final_mse);
         println!("Freq final max diff: {:.2e}", freq_final_max_diff);
-        
+
         // MSE < 1e-5 is acceptable for F32 precision
-        assert!(freq_final_mse < 1e-5, "Freq final MSE too large: {}", freq_final_mse);
+        assert!(
+            freq_final_mse < 1e-5,
+            "Freq final MSE too large: {}",
+            freq_final_mse
+        );
 
         println!("\n✓ RoPE frequency computation matches Python!");
         Ok(())
@@ -136,19 +174,17 @@ mod tests {
 
         // Create RoPE module with same config as Python
         let rope = LtxVideoRotaryPosEmbed::new(
-            2048,  // dim
-            20,    // base_num_frames
-            2048,  // base_height
-            2048,  // base_width
-            1,     // patch_size
-            1,     // patch_size_t
+            2048,    // dim
+            20,      // base_num_frames
+            2048,    // base_height
+            2048,    // base_width
+            1,       // patch_size
+            1,       // patch_size_t
             10000.0, // theta
         );
 
         // Test configurations - start with smallest
-        let test_configs = [
-            (2, 2, 2),
-        ];
+        let test_configs = [(2, 2, 2)];
 
         for (num_frames, height, width) in test_configs {
             let batch_size = 1;
@@ -169,22 +205,39 @@ mod tests {
 
             // Load Python reference
             let key = format!("rope_f{}_h{}_w{}", num_frames, height, width);
-            let py_cos = tensors.get(&format!("{}_cos", key))
+            let py_cos = tensors
+                .get(&format!("{}_cos", key))
                 .expect(&format!("{}_cos not found", key));
-            let py_sin = tensors.get(&format!("{}_sin", key))
+            let py_sin = tensors
+                .get(&format!("{}_sin", key))
                 .expect(&format!("{}_sin not found", key));
 
-            println!("\n--- Config: f={}, h={}, w={} ---", num_frames, height, width);
+            println!(
+                "\n--- Config: f={}, h={}, w={} ---",
+                num_frames, height, width
+            );
             println!("Rust cos shape: {:?}", rust_cos.shape());
             println!("Python cos shape: {:?}", py_cos.shape());
-            
+
             // Print first few values for debugging
-            println!("Rust cos[0,0,:10]: {:?}", rust_cos.i((0, 0, 0..10))?.to_vec1::<f32>()?);
-            println!("Python cos[0,0,:10]: {:?}", py_cos.i((0, 0, 0..10))?.to_vec1::<f32>()?);
-            
+            println!(
+                "Rust cos[0,0,:10]: {:?}",
+                rust_cos.i((0, 0, 0..10))?.to_vec1::<f32>()?
+            );
+            println!(
+                "Python cos[0,0,:10]: {:?}",
+                py_cos.i((0, 0, 0..10))?.to_vec1::<f32>()?
+            );
+
             // Print values at position 1
-            println!("Rust cos[0,1,:10]: {:?}", rust_cos.i((0, 1, 0..10))?.to_vec1::<f32>()?);
-            println!("Python cos[0,1,:10]: {:?}", py_cos.i((0, 1, 0..10))?.to_vec1::<f32>()?);
+            println!(
+                "Rust cos[0,1,:10]: {:?}",
+                rust_cos.i((0, 1, 0..10))?.to_vec1::<f32>()?
+            );
+            println!(
+                "Python cos[0,1,:10]: {:?}",
+                py_cos.i((0, 1, 0..10))?.to_vec1::<f32>()?
+            );
 
             let cos_mse = compute_mse(&rust_cos, py_cos)?;
             let sin_mse = compute_mse(&rust_sin, py_sin)?;
@@ -221,15 +274,9 @@ mod tests {
 
         println!("=== RoPE with Video Coords Verification ===");
 
-        let rope = LtxVideoRotaryPosEmbed::new(
-            2048, 20, 2048, 2048, 1, 1, 10000.0,
-        );
+        let rope = LtxVideoRotaryPosEmbed::new(2048, 20, 2048, 2048, 1, 1, 10000.0);
 
-        let test_configs = [
-            (2, 2, 2),
-            (4, 4, 4),
-            (8, 16, 24),
-        ];
+        let test_configs = [(2, 2, 2), (4, 4, 4), (8, 16, 24)];
 
         for (num_frames, height, width) in test_configs {
             let batch_size = 1;
@@ -237,11 +284,14 @@ mod tests {
 
             // Load Python video_coords
             let key = format!("rope_coords_f{}_h{}_w{}", num_frames, height, width);
-            let py_video_coords = tensors.get(&format!("{}_video_coords", key))
+            let py_video_coords = tensors
+                .get(&format!("{}_video_coords", key))
                 .expect(&format!("{}_video_coords not found", key));
-            let py_cos = tensors.get(&format!("{}_cos", key))
+            let py_cos = tensors
+                .get(&format!("{}_cos", key))
                 .expect(&format!("{}_cos not found", key));
-            let py_sin = tensors.get(&format!("{}_sin", key))
+            let py_sin = tensors
+                .get(&format!("{}_sin", key))
                 .expect(&format!("{}_sin not found", key));
 
             // Create hidden states
@@ -260,8 +310,11 @@ mod tests {
                 Some(&video_coords),
             )?;
 
-            println!("\n--- Config with coords: f={}, h={}, w={} ---", num_frames, height, width);
-            
+            println!(
+                "\n--- Config with coords: f={}, h={}, w={} ---",
+                num_frames, height, width
+            );
+
             let cos_mse = compute_mse(&rust_cos, py_cos)?;
             let sin_mse = compute_mse(&rust_sin, py_sin)?;
 
@@ -291,29 +344,29 @@ mod tests {
         let base_num_frames = 20usize;
         let base_height = 2048usize;
         let base_width = 2048usize;
-        
+
         let rope = LtxVideoRotaryPosEmbed::new(
-            2048,           // dim
+            2048, // dim
             base_num_frames,
             base_height,
             base_width,
-            1,              // patch_size
-            1,              // patch_size_t
-            10000.0,        // theta
+            1,       // patch_size
+            1,       // patch_size_t
+            10000.0, // theta
         );
 
         // Create video_coords with known values
         // [B, seq, 3] where 3 = (frame, height, width)
         let batch_size = 1;
         let seq_len = 4;
-        
+
         // Test coordinates: frame=10, height=1024, width=512
         // After normalization: frame=10/20=0.5, height=1024/2048=0.5, width=512/2048=0.25
         let coords_data = vec![
-            10.0f32, 1024.0, 512.0,  // position 0
-            0.0, 0.0, 0.0,           // position 1 (origin)
-            20.0, 2048.0, 2048.0,    // position 2 (max = base sizes)
-            5.0, 512.0, 256.0,       // position 3
+            10.0f32, 1024.0, 512.0, // position 0
+            0.0, 0.0, 0.0, // position 1 (origin)
+            20.0, 2048.0, 2048.0, // position 2 (max = base sizes)
+            5.0, 512.0, 256.0, // position 3
         ];
         let video_coords = Tensor::from_vec(coords_data, (batch_size, seq_len, 3), &device)?;
 
@@ -323,36 +376,54 @@ mod tests {
         // Get RoPE output with video_coords
         let (cos1, sin1) = rope.forward(
             &hidden_states,
-            2, 2, 1, // dummy dimensions (not used when video_coords provided)
+            2,
+            2,
+            1, // dummy dimensions (not used when video_coords provided)
             None,
             Some(&video_coords),
         )?;
 
         // Now create normalized coords manually and compare
         let normalized_coords_data = vec![
-            10.0f32 / base_num_frames as f32, 1024.0 / base_height as f32, 512.0 / base_width as f32,
-            0.0, 0.0, 0.0,
-            20.0 / base_num_frames as f32, 2048.0 / base_height as f32, 2048.0 / base_width as f32,
-            5.0 / base_num_frames as f32, 512.0 / base_height as f32, 256.0 / base_width as f32,
+            10.0f32 / base_num_frames as f32,
+            1024.0 / base_height as f32,
+            512.0 / base_width as f32,
+            0.0,
+            0.0,
+            0.0,
+            20.0 / base_num_frames as f32,
+            2048.0 / base_height as f32,
+            2048.0 / base_width as f32,
+            5.0 / base_num_frames as f32,
+            512.0 / base_height as f32,
+            256.0 / base_width as f32,
         ];
-        
+
         println!("Expected normalized coords:");
-        println!("  Position 0: [{}, {}, {}]", 
-            normalized_coords_data[0], normalized_coords_data[1], normalized_coords_data[2]);
-        println!("  Position 1: [{}, {}, {}]", 
-            normalized_coords_data[3], normalized_coords_data[4], normalized_coords_data[5]);
-        println!("  Position 2: [{}, {}, {}]", 
-            normalized_coords_data[6], normalized_coords_data[7], normalized_coords_data[8]);
-        println!("  Position 3: [{}, {}, {}]", 
-            normalized_coords_data[9], normalized_coords_data[10], normalized_coords_data[11]);
+        println!(
+            "  Position 0: [{}, {}, {}]",
+            normalized_coords_data[0], normalized_coords_data[1], normalized_coords_data[2]
+        );
+        println!(
+            "  Position 1: [{}, {}, {}]",
+            normalized_coords_data[3], normalized_coords_data[4], normalized_coords_data[5]
+        );
+        println!(
+            "  Position 2: [{}, {}, {}]",
+            normalized_coords_data[6], normalized_coords_data[7], normalized_coords_data[8]
+        );
+        println!(
+            "  Position 3: [{}, {}, {}]",
+            normalized_coords_data[9], normalized_coords_data[10], normalized_coords_data[11]
+        );
 
         // The RoPE output should be consistent with the normalized coordinates
         // We can verify by checking that different coordinate values produce different outputs
-        
+
         // Position 0 and Position 2 should have different cos/sin values
         let cos_pos0 = cos1.i((0, 0, ..))?.to_vec1::<f32>()?;
         let cos_pos2 = cos1.i((0, 2, ..))?.to_vec1::<f32>()?;
-        
+
         // They should be different (not all equal)
         let mut diff_count = 0;
         for i in 0..cos_pos0.len() {
@@ -360,9 +431,16 @@ mod tests {
                 diff_count += 1;
             }
         }
-        
-        println!("\nDifferences between position 0 and position 2: {} out of {}", diff_count, cos_pos0.len());
-        assert!(diff_count > 0, "Positions with different coords should have different RoPE values");
+
+        println!(
+            "\nDifferences between position 0 and position 2: {} out of {}",
+            diff_count,
+            cos_pos0.len()
+        );
+        assert!(
+            diff_count > 0,
+            "Positions with different coords should have different RoPE values"
+        );
 
         // Position 1 (origin) should have specific values
         // At origin (0,0,0), normalized coords are (0,0,0)
@@ -371,9 +449,15 @@ mod tests {
         // cos(-x) = cos(x), sin(-x) = -sin(x)
         let cos_pos1 = cos1.i((0, 1, ..))?.to_vec1::<f32>()?;
         let sin_pos1 = sin1.i((0, 1, ..))?.to_vec1::<f32>()?;
-        
-        println!("\nPosition 1 (origin) first 10 cos values: {:?}", &cos_pos1[..10]);
-        println!("Position 1 (origin) first 10 sin values: {:?}", &sin_pos1[..10]);
+
+        println!(
+            "\nPosition 1 (origin) first 10 cos values: {:?}",
+            &cos_pos1[..10]
+        );
+        println!(
+            "Position 1 (origin) first 10 sin values: {:?}",
+            &sin_pos1[..10]
+        );
 
         // Verify that the output shapes are correct
         assert_eq!(cos1.dims(), &[batch_size, seq_len, 2048]);
@@ -393,17 +477,23 @@ mod tests {
         let head_dim = 64usize;
         let expected_scale = 1.0f32 / (head_dim as f32).sqrt();
         let computed_scale = 1.0f32 / 8.0f32; // sqrt(64) = 8
-        
+
         println!("Head dim: {}", head_dim);
         println!("Expected scale (1/sqrt(head_dim)): {}", expected_scale);
         println!("Computed scale: {}", computed_scale);
-        
-        assert!((expected_scale - computed_scale).abs() < 1e-6, 
-            "Scale factor mismatch: expected {}, got {}", expected_scale, computed_scale);
-        
+
+        assert!(
+            (expected_scale - computed_scale).abs() < 1e-6,
+            "Scale factor mismatch: expected {}, got {}",
+            expected_scale,
+            computed_scale
+        );
+
         // Verify that the scale factor is 0.125 for head_dim=64
-        assert!((expected_scale - 0.125).abs() < 1e-6,
-            "Scale factor should be 0.125 for head_dim=64");
+        assert!(
+            (expected_scale - 0.125).abs() < 1e-6,
+            "Scale factor should be 0.125 for head_dim=64"
+        );
 
         // The softmax being in F32 is verified by code inspection:
         // In LtxAttention::forward():
@@ -412,11 +502,11 @@ mod tests {
         // - att = nn::ops::softmax(&att, D::Minus1)? // softmax on F32 tensor
         // - out_f32 = att.matmul(&v_f32)?
         // - out_f32.to_dtype(dtype)? // convert back to original dtype
-        
+
         println!("\n✓ Attention computation verified:");
         println!("  - Scale factor = 1/sqrt(head_dim) = 1/sqrt(64) = 0.125");
         println!("  - Softmax computed in F32 (verified by code inspection)");
-        
+
         Ok(())
     }
 
@@ -474,28 +564,36 @@ mod tests {
         let model = LtxVideoTransformer3DModel::new(&config, vb)?;
 
         // Test configurations
-        let test_configs = [
-            ("small_f2_h8_w8", 2, 8, 8),
-            ("small_f4_h8_w8", 4, 8, 8),
-        ];
+        let test_configs = [("small_f2_h8_w8", 2, 8, 8), ("small_f4_h8_w8", 4, 8, 8)];
 
         for (prefix, num_frames, height, width) in test_configs {
-            println!("\n--- Config: {} (f={}, h={}, w={}) ---", prefix, num_frames, height, width);
+            println!(
+                "\n--- Config: {} (f={}, h={}, w={}) ---",
+                prefix, num_frames, height, width
+            );
 
             // Load inputs
-            let hidden_states = tensors.get(&format!("{}_hidden_states", prefix))
+            let hidden_states = tensors
+                .get(&format!("{}_hidden_states", prefix))
                 .expect(&format!("{}_hidden_states not found", prefix));
-            let encoder_hidden_states = tensors.get(&format!("{}_encoder_hidden_states", prefix))
+            let encoder_hidden_states = tensors
+                .get(&format!("{}_encoder_hidden_states", prefix))
                 .expect(&format!("{}_encoder_hidden_states not found", prefix));
-            let timestep = tensors.get(&format!("{}_timestep", prefix))
+            let timestep = tensors
+                .get(&format!("{}_timestep", prefix))
                 .expect(&format!("{}_timestep not found", prefix));
-            let encoder_attention_mask = tensors.get(&format!("{}_encoder_attention_mask", prefix))
+            let encoder_attention_mask = tensors
+                .get(&format!("{}_encoder_attention_mask", prefix))
                 .expect(&format!("{}_encoder_attention_mask not found", prefix));
-            let expected_output = tensors.get(&format!("{}_output", prefix))
+            let expected_output = tensors
+                .get(&format!("{}_output", prefix))
                 .expect(&format!("{}_output not found", prefix));
 
             println!("Hidden states shape: {:?}", hidden_states.shape());
-            println!("Encoder hidden states shape: {:?}", encoder_hidden_states.shape());
+            println!(
+                "Encoder hidden states shape: {:?}",
+                encoder_hidden_states.shape()
+            );
             println!("Timestep: {:?}", timestep.to_vec1::<f32>()?);
 
             // Run forward pass
@@ -508,8 +606,8 @@ mod tests {
                 height,
                 width,
                 Some((1.0, 1.0, 1.0)), // rope_interpolation_scale
-                None,                   // video_coords
-                None,                   // skip_layer_mask
+                None,                  // video_coords
+                None,                  // skip_layer_mask
             )?;
 
             println!("Output shape: {:?}", output.shape());
@@ -530,7 +628,12 @@ mod tests {
 
             // Threshold: MSE < 1e-4 as per requirements
             assert!(mse < 1e-4, "MSE too large for {}: {:.2e}", prefix, mse);
-            assert!(max_diff < 0.01, "Max diff too large for {}: {:.2e}", prefix, max_diff);
+            assert!(
+                max_diff < 0.01,
+                "Max diff too large for {}: {:.2e}",
+                prefix,
+                max_diff
+            );
         }
 
         println!("\n✓ Transformer full forward pass matches Python!");
@@ -574,29 +677,38 @@ mod tests {
         let s = one.broadcast_add(&scale)?; // 1 + scale
         let s_broadcast = s.broadcast_as((batch_size, seq_len, dim))?;
         let shift_broadcast = shift.broadcast_as((batch_size, seq_len, dim))?;
-        
-        let result = x.broadcast_mul(&s_broadcast)?.broadcast_add(&shift_broadcast)?;
+
+        let result = x
+            .broadcast_mul(&s_broadcast)?
+            .broadcast_add(&shift_broadcast)?;
 
         // Verify manually for first element
         // x[0,0,0] = 0.0, scale[0,0,0] = 0.0, shift[0,0,0] = 0.0
         // result[0,0,0] = 0.0 * (1 + 0.0) + 0.0 = 0.0
         let result_vec = result.flatten_all()?.to_vec1::<f32>()?;
         println!("Result[0,0,0]: {}", result_vec[0]);
-        assert!((result_vec[0] - 0.0).abs() < 1e-6, "First element should be 0.0");
+        assert!(
+            (result_vec[0] - 0.0).abs() < 1e-6,
+            "First element should be 0.0"
+        );
 
         // Verify for another element
         // x[0,0,1] = 0.1, scale[0,0,1] = 0.01, shift[0,0,1] = 0.001
         // result[0,0,1] = 0.1 * (1 + 0.01) + 0.001 = 0.1 * 1.01 + 0.001 = 0.101 + 0.001 = 0.102
         let expected = 0.1 * 1.01 + 0.001;
         println!("Result[0,0,1]: {}, expected: {}", result_vec[1], expected);
-        assert!((result_vec[1] - expected).abs() < 1e-5, 
-            "Second element mismatch: got {}, expected {}", result_vec[1], expected);
+        assert!(
+            (result_vec[1] - expected).abs() < 1e-5,
+            "Second element mismatch: got {}, expected {}",
+            result_vec[1],
+            expected
+        );
 
         // Verify order of operations: multiplication before addition
         // This is important because (x * 1 + x * scale) + shift != x * (1 + scale + shift)
         let wrong_order = x.broadcast_mul(&one.broadcast_add(&scale)?.broadcast_add(&shift)?)?;
         let wrong_vec = wrong_order.flatten_all()?.to_vec1::<f32>()?;
-        
+
         // The wrong order should give different results (except for edge cases)
         let mut differences = 0;
         for i in 0..result_vec.len() {
@@ -604,20 +716,22 @@ mod tests {
                 differences += 1;
             }
         }
-        println!("\nDifferences between correct and wrong order: {} out of {}", 
-            differences, result_vec.len());
-        
+        println!(
+            "\nDifferences between correct and wrong order: {} out of {}",
+            differences,
+            result_vec.len()
+        );
+
         // Most elements should be different (unless shift is very small)
         // In our case, shift is small but non-zero, so there should be some differences
-        
+
         println!("\n✓ AdaLayerNorm modulation verified:");
         println!("  - Formula: x * (1 + scale) + shift");
         println!("  - Order: multiply first, then add shift");
-        
+
         Ok(())
     }
 }
-
 
 // =========================================================================
 // Task 5.6: Property-Based Tests for Transformer Parity

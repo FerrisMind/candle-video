@@ -9,6 +9,11 @@
 //! - Add noise / scale noise operations
 //! - Shift terminal stretching
 //! - Edge cases and error handling
+//!
+//! NOTE: This test uses legacy imports and is disabled.
+//! Use verify_scheduler_parity.rs for current parity testing.
+
+#![cfg(feature = "legacy_tests")]
 
 use candle_core::{DType, Device, Result, Tensor};
 use candle_video::{RectifiedFlowScheduler, SchedulerConfig};

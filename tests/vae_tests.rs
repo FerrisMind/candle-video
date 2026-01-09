@@ -1,6 +1,11 @@
 //! Tests for VAE Encoder
 //!
 //! Tests for the VAE encoder components used in image-to-video conditioning.
+//!
+//! NOTE: This test uses legacy imports and is disabled.
+//! Use verify_vae_parity.rs for current parity testing.
+
+#![cfg(feature = "legacy_tests")]
 
 use candle_core::{Device, IndexOp, Result, Tensor};
 use candle_video::config::VaeConfig;

@@ -1,4 +1,9 @@
 //! Integration tests for candle-video
+//!
+//! NOTE: This test uses legacy imports and is disabled.
+//! Use verify_*_parity.rs tests for current parity testing.
+
+#![cfg(feature = "legacy_tests")]
 
 use candle_core::Device;
 use candle_video::*;

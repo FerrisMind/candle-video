@@ -6,6 +6,11 @@
 //! 3. Place model at `ltxv-2b-0.9.8-distilled/ltxv-2b-0.9.8-distilled.safetensors`
 //!
 //! Run with: cargo test --release --test dit_reference_test -- --ignored
+//!
+//! NOTE: This test uses legacy imports and is disabled.
+//! Use verify_dit_parity.rs for current parity testing.
+
+#![cfg(feature = "legacy_tests")]
 
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;

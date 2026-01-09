@@ -1,5 +1,10 @@
 //! Debug test for DiT intermediate values
 //! Run with: cargo test --test dit_debug_test -- --nocapture
+//!
+//! NOTE: This test uses legacy imports and is disabled.
+//! Use verify_dit_parity.rs for current parity testing.
+
+#![cfg(feature = "legacy_tests")]
 
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;

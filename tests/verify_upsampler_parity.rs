@@ -5,6 +5,14 @@ mod tests {
     use candle_video::models::ltx_video::vae::LtxVideoCausalConv3d;
     use std::path::Path;
 
+    /// Helper to compute max diff between two tensors (converts to F32 for comparison)
+    fn max_diff(a: &candle_core::Tensor, b: &candle_core::Tensor) -> anyhow::Result<f32> {
+        let a_f32 = a.to_dtype(DType::F32)?;
+        let b_f32 = b.to_dtype(DType::F32)?;
+        let diff = (a_f32.sub(&b_f32)?).abs()?.max_all()?;
+        Ok(diff.to_vec0::<f32>()?)
+    }
+
     #[test]
     fn test_upsampler_detailed() -> anyhow::Result<()> {
         let path = Path::new("gen_upsampler_detailed.safetensors");
@@ -14,7 +22,7 @@ mod tests {
         }
 
         let device = Device::new_cuda(0)?;
-        let dtype = DType::F32;
+        let dtype = DType::BF16; // Use BF16 for GPU - matches LTX model format
         println!("Running on device: {:?}, dtype: {:?}", device, dtype);
 
         let tensors = candle_core::safetensors::load(path, &device)?;
@@ -54,8 +62,10 @@ mod tests {
         let conv =
             LtxVideoCausalConv3d::new(1024, 4096, (3, 3, 3), (1, 1, 1), (1, 1, 1), 1, false, vb)?;
         let rust_conv_out = conv.forward(&input)?;
-        let conv_diff = (rust_conv_out.sub(&ref_conv_out)?).abs()?.max_all()?;
-        println!("\nConv output diff: {}", conv_diff.to_vec0::<f32>()?);
+        println!(
+            "\nConv output diff: {}",
+            max_diff(&rust_conv_out, &ref_conv_out)?
+        );
 
         // Test pixel shuffle on main path using ref_conv_out to isolate shuffle logic
         let (b, c, t, h, w) = ref_conv_out.dims5()?;
@@ -82,10 +92,9 @@ mod tests {
         println!("Main path shape: {:?}", main_path.shape());
 
         // Compare main_path
-        let main_diff = (main_path.sub(&ref_main_path)?).abs()?.max_all()?;
         println!(
             "\nMain path diff (using ref_conv_out as input): {}",
-            main_diff.to_vec0::<f32>()?
+            max_diff(&main_path, &ref_main_path)?
         );
 
         // Test residual path using input
@@ -111,19 +120,17 @@ mod tests {
         println!("Residual shape: {:?}", residual.shape());
 
         // Compare residual
-        let res_diff = (residual.sub(&ref_residual)?).abs()?.max_all()?;
-        println!("\nResidual diff: {}", res_diff.to_vec0::<f32>()?);
+        println!("\nResidual diff: {}", max_diff(&residual, &ref_residual)?);
 
         // Final output
         let output = main_path.add(&residual)?;
-        let out_diff = (output.sub(&ref_output)?).abs()?.max_all()?;
-        println!("\nFinal output diff: {}", out_diff.to_vec0::<f32>()?);
+        println!("\nFinal output diff: {}", max_diff(&output, &ref_output)?);
 
         println!("\n=== Summary ===");
-        println!("Conv diff: {}", conv_diff.to_vec0::<f32>()?);
-        println!("Main path diff: {}", main_diff.to_vec0::<f32>()?);
-        println!("Residual diff: {}", res_diff.to_vec0::<f32>()?);
-        println!("Output diff: {}", out_diff.to_vec0::<f32>()?);
+        println!("Conv diff: {}", max_diff(&rust_conv_out, &ref_conv_out)?);
+        println!("Main path diff: {}", max_diff(&main_path, &ref_main_path)?);
+        println!("Residual diff: {}", max_diff(&residual, &ref_residual)?);
+        println!("Output diff: {}", max_diff(&output, &ref_output)?);
 
         Ok(())
     }

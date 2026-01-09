@@ -19,7 +19,9 @@ mod tests {
 
     const PARITY_FILE: &str = "gen_scheduler_parity.safetensors";
 
-    fn load_reference_tensors(device: &Device) -> Option<std::collections::HashMap<String, Tensor>> {
+    fn load_reference_tensors(
+        device: &Device,
+    ) -> Option<std::collections::HashMap<String, Tensor>> {
         let path = Path::new(PARITY_FILE);
         if !path.exists() {
             println!(
@@ -28,7 +30,9 @@ mod tests {
             );
             return None;
         }
-        Some(candle_core::safetensors::load(path, device).expect("Failed to load reference tensors"))
+        Some(
+            candle_core::safetensors::load(path, device).expect("Failed to load reference tensors"),
+        )
     }
 
     fn compute_mse(a: &Tensor, b: &Tensor) -> f32 {
@@ -490,10 +494,10 @@ mod tests {
         scheduler.set_timesteps(Some(40), &device, None, Some(1.5), None)?;
 
         // Create test tensors in BF16 (typical model dtype)
-        let sample_bf16 = Tensor::randn(0f32, 1f32, (1, 128, 2, 8, 8), &device)?
-            .to_dtype(DType::BF16)?;
-        let model_output_bf16 = Tensor::randn(0f32, 1f32, (1, 128, 2, 8, 8), &device)?
-            .to_dtype(DType::BF16)?;
+        let sample_bf16 =
+            Tensor::randn(0f32, 1f32, (1, 128, 2, 8, 8), &device)?.to_dtype(DType::BF16)?;
+        let model_output_bf16 =
+            Tensor::randn(0f32, 1f32, (1, 128, 2, 8, 8), &device)?.to_dtype(DType::BF16)?;
 
         let timesteps = scheduler.timesteps().to_vec1::<f32>()?;
         let t = timesteps[0];
@@ -576,7 +580,6 @@ mod tests {
         Ok(())
     }
 }
-
 
 // =========================================================================
 // Task 2.4: Property-Based Tests for Scheduler Parity

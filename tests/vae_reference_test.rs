@@ -1,6 +1,11 @@
 //! VAE reference test - compare Rust output with Python diffusers reference
 //!
 //! Run: cargo test --release --test vae_reference_test -- --ignored --nocapture
+//!
+//! NOTE: This test uses legacy imports and is disabled.
+//! Use verify_vae_parity.rs for current parity testing.
+
+#![cfg(feature = "legacy_tests")]
 
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;

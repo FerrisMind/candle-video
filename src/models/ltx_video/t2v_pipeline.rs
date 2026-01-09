@@ -745,10 +745,10 @@ impl<'a> LtxPipeline<'a> {
         let latent_width = width / self.vae_spatial_compression_ratio;
 
         let video_sequence_length = latent_num_frames * latent_height * latent_width;
-        
+
         // Check if sigmas were provided before moving
         let has_custom_sigmas = sigmas_provided.is_some();
-        
+
         let sigmas = if sigmas_provided.is_none() && timesteps.is_none() {
             Some(linspace(
                 1.0,

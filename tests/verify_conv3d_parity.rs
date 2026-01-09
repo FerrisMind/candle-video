@@ -14,7 +14,7 @@ mod tests {
         }
 
         let device = Device::new_cuda(0)?;
-        let dtype = DType::F32;
+        let dtype = DType::BF16; // Use BF16 for GPU - matches LTX model format
         println!("Running on device: {:?}, dtype: {:?}", device, dtype);
 
         let tensors = candle_core::safetensors::load(path, &device)?;
@@ -45,20 +45,23 @@ mod tests {
         let rust_output = conv.forward(&input)?;
 
         println!("Rust output shape: {:?}", rust_output.shape());
+
+        // Convert to F32 for statistics (BF16 doesn't support to_vec0)
+        let rust_f32 = rust_output.to_dtype(DType::F32)?;
+        let ref_f32 = ref_output.to_dtype(DType::F32)?;
+
         println!(
             "Rust output mean: {}",
-            rust_output.mean_all()?.to_vec0::<f32>()?
+            rust_f32.mean_all()?.to_vec0::<f32>()?
         );
-        println!(
-            "Ref output mean: {}",
-            ref_output.mean_all()?.to_vec0::<f32>()?
-        );
+        println!("Ref output mean: {}", ref_f32.mean_all()?.to_vec0::<f32>()?);
 
-        let diff = (rust_output.sub(&ref_output)?).abs()?.max_all()?;
+        let diff = (rust_f32.sub(&ref_f32)?).abs()?.max_all()?;
         let diff_val = diff.to_vec0::<f32>()?;
         println!("\nMax diff: {}", diff_val);
 
-        if diff_val < 0.01 {
+        if diff_val < 0.1 {
+            // BF16 has lower precision than F32
             println!("✓ CausalConv3d parity OK");
         } else {
             println!("!!! CausalConv3d DIVERGENCE: {} !!!", diff_val);

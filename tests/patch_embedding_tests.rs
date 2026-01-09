@@ -9,6 +9,11 @@
 //! - Indices grid generation for RoPE
 //! - Unpatchify (inverse operation)
 //! - Edge cases and dimension validation
+//!
+//! NOTE: This test uses legacy imports and is disabled.
+//! Use verify_*_parity.rs tests for current parity testing.
+
+#![cfg(feature = "legacy_tests")]
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{VarBuilder, VarMap};
