@@ -77,7 +77,7 @@ cargo build --release --features "cudnn,flash-attn"
 
 #### Демо
 
-<img src="https://raw.githubusercontent.com/FerrisMind/candle-video/main/examples/ltx-video/output/Demo1.gif" width=50% alt="Demo1" /><br>
+<img src="https://raw.githubusercontent.com/FerrisMind/candle-video/main/examples/ltx-video/output/Demo1.gif" width=75% alt="Demo1" /><br>
 
 #### 1. Автоматический запуск (Рекомендуется)
 Веса будут автоматически скачаны из [oxide-lab/LTX-Video-0.9.5](https://huggingface.co/oxide-lab/LTX-Video-0.9.5).
