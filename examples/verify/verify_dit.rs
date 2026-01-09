@@ -85,6 +85,7 @@ fn main() -> Result<()> {
         8,
         Some((1.0, 1.0, 1.0)),
         None,
+        None, // skip_layer_mask
     )?;
 
     println!("Rust Output shape: {:?}", rust_output.dims());

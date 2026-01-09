@@ -40,14 +40,14 @@ impl Default for FlowMatchEulerDiscreteSchedulerConfig {
         Self {
             num_train_timesteps: 1000,
             shift: 1.0,
-            // Official Lightricks config from LTX-Video repo
-            use_dynamic_shifting: true,
-            base_shift: Some(0.95),
-            max_shift: Some(2.05),
-            base_image_seq_len: Some(1024), // Lightricks official
+            // Official Lightricks config from LTX-Video 0.9.5
+            use_dynamic_shifting: false,
+            base_shift: Some(0.5),
+            max_shift: Some(1.15),
+            base_image_seq_len: Some(256),
             max_image_seq_len: Some(4096),
             invert_sigmas: false,
-            shift_terminal: Some(0.1), // Lightricks official
+            shift_terminal: None,
             use_karras_sigmas: false,
             use_exponential_sigmas: false,
             use_beta_sigmas: false,
@@ -338,13 +338,16 @@ impl FlowMatchEulerDiscreteScheduler {
         };
 
         // 2) Perform shifting (dynamic or fixed)
-        if self.config.use_dynamic_shifting {
-            let mu = mu.unwrap();
+        if let Some(mu) = mu {
+            // Use exponential time shift (SD3 style)
             sigmas_vec = sigmas_vec
                 .into_iter()
                 .map(|t| self.time_shift_scalar(mu, 1.0, t))
                 .collect();
+        } else if self.config.use_dynamic_shifting {
+            bail!("mu must be provided when use_dynamic_shifting = true.");
         } else {
+            // Use standard linear/rational shift
             let shift = self.config.shift;
             sigmas_vec = sigmas_vec
                 .into_iter()
@@ -583,12 +586,10 @@ impl FlowMatchEulerDiscreteScheduler {
             *si += 1;
         }
 
-        // If not per-token, cast back to model_output dtype (Python does this).
-        let prev_sample = if per_token_timesteps.is_none() {
-            prev_sample.to_dtype(model_output.dtype())?
-        } else {
-            prev_sample
-        };
+        // PRECISION FIX: Keep result in F32 to prevent error accumulation over multiple steps.
+        // The pipeline will convert to model dtype only when needed for transformer forward.
+        // Previously: prev_sample.to_dtype(model_output.dtype())? for non per-token case
+        // Now: Always return F32 to maintain precision throughout denoising loop.
 
         Ok(FlowMatchEulerDiscreteSchedulerOutput { prev_sample })
     }

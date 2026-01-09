@@ -111,6 +111,7 @@ fn main() -> Result<()> {
         w,
         rope_scale,
         None, // video_coords
+        None, // skip_layer_mask
     )?;
 
     // 4. CFG

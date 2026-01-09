@@ -1052,14 +1052,19 @@ impl LtxVideoUpsampler3d {
         stride: (usize, usize, usize),
         is_causal: bool,
         residual: bool,
-        _up_scale_factor: usize,
+        _upscale_factor: usize,
         vb: VarBuilder,
     ) -> Result<Self> {
         let (st, sh, sw) = stride;
+        let stride_product = st * sh * sw;
         // Conv output needs to be such that after shuffle we get out_channels.
-        // Shuffle reduces channels by (st * sh * sw).
-        // So conv_out = out_channels * (st * sh * sw).
-        let conv_out_channels = out_channels * st * sh * sw;
+        // Shuffle reduces channels by stride_product.
+        // So conv_out = out_channels * stride_product.
+        let conv_out_channels = out_channels * stride_product;
+        // For residual: must match main path channels after shuffle
+        // main_channels = conv_out_channels / stride_product = out_channels
+        // residual_channels = in_channels / stride_product
+        // channel_repeats = main_channels / residual_channels = (out_channels * stride_product / in_channels)
         let channel_repeats = conv_out_channels / in_channels;
 
         let conv = LtxVideoCausalConv3d::new(
@@ -1467,16 +1472,16 @@ impl LtxVideoEncoder3d {
 pub struct LtxVideoDecoder3d {
     patch_size: usize,
     patch_size_t: usize,
-    conv_in: LtxVideoCausalConv3d,
-    mid_block: LtxVideoMidBlock3d,
-    up_blocks: Vec<LtxVideoUpBlock3d>,
-    norm_out: Option<RmsNorm>,
-    conv_act: Activation,
-    conv_out: LtxVideoCausalConv3d,
+    pub conv_in: LtxVideoCausalConv3d,
+    pub mid_block: LtxVideoMidBlock3d,
+    pub up_blocks: Vec<LtxVideoUpBlock3d>,
+    pub norm_out: Option<RmsNorm>,
+    pub conv_act: Activation,
+    pub conv_out: LtxVideoCausalConv3d,
     // Timestep conditioning
-    time_embedder: Option<CombinedTimestepEmbedder>,
-    scale_shift_table: Option<Tensor>,
-    timestep_scale_multiplier: Option<Tensor>,
+    pub time_embedder: Option<CombinedTimestepEmbedder>,
+    pub scale_shift_table: Option<Tensor>,
+    pub timestep_scale_multiplier: Option<Tensor>,
     pub gradient_checkpointing: bool,
 }
 
@@ -1618,7 +1623,7 @@ impl LtxVideoDecoder3d {
         })
     }
 
-    fn unpatchify(&self, x: &Tensor) -> Result<Tensor> {
+    pub fn unpatchify(&self, x: &Tensor) -> Result<Tensor> {
         // Python: reshape(batch, -1, p_t, p, p, num_frames, height, width)
         //         permute(0, 1, 5, 2, 6, 4, 7, 3)
         //         flatten(6, 7).flatten(4, 5).flatten(2, 3)
@@ -1628,7 +1633,7 @@ impl LtxVideoDecoder3d {
         let out_c = c / (pt * p * p); // 48 / 16 = 3
         let x = x.reshape(&[b, out_c, pt, p, p, f, h, w])?;
 
-        // permute(0, 1, 5, 2, 6, 4, 7, 3) -> [B, C, F, pt, H, p, W, p]
+        // permute(0, 1, 5, 2, 6, 4, 7, 3) -> [B, C, F, pt, H, p_h, W, p_w]
         let x = x.permute(vec![0, 1, 5, 2, 6, 4, 7, 3])?;
         let x = x.contiguous()?;
 

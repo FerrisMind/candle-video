@@ -176,22 +176,30 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let ltxv_config =
         candle_video::models::ltx_video::configs::get_config_by_version(&args.ltxv_version);
-    let num_inference_steps = args.steps.unwrap_or(ltxv_config.inference.num_inference_steps);
-    let guidance_scale = args.guidance_scale.unwrap_or(ltxv_config.inference.guidance_scale);
-    let rescaling_scale = args.rescaling_scale.unwrap_or(ltxv_config.inference.rescaling_scale);
+    let num_inference_steps = args
+        .steps
+        .unwrap_or(ltxv_config.inference.num_inference_steps);
+    let guidance_scale = args
+        .guidance_scale
+        .unwrap_or(ltxv_config.inference.guidance_scale);
+    let rescaling_scale = args
+        .rescaling_scale
+        .unwrap_or(ltxv_config.inference.rescaling_scale);
     let stochastic_sampling = args
         .stochastic_sampling
         .unwrap_or(ltxv_config.inference.stochastic_sampling);
+    let stg_scale = args.stg_scale.unwrap_or(ltxv_config.inference.stg_scale);
 
     println!("LTX-Video Text-to-Video Generation");
     println!("==================================");
     println!("Prompt: {}", args.prompt);
     println!(
-        "Version: {} (steps={}, guidance={:.2}, rescale={:.2}, stochastic={})",
+        "Version: {} (steps={}, guidance={:.2}, rescale={:.2}, stg={:.2}, stochastic={})",
         args.ltxv_version,
         num_inference_steps,
         guidance_scale,
         rescaling_scale,
+        stg_scale,
         stochastic_sampling
     );
     println!(
@@ -222,7 +230,10 @@ fn main() -> anyhow::Result<()> {
         if let Some(local_path) = &args.local_weights {
             let base = PathBuf::from(local_path);
 
-            let transformer = if base
+            let transformer = if args.unified_weights.is_some() {
+                // When using unified weights, transformer is embedded in the single file
+                PathBuf::from("dummy") // Will be ignored
+            } else if base
                 .join("transformer/diffusion_pytorch_model.safetensors")
                 .exists()
             {
@@ -233,7 +244,10 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!("Transformer weights not found in {:?}", base);
             };
 
-            let vae = if base
+            let vae = if args.unified_weights.is_some() {
+                // When using unified weights, VAE is embedded in the single file
+                PathBuf::from("dummy") // Will be ignored
+            } else if base
                 .join("vae/diffusion_pytorch_model.safetensors")
                 .exists()
             {
@@ -451,9 +465,10 @@ fn main() -> anyhow::Result<()> {
                     .to_string();
                 vae_tensors.insert(clean_key, tensor);
             } else if KeyRemapper::is_transformer_key(&key) {
-                // Remove "transformer." prefix if present
+                // Remove native "model.diffusion_model." or "transformer." prefix
                 let clean_key = remapped_key
-                    .strip_prefix("transformer.")
+                    .strip_prefix("model.diffusion_model.")
+                    .or_else(|| remapped_key.strip_prefix("transformer."))
                     .unwrap_or(&remapped_key)
                     .to_string();
                 trans_tensors.insert(clean_key, tensor);
@@ -573,6 +588,14 @@ fn main() -> anyhow::Result<()> {
     );
     pipeline.guidance_rescale = rescaling_scale;
 
+    let sigmas_from_config = ltxv_config.inference.timesteps.clone();
+    let decode_timestep = ltxv_config
+        .inference
+        .decode_timestep
+        .clone()
+        .unwrap_or(vec![0.0]);
+    let decode_noise_scale = ltxv_config.inference.decode_noise_scale.clone();
+
     let video_out = pipeline.call(
         None, // prompt
         None, // negative_prompt
@@ -581,19 +604,22 @@ fn main() -> anyhow::Result<()> {
         args.num_frames,
         25,
         num_inference_steps,
-        None,
+        None,               // timesteps
+        sigmas_from_config, // sigmas_provided
         guidance_scale,
-        0.0,
+        rescaling_scale,
+        stg_scale,
         1,
         Some(latents_packed), // Pass packed latents
         Some(prompt_embeds),
         Some(prompt_attention_mask),
         Some(negative_prompt_embeds),
         Some(negative_prompt_attention_mask),
-        vec![0.0],
-        None,
+        decode_timestep,
+        decode_noise_scale,
         OutputType::Tensor,
         128,
+        Some(ltxv_config.inference.skip_block_list.clone()),
         &device,
     )?;
 

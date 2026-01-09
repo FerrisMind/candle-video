@@ -63,6 +63,7 @@ fn main() -> Result<()> {
         width,
         rope_interpolation_scale,
         None,
+        None, // skip_layer_mask
     )?;
 
     // 5. Compare

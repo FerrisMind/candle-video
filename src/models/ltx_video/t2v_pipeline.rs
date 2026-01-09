@@ -1,4 +1,4 @@
-use candle_core::{DType, Device, Result, Tensor};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 
 #[derive(Debug, Clone)]
 pub struct SchedulerConfig {
@@ -57,6 +57,7 @@ pub struct TransformerConfig {
     pub in_channels: usize,
     pub patch_size: usize,
     pub patch_size_t: usize,
+    pub num_layers: usize,
 }
 
 pub trait VideoTransformer3D {
@@ -73,8 +74,12 @@ pub trait VideoTransformer3D {
         num_frames: usize,
         height: usize,
         width: usize,
-        rope_interpolation_scale: (f32, f32, f32),
+        rope_interpolation_scale: Option<(f32, f32, f32)>,
+        video_coords: Option<&Tensor>,
+        skip_layer_mask: Option<&Tensor>,
     ) -> Result<Tensor>;
+
+    fn set_skip_block_list(&mut self, list: Vec<usize>);
 }
 
 #[derive(Debug, Clone)]
@@ -255,6 +260,7 @@ pub struct LtxPipeline<'a> {
     // runtime state (аналог properties в python)
     pub guidance_scale: f32,
     pub guidance_rescale: f32,
+    pub stg_scale: f32,
     pub num_timesteps: usize,
     pub current_timestep: Option<i64>,
     pub interrupt: bool,
@@ -288,10 +294,15 @@ impl<'a> LtxPipeline<'a> {
             transformer_temporal_patch_size: tcfg.patch_size_t,
             guidance_scale: 1.0,
             guidance_rescale: 0.0,
+            stg_scale: 1.0,
             num_timesteps: 0,
             current_timestep: None,
             interrupt: false,
         }
+    }
+
+    pub fn do_spatio_temporal_guidance(&self) -> bool {
+        self.stg_scale > 0.0
     }
 
     pub fn do_classifier_free_guidance(&self) -> bool {
@@ -623,8 +634,10 @@ impl<'a> LtxPipeline<'a> {
         frame_rate: usize,
         num_inference_steps: usize,
         timesteps: Option<Vec<i64>>,
+        sigmas_provided: Option<Vec<f32>>,
         guidance_scale: f32,
         guidance_rescale: f32,
+        stg_scale: f32,
         num_videos_per_prompt: usize,
         latents: Option<Tensor>,
         prompt_embeds: Option<Tensor>,
@@ -635,6 +648,7 @@ impl<'a> LtxPipeline<'a> {
         decode_noise_scale: Option<Vec<f32>>,
         output_type: OutputType,
         max_sequence_length: usize,
+        skip_block_list: Option<Vec<usize>>,
         device: &Device,
     ) -> Result<LtxPipelineOutput> {
         self.check_inputs(
@@ -649,8 +663,17 @@ impl<'a> LtxPipeline<'a> {
 
         self.guidance_scale = guidance_scale;
         self.guidance_rescale = guidance_rescale;
+        self.stg_scale = stg_scale;
         self.interrupt = false;
         self.current_timestep = None;
+
+        // Set skip blocks from presets (distilled models)
+        // Note: In some versions this list is vec![42] (2B distilled) or others.
+        // We get it from the calling side usually (t2v script or example),
+        // but here we ensure the transformer knows it.
+        // For now, we assume it's provided in the parameters or via a separate setter if needed.
+        // However, the trait-based architecture suggests we should pass it before or during call.
+        // We add it to the call logic if it's not already handled.
 
         // batch_size
         let batch_size = match (&prompt, &prompt_embeds) {
@@ -660,6 +683,18 @@ impl<'a> LtxPipeline<'a> {
             _ => candle_core::bail!("Invalid prompt/prompt_embeds combination"),
         };
         let effective_batch = batch_size * num_videos_per_prompt;
+
+        // Apply skip blocks to transformer
+        // In LTXV, skip_block_list can be used for:
+        // 1. Permanent skipping (Distilled models): applied here if stg_scale is 0.
+        // 2. STG masking (Dev models): applied per-pass if stg_scale > 0.
+        if let Some(ref list) = skip_block_list {
+            if !self.do_spatio_temporal_guidance() {
+                self.transformer.set_skip_block_list(list.clone());
+            } else {
+                self.transformer.set_skip_block_list(vec![]);
+            }
+        }
 
         // text embeddings
         let dtype = self.text_encoder.dtype();
@@ -710,22 +745,44 @@ impl<'a> LtxPipeline<'a> {
         let latent_width = width / self.vae_spatial_compression_ratio;
 
         let video_sequence_length = latent_num_frames * latent_height * latent_width;
-        let sigmas = linspace(1.0, 1.0 / (num_inference_steps as f32), num_inference_steps);
+        let sigmas = if sigmas_provided.is_none() && timesteps.is_none() {
+            Some(linspace(
+                1.0,
+                1.0 / (num_inference_steps as f32),
+                num_inference_steps,
+            ))
+        } else {
+            sigmas_provided
+        };
+
         let scfg = self.scheduler.config().clone();
-        let mu = calculate_shift(
-            video_sequence_length,
-            scfg.base_image_seq_len,
-            scfg.max_image_seq_len,
-            scfg.base_shift,
-            scfg.max_shift,
-        );
+        let mu = if sigmas_provided.is_some() {
+            0.0 // No additional shift for distilled timesteps
+        } else {
+            calculate_shift(
+                video_sequence_length,
+                scfg.base_image_seq_len,
+                scfg.max_image_seq_len,
+                scfg.base_shift,
+                scfg.max_shift,
+            )
+        };
+
+        if sigmas_provided.is_none() {
+            println!(
+                "  Calculated SD3 shift (mu): {:.4} for {} tokens",
+                mu, video_sequence_length
+            );
+        } else {
+            println!("  Using custom distilled sigmas (mu=0.0)");
+        }
 
         let (ts, _nsteps_effective) = retrieve_timesteps(
             self.scheduler.as_mut(),
             Some(num_inference_steps),
             device,
             timesteps,
-            Some(sigmas),
+            sigmas,
             mu,
         )?;
         self.num_timesteps = ts.len();
@@ -734,12 +791,66 @@ impl<'a> LtxPipeline<'a> {
             .len()
             .saturating_sub(num_inference_steps * self.scheduler.order());
 
-        // micro-conditions
-        let rope_interpolation_scale = (
-            (self.vae_temporal_compression_ratio as f32) / (frame_rate as f32),
-            self.vae_spatial_compression_ratio as f32,
-            self.vae_spatial_compression_ratio as f32,
-        );
+        // 5. RoPE coordinates and scaling
+        let ts_ratio = self.vae_temporal_compression_ratio as f32;
+        let sp_ratio = self.vae_spatial_compression_ratio as f32;
+
+        let grid_f =
+            Tensor::arange(0u32, latent_num_frames as u32, device)?.to_dtype(DType::F32)?;
+        let grid_h = Tensor::arange(0u32, latent_height as u32, device)?.to_dtype(DType::F32)?;
+        let grid_w = Tensor::arange(0u32, latent_width as u32, device)?.to_dtype(DType::F32)?;
+
+        let f = grid_f.reshape((latent_num_frames, 1, 1))?.broadcast_as((
+            latent_num_frames,
+            latent_height,
+            latent_width,
+        ))?;
+        let h = grid_h.reshape((1, latent_height, 1))?.broadcast_as((
+            latent_num_frames,
+            latent_height,
+            latent_width,
+        ))?;
+        let w = grid_w.reshape((1, 1, latent_width))?.broadcast_as((
+            latent_num_frames,
+            latent_height,
+            latent_width,
+        ))?;
+
+        // [3, F, H, W] -> flatten(1) -> [3, seq] -> transpose -> [seq, 3] -> [1, seq, 3]
+        let video_coords = Tensor::stack(&[f, h, w], 0)?
+            .flatten_from(1)?
+            .transpose(0, 1)?
+            .unsqueeze(0)?;
+
+        let vf = video_coords.i((.., .., 0))?;
+        let vh = video_coords.i((.., .., 1))?;
+        let vw = video_coords.i((.., .., 2))?;
+
+        // CAUSAL FIX: (L * 8 + 1 - 8).clamp(0) / frame_rate
+        let vf = vf
+            .affine(ts_ratio as f64, (1.0 - ts_ratio) as f64)?
+            .clamp(0.0f32, 1000.0f32)?
+            .affine(1.0 / (frame_rate as f64), 0.0)?;
+
+        // SPATIAL SCALE: L * 32
+        let vh = vh.affine(sp_ratio as f64, 0.0)?;
+        let vw = vw.affine(sp_ratio as f64, 0.0)?;
+
+        let video_coords = Tensor::stack(&[vf, vh, vw], D::Minus1)?.broadcast_as((
+            effective_batch,
+            video_sequence_length,
+            3,
+        ))?;
+
+        let num_conds = if self.do_classifier_free_guidance() && self.do_spatio_temporal_guidance()
+        {
+            3
+        } else if self.do_classifier_free_guidance() || self.do_spatio_temporal_guidance() {
+            2
+        } else {
+            1
+        };
+        let _video_coords_batch = Tensor::cat(&vec![video_coords.clone(); num_conds], 0)?;
 
         // denoising loop
         for (i, &t) in ts.iter().enumerate() {
@@ -751,70 +862,123 @@ impl<'a> LtxPipeline<'a> {
 
             println!("Step {}/{}: t={}", i + 1, ts.len(), t);
 
-            // Sequential CFG: run uncond and cond passes separately to save memory
-            let noise_pred = if self.do_classifier_free_guidance() {
-                // Prepare timestep for single batch
-                let b = latents.dim(0)?;
-                let timestep = Tensor::full(t as f32, (b,), device)?;
+            // Guidance Logic (CFG and/or STG)
+            // We use Sequential CFG style to save memory, running passes one by one.
+            let noise_pred =
+                if self.do_classifier_free_guidance() || self.do_spatio_temporal_guidance() {
+                    let b = latents.dim(0)?;
+                    let timestep_t = Tensor::full(t as f32, (b,), device)?;
+                    let latents_input = latents.to_dtype(dtype)?;
 
-                // Run unconditional pass
-                let latents_input = latents.to_dtype(prompt_embeds_uncond.dtype())?;
-                let noise_uncond = self.transformer.forward(
-                    &latents_input,
-                    &prompt_embeds_uncond,
-                    &timestep,
-                    &prompt_mask_uncond,
-                    latent_num_frames,
-                    latent_height,
-                    latent_width,
-                    rope_interpolation_scale,
-                )?;
+                    // 1. Unconditional pass (if CFG active)
+                    let noise_uncond = if self.do_classifier_free_guidance() {
+                        Some(self.transformer.forward(
+                            &latents_input,
+                            &prompt_embeds_uncond,
+                            &timestep_t,
+                            &prompt_mask_uncond,
+                            latent_num_frames,
+                            latent_height,
+                            latent_width,
+                            None,
+                            Some(&video_coords),
+                            None,
+                        )?)
+                    } else {
+                        None
+                    };
 
-                // Run conditional pass
-                let latents_input = latents.to_dtype(prompt_embeds_cond.dtype())?;
-                let noise_text = self.transformer.forward(
-                    &latents_input,
-                    &prompt_embeds_cond,
-                    &timestep,
-                    &prompt_mask_cond,
-                    latent_num_frames,
-                    latent_height,
-                    latent_width,
-                    rope_interpolation_scale,
-                )?;
-
-                // Combine with CFG formula
-                let noise_uncond = noise_uncond.to_dtype(DType::F32)?;
-                let noise_text = noise_text.to_dtype(DType::F32)?;
-
-                let diff = noise_text.broadcast_sub(&noise_uncond)?;
-                let diff = diff.affine(self.guidance_scale as f64, 0.0)?;
-                let mut combined = noise_uncond.broadcast_add(&diff)?;
-
-                if self.guidance_rescale > 0.0 {
-                    combined = rescale_noise_cfg(&combined, &noise_text, self.guidance_rescale)?;
-                }
-
-                combined
-            } else {
-                // No CFG: single forward pass
-                let b = latents.dim(0)?;
-                let timestep = Tensor::full(t as f32, (b,), device)?;
-                let latents_input = latents.to_dtype(p_emb.dtype())?;
-
-                self.transformer
-                    .forward(
+                    // 2. Conditional pass (Required for both CFG and STG)
+                    let noise_text = self.transformer.forward(
                         &latents_input,
-                        &p_emb,
-                        &timestep,
-                        &p_mask,
+                        &prompt_embeds_cond,
+                        &timestep_t,
+                        &prompt_mask_cond,
                         latent_num_frames,
                         latent_height,
                         latent_width,
-                        rope_interpolation_scale,
-                    )?
-                    .to_dtype(DType::F32)?
-            };
+                        None,
+                        Some(&video_coords),
+                        None,
+                    )?;
+
+                    // 3. Perturbed pass (if STG active)
+                    let noise_perturbed = if self.do_spatio_temporal_guidance() {
+                        let num_layers = self.transformer.config().num_layers;
+                        // FIX: default=0 means apply all layers, 1=skip
+                        let mut mask_data = vec![0.0f32; num_layers * b];
+                        if let Some(ref layers_to_skip) = skip_block_list {
+                            for &layer_idx in layers_to_skip {
+                                if layer_idx < num_layers {
+                                    for batch_idx in 0..b {
+                                        mask_data[layer_idx * b + batch_idx] = 1.0; // 1 = skip
+                                    }
+                                }
+                            }
+                        }
+                        let stg_mask = Tensor::from_vec(mask_data, (num_layers, b), device)?;
+
+                        Some(self.transformer.forward(
+                            &latents_input,
+                            &prompt_embeds_cond,
+                            &timestep_t,
+                            &prompt_mask_cond,
+                            latent_num_frames,
+                            latent_height,
+                            latent_width,
+                            None,
+                            Some(&video_coords),
+                            Some(&stg_mask),
+                        )?)
+                    } else {
+                        None
+                    };
+
+                    // Mix results
+                    let noise_text = noise_text.to_dtype(DType::F32)?;
+                    let mut combined = noise_text.clone();
+
+                    if let Some(uncond) = noise_uncond {
+                        let uncond = uncond.to_dtype(DType::F32)?;
+                        let diff_cfg = noise_text.broadcast_sub(&uncond)?;
+                        combined = uncond
+                            .broadcast_add(&diff_cfg.affine(self.guidance_scale as f64, 0.0)?)?;
+
+                        if self.guidance_rescale > 0.0 {
+                            combined =
+                                rescale_noise_cfg(&combined, &noise_text, self.guidance_rescale)?;
+                        }
+                    }
+
+                    if let Some(perturbed) = noise_perturbed {
+                        let perturbed = perturbed.to_dtype(DType::F32)?;
+                        let diff_stg = noise_text.broadcast_sub(&perturbed)?;
+                        combined = combined
+                            .broadcast_add(&diff_stg.affine(self.stg_scale as f64, 0.0)?)?;
+                    }
+
+                    combined
+                } else {
+                    // No guidance: single forward pass
+                    let b = latents.dim(0)?;
+                    let timestep_t = Tensor::full(t as f32, (b,), device)?;
+                    let latents_input = latents.to_dtype(p_emb.dtype())?;
+
+                    self.transformer
+                        .forward(
+                            &latents_input,
+                            &p_emb,
+                            &timestep_t,
+                            &p_mask,
+                            latent_num_frames,
+                            latent_height,
+                            latent_width,
+                            None,
+                            Some(&video_coords),
+                            None,
+                        )?
+                        .to_dtype(DType::F32)?
+                };
 
             latents = self.scheduler.step(&noise_pred, t, &latents)?;
 

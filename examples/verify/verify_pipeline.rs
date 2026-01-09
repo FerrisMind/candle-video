@@ -77,6 +77,7 @@ fn main() -> Result<()> {
         1, // width
         Some((8.0 / 24.0, 32.0, 32.0)),
         None,
+        None, // skip_layer_mask
     )?;
 
     // 3. Verify Iterative Denoising Loop
@@ -118,6 +119,7 @@ fn main() -> Result<()> {
             1, // width
             Some((8.0 / 24.0, 32.0, 32.0)),
             None,
+            None, // skip_layer_mask
         )?;
 
         let chunks = noise_pred.chunk(2, 0)?;
