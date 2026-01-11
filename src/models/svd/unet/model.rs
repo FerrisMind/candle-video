@@ -3,13 +3,14 @@
 //! Main UNet architecture for Stable Video Diffusion.
 
 use candle_core::{DType, IndexOp, Module, Result, Tensor};
-use candle_nn::{Conv2d, Conv2dConfig, Linear, VarBuilder, conv2d, linear};
+use candle_nn::{Conv2d, Conv2dConfig, VarBuilder, conv2d};
 
 use super::blocks::{
     CrossAttnDownBlockSpatioTemporal, CrossAttnUpBlockSpatioTemporal, DownBlockSpatioTemporal,
     UNetMidBlockSpatioTemporal, UpBlockSpatioTemporal,
 };
 use super::super::config::SvdUnetConfig;
+use crate::interfaces::embeddings::{get_timestep_embedding, TimestepEmbedding};
 
 /// Debug helper: check tensor for NaN/Inf and print if found
 fn debug_check_tensor(name: &str, tensor: &Tensor) {
@@ -36,45 +37,7 @@ fn debug_check_tensor(name: &str, tensor: &Tensor) {
     }
 }
 
-/// Sinusoidal timestep embeddings
-pub fn get_timestep_embedding(timesteps: &Tensor, embedding_dim: usize) -> Result<Tensor> {
-    let dtype = timesteps.dtype();
-    let half_dim = embedding_dim / 2;
-    let exponent =
-        Tensor::arange(0f32, half_dim as f32, timesteps.device())?.to_dtype(DType::F32)?;
-    let exponent = (exponent * (-f64::ln(10000.0) / (half_dim as f64 - 1.0)))?;
 
-    let timesteps = timesteps.to_dtype(DType::F32)?;
-    let timesteps = timesteps.unsqueeze(1)?;
-    let exponent = exponent.unsqueeze(0)?;
-
-    let emb = timesteps.broadcast_mul(&exponent)?;
-    let emb_cos = emb.cos()?;
-    let emb_sin = emb.sin()?;
-
-    Tensor::cat(&[emb_cos, emb_sin], 1)?.to_dtype(dtype)
-}
-
-/// Timestep embedding module (Linear -> SiLU -> Linear)
-#[derive(Debug)]
-pub struct TimestepEmbedding {
-    linear_1: Linear,
-    linear_2: Linear,
-}
-
-impl TimestepEmbedding {
-    pub fn new(vb: VarBuilder, in_channels: usize, time_embed_dim: usize) -> Result<Self> {
-        let linear_1 = linear(in_channels, time_embed_dim, vb.pp("linear_1"))?;
-        let linear_2 = linear(time_embed_dim, time_embed_dim, vb.pp("linear_2"))?;
-        Ok(Self { linear_1, linear_2 })
-    }
-
-    pub fn forward(&self, sample: &Tensor) -> Result<Tensor> {
-        let sample = self.linear_1.forward(sample)?;
-        let sample = candle_nn::ops::silu(&sample)?;
-        self.linear_2.forward(&sample)
-    }
-}
 
 /// Timesteps module for projecting scalar values to embeddings
 #[derive(Debug)]
@@ -88,7 +51,7 @@ impl Timesteps {
     }
 
     pub fn forward(&self, timesteps: &Tensor) -> Result<Tensor> {
-        get_timestep_embedding(timesteps, self.num_channels)
+        get_timestep_embedding(timesteps, self.num_channels, true)
     }
 }
 
@@ -107,9 +70,9 @@ impl AddTimeEmbedding {
     ) -> Result<Self> {
         let time_proj = Timesteps::new(addition_time_embed_dim);
         let time_embedding = TimestepEmbedding::new(
-            vb.pp("add_embedding"),
             addition_time_embed_dim * 3, // fps + motion + noise_aug
             time_embed_dim,
+            vb.pp("add_embedding"),
         )?;
         Ok(Self {
             time_proj,
@@ -181,17 +144,17 @@ impl UNetSpatioTemporalConditionModel {
         let time_proj = Timesteps::new(config.block_out_channels[0]);
         let time_embed_dim = config.block_out_channels[0] * 4;
         let time_embedding = TimestepEmbedding::new(
-            vb.pp("time_embedding"),
             config.block_out_channels[0],
             time_embed_dim,
+            vb.pp("time_embedding"),
         )?;
 
         // Add time projection (for fps, motion_bucket_id, noise_aug_strength)
         let add_time_proj = Timesteps::new(config.addition_time_embed_dim);
         let add_embedding = TimestepEmbedding::new(
-            vb.pp("add_embedding"),
             config.addition_time_embed_dim * 3,
             time_embed_dim,
+            vb.pp("add_embedding"),
         )?;
 
         // Build down blocks - last one has NO attention
@@ -420,7 +383,7 @@ mod tests {
     fn test_timestep_embedding() {
         let device = candle_core::Device::Cpu;
         let timesteps = Tensor::new(&[1.0f32, 10.0, 100.0], &device).unwrap();
-        let emb = get_timestep_embedding(&timesteps, 64).unwrap();
+        let emb = get_timestep_embedding(&timesteps, 64, true).unwrap();
         assert_eq!(emb.dims(), &[3, 64]);
     }
 }

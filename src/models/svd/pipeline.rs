@@ -59,7 +59,7 @@ impl PipelineInference for SvdPipeline {
     }
 
     fn check_inputs(&self, height: usize, width: usize, num_frames: usize) -> Result<()> {
-        if height % 8 != 0 || width % 8 != 0 {
+        if !height.is_multiple_of(8) || !width.is_multiple_of(8) {
             candle_core::bail!(
                 "`height` and `width` must be divisible by 8, got {height} and {width}"
             );

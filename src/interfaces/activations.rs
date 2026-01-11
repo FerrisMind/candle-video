@@ -51,6 +51,40 @@ impl Module for GeluProjection {
     }
 }
 
+/// GEGLU projection layer (Linear with gated GELU).
+///
+/// Projects to 2x output dim, splits, and applies gated GELU.
+/// Used in Stable Diffusion and SVD style FeedForward.
+#[derive(Clone, Debug)]
+pub struct GeGluProjection {
+    proj: Linear,
+    dim_out: usize,
+}
+
+impl GeGluProjection {
+    pub fn new(dim_in: usize, dim_out: usize, vb: VarBuilder) -> Result<Self> {
+        // Project to 2x dim_out for gating
+        let proj = nn::linear(dim_in, dim_out * 2, vb.pp("proj"))?;
+        Ok(Self { proj, dim_out })
+    }
+
+    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        use candle_core::D;
+        let hidden = self.proj.forward(xs)?;
+        // Split into gate and value
+        let gate = hidden.narrow(D::Minus1, 0, self.dim_out)?;
+        let value = hidden.narrow(D::Minus1, self.dim_out, self.dim_out)?;
+        // Apply gated GELU: gelu(gate) * value
+        &gate.gelu_erf()? * value
+    }
+}
+
+impl Module for GeGluProjection {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self.forward(xs)
+    }
+}
+
 
 
 #[cfg(test)]

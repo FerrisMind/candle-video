@@ -5,34 +5,27 @@
 use candle_core::{D, DType, Module, Result, Tensor};
 use candle_nn::{Linear, VarBuilder, linear};
 
-use super::model::get_timestep_embedding;
+use crate::interfaces::activations::GeGluProjection;
+use crate::interfaces::embeddings::get_timestep_embedding;
 
 /// Feed-forward network with GEGLU activation
 #[derive(Debug)]
 struct FeedForward {
-    proj: Linear,
-    proj_out: Linear,
-    inner_dim: usize,
+    net_0: GeGluProjection,
+    net_2: Linear,
 }
 
 impl FeedForward {
     fn new(vb: VarBuilder, dim: usize, mult: usize) -> Result<Self> {
         let inner_dim = dim * mult;
-        let proj = linear(dim, inner_dim * 2, vb.pp("net").pp("0").pp("proj"))?;
-        let proj_out = linear(inner_dim, dim, vb.pp("net").pp("2"))?;
-        Ok(Self {
-            proj,
-            proj_out,
-            inner_dim,
-        })
+        let net_0 = GeGluProjection::new(dim, inner_dim, vb.pp("net").pp("0"))?;
+        let net_2 = linear(inner_dim, dim, vb.pp("net").pp("2"))?;
+        Ok(Self { net_0, net_2 })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let h = self.proj.forward(x)?;
-        let gate = h.narrow(D::Minus1, 0, self.inner_dim)?;
-        let value = h.narrow(D::Minus1, self.inner_dim, self.inner_dim)?;
-        let h = (gate.gelu_erf()? * value)?;
-        self.proj_out.forward(&h)
+        let h = self.net_0.forward(x)?;
+        self.net_2.forward(&h)
     }
 }
 
@@ -419,7 +412,7 @@ impl TransformerSpatioTemporalModel {
             .reshape((batch_size * num_frames,))?; // [B*T]
 
         // get_timestep_embedding always returns F32, cast to match hidden_states
-        let t_emb = get_timestep_embedding(&num_frames_emb, self.in_channels)?
+        let t_emb = get_timestep_embedding(&num_frames_emb, self.in_channels, true)?
             .to_dtype(hidden_states.dtype())?;
 
         let emb = self.time_pos_embed.forward(&t_emb)?; // [B*T, C]

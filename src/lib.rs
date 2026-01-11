@@ -7,6 +7,11 @@ pub mod models;
 pub mod utils;
 pub(crate) mod interfaces;
 
-pub use models::ltx_video::*;
-#[cfg(feature = "svd")]
-pub use models::svd::*;
+// LTX Video exports (primary API)
+pub use models::ltx_video::{
+    loader, ltx_transformer, scheduler, vae, t2v_pipeline,
+    configs, quantized_t5_encoder, text_encoder, weight_format,
+};
+
+// SVD exports (under svd namespace to avoid conflicts)
+pub use models::svd;
