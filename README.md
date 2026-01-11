@@ -48,13 +48,38 @@ Rust library for AI video generation built on the [Candle](https://github.com/hu
 
 ---
 
+### Roadmap
+
+- [x] **LTX Video 0.9.5-0.9.8**  
+- [ ] **Wan 2.1**
+- [ ] **Wan 2.2** 
+- [ ] **Kandinsky 5**  
+- [ ] **LTX-2 (Video only)** 
+- [ ] **HunyuanVideo** 
+- [ ] **CogVideoX** 
+- [ ] **Mochi** 
+- [ ] **LTX-2 (Full)**
+- [ ] **SVD/SVD XT** 
+
+---
+
 ## 🚀 Key Features
 
 - **High Performance** — Native Rust with GPU acceleration via CUDA/cuDNN
 - **Memory Efficient** — BF16 inference, VAE tiling/slicing, GGUF quantized text encoders
-- **Flexible** — Run on CPU or GPU, with optional Flash Attention v2
-- **Standalone** — No Python runtime required in production
-- **Fast Startup** — ~2 seconds vs ~15-30 seconds for Python/PyTorch
+- **Flexible** - Run on CPU or GPU, with optional Flash Attention v2
+- **Standalone** - No Python runtime required in production
+- **Fast Startup** - ~2 seconds vs ~15-30 seconds for Python/PyTorch
+
+### Diffusers-aligned Interfaces
+
+Shared contracts modeled after diffusers for cross-model reuse:
+- `DiffusionPipeline` + `PipelineInference` (encode/check/prepare_latents)
+- `SchedulerMixin` + `AutoencoderMixin` (scheduler ops, tiling/slicing)
+- `Attention` processor hooks for transformer attention modules
+- `VideoProcessor` (`preprocess_video` / `postprocess_video`) helpers
+
+See `src/interfaces` for the internal traits used by LTX + SVD.
 
 ### Hardware Acceleration
 

@@ -48,6 +48,19 @@ Biblioteca Rust para geração de vídeo com IA, construída sobre o framework [
   - VAE 3D para codificação/decodificação de vídeo
   - Scheduler Flow Matching
 
+### Roteiro
+
+- [x] **LTX Video 0.9.5-0.9.8**  
+- [ ] **Wan 2.1**
+- [ ] **Wan 2.2** 
+- [ ] **Kandinsky 5**  
+- [ ] **LTX-2 (Video only)** 
+- [ ] **HunyuanVideo** 
+- [ ] **CogVideoX** 
+- [ ] **Mochi** 
+- [ ] **LTX-2 (Full)**
+- [ ] **SVD/SVD XT**
+
 ---
 
 ## 🚀 Principais Recursos
