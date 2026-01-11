@@ -36,6 +36,9 @@ use super::t2v_pipeline::{TextEncoder as VTextEncoder, Tokenizer as VTokenizer};
 use crate::interfaces::conditioning::{Conditioning, TextConditioner};
 use crate::loader::LoaderError;
 
+// Re-export common T5EncoderConfig from interfaces for UMT5 support
+pub use crate::interfaces::t5_encoder::T5EncoderConfig as CommonT5EncoderConfig;
+
 // =============================================================================
 // Error Types
 // =============================================================================

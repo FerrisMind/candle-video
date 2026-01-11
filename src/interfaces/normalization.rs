@@ -79,6 +79,37 @@ impl LayerNormNoParams {
     }
 }
 
+// =============================================================================
+// Channels-First Normalization Helpers
+// =============================================================================
+
+/// Apply RmsNorm to a channels-first 5D tensor (B, C, T, H, W).
+///
+/// Permutes to (B, T, H, W, C), applies norm, then permutes back.
+/// Used in LTX-Video and Wan VAE where data is in channels-first format.
+pub fn rmsnorm_channels_first(norm: &candle_nn::RmsNorm, x: &Tensor) -> Result<Tensor> {
+    // (B,C,T,H,W) -> (B,T,H,W,C) -> norm -> (B,C,T,H,W)
+    x.permute((0, 2, 3, 4, 1))?
+        .apply(norm)?
+        .permute((0, 4, 1, 2, 3))
+}
+
+/// Apply LayerNorm to a channels-first 5D tensor (B, C, T, H, W).
+///
+/// Permutes to (B, T, H, W, C), applies norm, then permutes back.
+pub fn layernorm_channels_first(norm: &candle_nn::LayerNorm, x: &Tensor) -> Result<Tensor> {
+    x.permute((0, 2, 3, 4, 1))?
+        .apply(norm)?
+        .permute((0, 4, 1, 2, 3))
+}
+
+/// Apply custom RmsNorm to a channels-first 5D tensor.
+pub fn rmsnorm_channels_first_custom(norm: &RmsNorm, x: &Tensor) -> Result<Tensor> {
+    let permuted = x.permute((0, 2, 3, 4, 1))?;
+    let normed = norm.forward(&permuted)?;
+    normed.permute((0, 4, 1, 2, 3))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
