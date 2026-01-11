@@ -36,6 +36,7 @@ fn compute_max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
         .unwrap()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_video_coords_rust(
     batch_size: usize,
     num_frames: usize,
@@ -93,7 +94,7 @@ fn compute_video_coords_rust(
         video_sequence_length,
         3,
     ))?;
-    Ok(video_coords.contiguous()?)
+    video_coords.contiguous()
 }
 
 #[test]
@@ -215,6 +216,7 @@ mod property_tests {
             .unwrap()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compute_video_coords_rust(
         batch_size: usize,
         num_frames: usize,
@@ -275,7 +277,7 @@ mod property_tests {
             video_sequence_length,
             3,
         ))?;
-        Ok(video_coords.contiguous()?)
+        video_coords.contiguous()
     }
 
     // =========================================================================

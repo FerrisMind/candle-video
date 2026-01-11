@@ -7,6 +7,11 @@ mod tests {
 
     #[test]
     fn test_causal_conv3d_parity() -> anyhow::Result<()> {
+        if std::env::var("CANDLE_VIDEO_RUN_CUDA_TESTS").is_err() {
+            println!("Skipping test: CANDLE_VIDEO_RUN_CUDA_TESTS is not set");
+            return Ok(());
+        }
+
         let path = Path::new("gen_conv3d_model.safetensors");
         if !path.exists() {
             println!("Skipping test: gen_conv3d_model.safetensors not found");

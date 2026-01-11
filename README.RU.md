@@ -1,7 +1,7 @@
 </p>
 <p align="left">
   <a href="README.md"><img src="https://img.shields.io/badge/English-232323" alt="English"></a>
-  <a href="README.RU.md"><img src="https://img.shields.io/badge/Русский-5B7CFA" alt="Русский"></a>
+  <a href="README.RU.md"><img src="https://img.shields.io/badge/Русский-D65C5C" alt="Русский"></a>
   <a href="README.PT_BR.md"><img src="https://img.shields.io/badge/Português_BR-232323" alt="Português"></a>
 </p>
 
@@ -52,9 +52,19 @@
 
 - **Высокая производительность** — Нативный Rust с GPU-ускорением через CUDA/cuDNN
 - **Эффективное использование памяти** — BF16 инференс, тайлинг/слайсинг VAE, квантизированные GGUF энкодеры
-- **Гибкость** — Работа на CPU или GPU, опциональный Flash Attention v2
-- **Автономность** — Не требует Python в продакшене
-- **Быстрый запуск** — ~2 секунды против ~15-30 секунд для Python/PyTorch
+- **Гибкость** - Работа на CPU или GPU, опциональный Flash Attention v2
+- **Автономность** - Не требует Python в продакшене
+- **Быстрый запуск** - ~2 секунды против ~15-30 секунд для Python/PyTorch
+
+### Интерфейсы в стиле diffusers
+
+Общие контракты для переиспользования между моделями:
+- `DiffusionPipeline` + `PipelineInference` (encode/check/prepare_latents)
+- `SchedulerMixin` + `AutoencoderMixin` (операции scheduler, tiling/slicing)
+- хуки `Attention` processor для attention модулей трансформеров
+- `VideoProcessor` (`preprocess_video` / `postprocess_video`) helpers
+
+См. `src/interfaces` для внутренних трейтов, используемых LTX + SVD.
 
 ### Аппаратное ускорение
 

@@ -32,7 +32,7 @@ mod tests {
 
         // Test normalize
         let rust_normalized =
-            LtxPipeline::normalize_latents(&latents, &latents_mean, &latents_std, scaling_factor)?;
+            LtxPipeline::normalize_latents(latents, latents_mean, latents_std, scaling_factor)?;
 
         let norm_diff = (rust_normalized.sub(ref_normalized)?).abs()?.max_all()?;
         let norm_diff_val = norm_diff.to_vec0::<f32>()?;
@@ -41,8 +41,8 @@ mod tests {
         // Test denormalize
         let rust_denormalized = LtxPipeline::denormalize_latents(
             &rust_normalized,
-            &latents_mean,
-            &latents_std,
+            latents_mean,
+            latents_std,
             scaling_factor,
         )?;
 
@@ -53,7 +53,7 @@ mod tests {
         println!("Denormalize max difference: {}", denorm_diff_val);
 
         // Test round-trip
-        let roundtrip_diff = (rust_denormalized.sub(&latents)?).abs()?.max_all()?;
+        let roundtrip_diff = (rust_denormalized.sub(latents)?).abs()?.max_all()?;
         let roundtrip_diff_val = roundtrip_diff.to_vec0::<f32>()?;
         println!("Round-trip max difference: {}", roundtrip_diff_val);
 

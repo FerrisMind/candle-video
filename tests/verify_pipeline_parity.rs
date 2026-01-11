@@ -625,7 +625,7 @@ mod tests {
             let mut num_steps = 0;
             for i in 0..20 {
                 let key = format!("loop_step{}_latents", i);
-                if tensors.get(&key).is_some() {
+                if tensors.contains_key(&key) {
                     num_steps = i + 1;
                 }
             }

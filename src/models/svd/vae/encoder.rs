@@ -5,7 +5,7 @@
 use candle_core::{Module, Result, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, VarBuilder, conv2d};
 
-use crate::svd::config::SvdVaeConfig;
+use super::super::config::SvdVaeConfig;
 
 /// ResnetBlock2D for encoder
 #[derive(Debug)]

@@ -3,6 +3,7 @@
 //! Note: This is a standalone scheduler implementation (no Diffusers ConfigMixin/SchedulerMixin layer).
 //! It keeps the same math and branching as the source file.
 
+use crate::interfaces::scheduler::{SchedulerMixin, SchedulerStepOutput};
 use crate::models::ltx_video::t2v_pipeline::{Scheduler, SchedulerConfig, TimestepsSpec};
 use candle_core::{DType, Device, Result, Tensor, bail};
 use statrs::distribution::{Beta, ContinuousCDF};
@@ -70,6 +71,7 @@ pub struct FlowMatchEulerDiscreteScheduler {
     timesteps: Tensor, // shape [n] (not appended)
     sigmas: Tensor,    // shape [n+1] (terminal appended)
     timesteps_cpu: Vec<f32>,
+    timesteps_f64: Vec<f64>,
     sigmas_cpu: Vec<f32>, // includes terminal appended
 
     sigma_min: f32,
@@ -130,12 +132,14 @@ impl FlowMatchEulerDiscreteScheduler {
         sigmas_cpu.push(0.0);
         let sigmas_with_terminal =
             Tensor::cat(&[sigmas_t, Tensor::zeros((1,), DType::F32, &device)?], 0)?;
+        let timesteps_f64 = ts.iter().map(|v| *v as f64).collect();
 
         Ok(Self {
             config,
             timesteps: timesteps_t,
             sigmas: sigmas_with_terminal,
             timesteps_cpu: ts,
+            timesteps_f64,
             sigmas_cpu,
             sigma_min,
             sigma_max,
@@ -400,6 +404,7 @@ impl FlowMatchEulerDiscreteScheduler {
 
         self.sigmas_cpu = sigmas_vec.clone();
         self.timesteps_cpu = timesteps_vec.clone();
+        self.timesteps_f64 = self.timesteps_cpu.iter().map(|v| *v as f64).collect();
 
         self.sigmas = Tensor::from_vec(sigmas_vec, (self.sigmas_cpu.len(),), device)?;
         self.timesteps = Tensor::from_vec(timesteps_vec, (self.timesteps_cpu.len(),), device)?;
@@ -665,5 +670,60 @@ impl Scheduler for FlowMatchEulerDiscreteScheduler {
         let ts = timestep as f32;
         let out = self.step(noise_pred, ts, latents, None)?;
         Ok(out.prev_sample)
+    }
+}
+
+impl SchedulerMixin for FlowMatchEulerDiscreteScheduler {
+    fn set_timesteps(&mut self, num_steps: usize, device: &Device) -> Result<()> {
+        let mu = if self.config.use_dynamic_shifting { Some(0.0) } else { None };
+        self.set_timesteps(Some(num_steps), device, None, mu, None)
+    }
+
+    fn timesteps(&self) -> &[f64] {
+        &self.timesteps_f64
+    }
+
+    fn init_noise_sigma(&self) -> f64 {
+        self.sigmas_cpu.first().copied().unwrap_or(1.0) as f64
+    }
+
+    fn scale_model_input(&self, latents: &Tensor, _t: f64) -> Result<Tensor> {
+        Ok(latents.clone())
+    }
+
+    fn add_noise(&self, original: &Tensor, noise: &Tensor, t: f64) -> Result<Tensor> {
+        let sigma = t as f32 / self.config.num_train_timesteps as f32;
+        let scaled = noise.affine(sigma as f64, 0.0)?;
+        original.broadcast_add(&scaled)
+    }
+
+    fn step(&mut self, model_output: &Tensor, t: f64, latents: &Tensor) -> Result<SchedulerStepOutput> {
+        let out = self.step(model_output, t as f32, latents, None)?;
+        Ok(SchedulerStepOutput {
+            prev_sample: out.prev_sample,
+            pred_original_sample: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Device;
+
+    #[test]
+    fn test_video_scheduler_add_noise_and_init_sigma() {
+        let scheduler = FlowMatchEulerDiscreteScheduler::new(Default::default()).unwrap();
+        let init_sigma = scheduler.init_noise_sigma();
+        assert!(init_sigma > 0.0);
+
+        let device = Device::Cpu;
+        let original = Tensor::zeros(1usize, DType::F32, &device).unwrap();
+        let noise = original.affine(0.0, 1.0).unwrap();
+
+        let t = scheduler.config.num_train_timesteps as f64;
+        let noisy = scheduler.add_noise(&original, &noise, t).unwrap();
+        let value = noisy.to_vec1::<f32>().unwrap()[0];
+        assert!((value - 1.0).abs() < 1e-5);
     }
 }

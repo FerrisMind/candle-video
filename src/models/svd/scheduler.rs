@@ -5,7 +5,9 @@
 
 use candle_core::{Device, Result, Tensor};
 
-use crate::svd::config::EulerSchedulerConfig;
+use crate::interfaces::scheduler::{SchedulerMixin, SchedulerStepOutput};
+
+use super::config::EulerSchedulerConfig;
 
 /// Output from a scheduler step
 #[derive(Debug)]
@@ -88,7 +90,7 @@ impl EulerDiscreteScheduler {
         // Compute sigmas from alpha_cumprod: sigma = sqrt((1 - alpha_cumprod) / alpha_cumprod)
         let sigmas: Vec<f64> = alpha_cumprod
             .iter()
-            .map(|&a| ((1.0 - a) / a).sqrt())
+            .map(|&a| ((1.0f64 - a) / a).sqrt())
             .collect();
 
         // init_noise_sigma for "leading" spacing
@@ -289,6 +291,46 @@ impl EulerDiscreteScheduler {
     /// Get number of inference steps
     pub fn num_inference_steps(&self) -> Option<usize> {
         self.num_inference_steps
+    }
+}
+
+impl SchedulerMixin for EulerDiscreteScheduler {
+    fn set_timesteps(&mut self, num_steps: usize, device: &Device) -> Result<()> {
+        self.set_timesteps(num_steps, device)
+    }
+
+    fn timesteps(&self) -> &[f64] {
+        self.timesteps()
+    }
+
+    fn init_noise_sigma(&self) -> f64 {
+        self.init_noise_sigma()
+    }
+
+    fn scale_model_input(&self, latents: &Tensor, _t: f64) -> Result<Tensor> {
+        Ok(latents.clone())
+    }
+
+    fn add_noise(&self, original: &Tensor, noise: &Tensor, t: f64) -> Result<Tensor> {
+        let timestep_idx = self
+            .timesteps()
+            .iter()
+            .position(|v| (*v - t).abs() < 1e-6)
+            .unwrap_or_else(|| t.round().max(0.0) as usize);
+        self.add_noise(original, noise, timestep_idx)
+    }
+
+    fn step(&mut self, model_output: &Tensor, t: f64, latents: &Tensor) -> Result<SchedulerStepOutput> {
+        let timestep_idx = self
+            .timesteps()
+            .iter()
+            .position(|v| (*v - t).abs() < 1e-6)
+            .unwrap_or_else(|| t.round().max(0.0) as usize);
+        let output = self.step(model_output, timestep_idx, latents)?;
+        Ok(SchedulerStepOutput {
+            prev_sample: output.prev_sample,
+            pred_original_sample: output.pred_original_sample,
+        })
     }
 }
 

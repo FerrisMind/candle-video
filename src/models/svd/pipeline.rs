@@ -6,9 +6,13 @@ use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use candle_nn::VarBuilder;
 use tracing::{debug, info};
 
-use crate::svd::{
-    AutoencoderKLTemporalDecoder, ClipVisionModelWithProjection, EulerDiscreteScheduler, SvdConfig,
-    SvdInferenceConfig, UNetSpatioTemporalConditionModel, normalize_for_clip,
+use crate::interfaces::conditioning::Conditioning;
+use crate::interfaces::pipeline::{apply_pipeline_io, DiffusionPipeline, PipelineInference};
+use crate::interfaces::video_types::{VideoLatents, VideoLayout};
+
+use super::{
+    normalize_for_clip, AutoencoderKLTemporalDecoder, ClipVisionModelWithProjection,
+    EulerDiscreteScheduler, SvdConfig, SvdInferenceConfig, UNetSpatioTemporalConditionModel,
 };
 
 /// Dump tensor to .npy file for comparison with Python reference.
@@ -42,6 +46,88 @@ fn dump_tensor(name: &str, tensor: &Tensor) {
     }
 }
 
+impl DiffusionPipeline for SvdPipeline {}
+
+impl PipelineInference for SvdPipeline {
+    fn encode_prompt(
+        &mut self,
+        _prompt: &str,
+        _negative: Option<&str>,
+        _device: &Device,
+    ) -> Result<Option<Conditioning>> {
+        Ok(None)
+    }
+
+    fn check_inputs(&self, height: usize, width: usize, num_frames: usize) -> Result<()> {
+        if height % 8 != 0 || width % 8 != 0 {
+            candle_core::bail!(
+                "`height` and `width` must be divisible by 8, got {height} and {width}"
+            );
+        }
+        if num_frames == 0 {
+            candle_core::bail!("`num_frames` must be > 0");
+        }
+        Ok(())
+    }
+
+    fn prepare_latents(
+        &self,
+        batch_size: usize,
+        num_channels_latents: usize,
+        height: usize,
+        width: usize,
+        num_frames: usize,
+        dtype: DType,
+        device: &Device,
+        latents: Option<VideoLatents>,
+    ) -> Result<VideoLatents> {
+        if let Some(latents) = latents {
+            let tensor = latents.tensor.to_device(device)?.to_dtype(dtype)?;
+            return Ok(VideoLatents {
+                tensor,
+                ..latents
+            });
+        }
+
+        let latent_height = height / 8;
+        let latent_width = width / 8;
+        let tensor = Tensor::randn(
+            0f32,
+            1f32,
+            (
+                batch_size * num_frames,
+                num_channels_latents,
+                latent_height,
+                latent_width,
+            ),
+            device,
+        )?
+        .to_dtype(dtype)?;
+
+        Ok(VideoLatents {
+            tensor,
+            layout: VideoLayout::BfCHW,
+            batch: batch_size,
+            frames: num_frames,
+            channels: num_channels_latents,
+            height: latent_height,
+            width: latent_width,
+        })
+    }
+
+    fn guidance_scale(&self) -> f64 {
+        self.guidance_scale
+    }
+
+    fn do_classifier_free_guidance(&self) -> bool {
+        self.do_classifier_free_guidance
+    }
+
+    fn num_timesteps(&self) -> usize {
+        self.num_timesteps
+    }
+}
+
 /// SVD Pipeline for image-to-video generation
 pub struct SvdPipeline {
     unet: UNetSpatioTemporalConditionModel,
@@ -50,6 +136,9 @@ pub struct SvdPipeline {
     scheduler: EulerDiscreteScheduler,
     device: Device,
     dtype: DType,
+    guidance_scale: f64,
+    do_classifier_free_guidance: bool,
+    num_timesteps: usize,
 }
 
 impl SvdPipeline {
@@ -61,14 +150,25 @@ impl SvdPipeline {
             ClipVisionModelWithProjection::new(vb.pp("image_encoder"), &config.clip)?;
         let scheduler = EulerDiscreteScheduler::new(config.scheduler.clone());
 
-        Ok(Self {
+        let mut pipeline = Self {
             unet,
             vae,
             image_encoder,
             scheduler,
             device,
             dtype,
-        })
+            guidance_scale: 1.0,
+            do_classifier_free_guidance: false,
+            num_timesteps: 0,
+        };
+
+        DiffusionPipeline::register_modules(
+            &mut pipeline,
+            &["unet", "vae", "image_encoder", "scheduler"],
+        );
+        apply_pipeline_io(&mut pipeline);
+
+        Ok(pipeline)
     }
 
     /// Create a pipeline from separate VarBuilders for each component (no prefix needed)
@@ -85,14 +185,25 @@ impl SvdPipeline {
         let image_encoder = ClipVisionModelWithProjection::new(clip_vb, &config.clip)?;
         let scheduler = EulerDiscreteScheduler::new(config.scheduler.clone());
 
-        Ok(Self {
+        let mut pipeline = Self {
             unet,
             vae,
             image_encoder,
             scheduler,
             device,
             dtype,
-        })
+            guidance_scale: 1.0,
+            do_classifier_free_guidance: false,
+            num_timesteps: 0,
+        };
+
+        DiffusionPipeline::register_modules(
+            &mut pipeline,
+            &["unet", "vae", "image_encoder", "scheduler"],
+        );
+        apply_pipeline_io(&mut pipeline);
+
+        Ok(pipeline)
     }
 
     /// Generate video frames from an input image
@@ -109,6 +220,20 @@ impl SvdPipeline {
         let width = config.width;
         let latent_height = height / 8;
         let latent_width = width / 8;
+
+        PipelineInference::check_inputs(self, height, width, num_frames)?;
+        self.guidance_scale = config.max_guidance_scale;
+        self.do_classifier_free_guidance = config.max_guidance_scale > 1.0;
+        self.num_timesteps = config.num_inference_steps;
+        let guidance_scale = PipelineInference::guidance_scale(self);
+        let do_cfg = PipelineInference::do_classifier_free_guidance(self);
+        let num_timesteps = PipelineInference::num_timesteps(self);
+        if guidance_scale < 0.0 {
+            candle_core::bail!("guidance_scale must be >= 0");
+        }
+        if num_timesteps == 0 {
+            candle_core::bail!("num_timesteps must be > 0");
+        }
 
         info!(
             num_frames,
@@ -141,7 +266,8 @@ impl SvdPipeline {
         // See: pipeline_stable_video_diffusion.py:511-512
         let noise_aug_strength = config.noise_aug_strength;
         let noise = Tensor::randn_like(image, 0.0, 1.0)?;
-        let image_augmented = (image + &(noise * noise_aug_strength)?)?;
+        let noise = noise.affine(noise_aug_strength, 0.0)?;
+        let image_augmented = (image + &noise)?;
         dump_tensor("vae_input", &image_augmented);
         let image_latents = self.vae.encode_to_latent(&image_augmented)?;
         dump_tensor("image_latents_raw", &image_latents);
@@ -153,13 +279,19 @@ impl SvdPipeline {
             .reshape((batch_size * num_frames, 4, latent_height, latent_width))?;
 
         // Create noisy latents: start from noise
-        let latents = Tensor::randn(
-            0f32,
-            1f32,
-            (batch_size * num_frames, 4, latent_height, latent_width),
+        let num_channels_latents = image_cond_latents.dim(1)?;
+        let latents = PipelineInference::prepare_latents(
+            self,
+            batch_size,
+            num_channels_latents,
+            height,
+            width,
+            num_frames,
+            self.dtype,
             &self.device,
-        )?
-        .to_dtype(self.dtype)?;
+            None,
+        )?;
+        let latents = latents.tensor;
 
         // 3. Prepare added time IDs
         // NOTE: SVD was conditioned on fps-1 during training
@@ -177,14 +309,13 @@ impl SvdPipeline {
         dump_tensor("added_time_ids", &added_time_ids);
 
         // 4. Set up scheduler
-        self.scheduler
-            .set_timesteps(config.num_inference_steps, &self.device)?;
+        self.scheduler.set_timesteps(num_timesteps, &self.device)?;
         let timesteps: Vec<f64> = self.scheduler.timesteps().to_vec();
 
         debug!(latents_shape = ?latents.dims(), image_cond_latents_shape = ?image_cond_latents.dims(), "Initial tensors");
 
         // Scale initial noise
-        let mut latents = (latents * self.scheduler.init_noise_sigma())?;
+        let mut latents = latents.affine(self.scheduler.init_noise_sigma(), 0.0)?;
 
         // 5. Prepare per-frame guidance scale (as in diffusers)
         // Guidance interpolates from min to max across FRAMES, not steps
@@ -211,7 +342,7 @@ impl SvdPipeline {
             .reshape((batch_size * num_frames, 1, 1, 1))?;
 
         // Check if we need CFG (any guidance > 1.0)
-        let do_classifier_free_guidance = config.max_guidance_scale > 1.0;
+        let do_classifier_free_guidance = do_cfg;
 
         // Pre-allocate CFG tensors to avoid repeated allocation in loop
         let (image_cond_latents_cfg, encoder_states_cfg, added_time_ids_cfg) =

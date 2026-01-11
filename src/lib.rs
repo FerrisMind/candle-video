@@ -5,5 +5,8 @@
 
 pub mod models;
 pub mod utils;
+pub(crate) mod interfaces;
 
 pub use models::ltx_video::*;
+#[cfg(feature = "svd")]
+pub use models::svd::*;

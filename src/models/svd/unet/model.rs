@@ -9,7 +9,7 @@ use super::blocks::{
     CrossAttnDownBlockSpatioTemporal, CrossAttnUpBlockSpatioTemporal, DownBlockSpatioTemporal,
     UNetMidBlockSpatioTemporal, UpBlockSpatioTemporal,
 };
-use crate::svd::config::SvdUnetConfig;
+use super::super::config::SvdUnetConfig;
 
 /// Debug helper: check tensor for NaN/Inf and print if found
 fn debug_check_tensor(name: &str, tensor: &Tensor) {

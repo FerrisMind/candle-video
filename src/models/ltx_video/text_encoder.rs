@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::t2v_pipeline::{TextEncoder as VTextEncoder, Tokenizer as VTokenizer};
+use crate::interfaces::conditioning::{Conditioning, TextConditioner};
 use crate::loader::LoaderError;
 
 // =============================================================================
@@ -638,6 +639,40 @@ impl VTokenizer for T5TextEncoderWrapper {
     }
 }
 
+impl TextConditioner for T5TextEncoderWrapper {
+    fn encode_prompt(
+        &mut self,
+        prompt: &str,
+        negative: Option<&str>,
+        device: &Device,
+    ) -> Result<Conditioning> {
+        let max_length = self.model_max_length();
+        let (input_ids, attention_mask) =
+            self.encode_batch(&[prompt.to_string()], max_length)?;
+        let input_ids = input_ids.to_device(device)?;
+        let attention_mask = attention_mask.to_device(device)?;
+        let prompt_embeds = self.forward(&input_ids)?.to_device(device)?;
+
+        let mut negative_prompt_embeds = None;
+        let mut negative_prompt_attention_mask = None;
+        if let Some(neg) = negative {
+            let (neg_ids, neg_mask) = self.encode_batch(&[neg.to_string()], max_length)?;
+            let neg_ids = neg_ids.to_device(device)?;
+            let neg_mask = neg_mask.to_device(device)?;
+            let neg_embeds = self.forward(&neg_ids)?.to_device(device)?;
+            negative_prompt_embeds = Some(neg_embeds);
+            negative_prompt_attention_mask = Some(neg_mask);
+        }
+
+        Ok(Conditioning {
+            prompt_embeds,
+            prompt_attention_mask: attention_mask,
+            negative_prompt_embeds,
+            negative_prompt_attention_mask,
+        })
+    }
+}
+
 // =============================================================================
 // Quantized T5 Encoder (GGUF support)
 // =============================================================================
@@ -820,6 +855,40 @@ impl VTokenizer for QuantizedT5Encoder {
         let ids_t = Tensor::new(ids_vec, &self.device)?.reshape((batch_size, max_len))?;
         let mask_t = Tensor::new(mask_vec, &self.device)?.reshape((batch_size, max_len))?;
         Ok((ids_t, mask_t))
+    }
+}
+
+impl TextConditioner for QuantizedT5Encoder {
+    fn encode_prompt(
+        &mut self,
+        prompt: &str,
+        negative: Option<&str>,
+        device: &Device,
+    ) -> Result<Conditioning> {
+        let max_length = self.model_max_length();
+        let (input_ids, attention_mask) =
+            self.encode_batch(&[prompt.to_string()], max_length)?;
+        let input_ids = input_ids.to_device(device)?;
+        let attention_mask = attention_mask.to_device(device)?;
+        let prompt_embeds = self.forward(&input_ids)?.to_device(device)?;
+
+        let mut negative_prompt_embeds = None;
+        let mut negative_prompt_attention_mask = None;
+        if let Some(neg) = negative {
+            let (neg_ids, neg_mask) = self.encode_batch(&[neg.to_string()], max_length)?;
+            let neg_ids = neg_ids.to_device(device)?;
+            let neg_mask = neg_mask.to_device(device)?;
+            let neg_embeds = self.forward(&neg_ids)?.to_device(device)?;
+            negative_prompt_embeds = Some(neg_embeds);
+            negative_prompt_attention_mask = Some(neg_mask);
+        }
+
+        Ok(Conditioning {
+            prompt_embeds,
+            prompt_attention_mask: attention_mask,
+            negative_prompt_embeds,
+            negative_prompt_attention_mask,
+        })
     }
 }
 

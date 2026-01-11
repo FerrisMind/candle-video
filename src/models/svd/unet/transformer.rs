@@ -1,13 +1,11 @@
 //! Spatio-Temporal Transformer for SVD UNet
 //!
-//! Implements spatial and temporal attention mechanisms.
-//! Uses common::attention for cross-platform dispatch (CUDA/Metal/CPU).
+//! Implements spatial and temporal attention mechanisms with a manual attention path.
 
-use candle_core::{D, Module, Result, Tensor};
+use candle_core::{D, DType, Module, Result, Tensor};
 use candle_nn::{Linear, VarBuilder, linear};
 
 use super::model::get_timestep_embedding;
-use crate::common::attention::attention_dispatch;
 
 /// Feed-forward network with GEGLU activation
 #[derive(Debug)]
@@ -97,13 +95,18 @@ impl Attention {
         let k = k.reshape((batch, kv_seq_len, self.heads, self.head_dim))?;
         let v = v.reshape((batch, kv_seq_len, self.heads, self.head_dim))?;
 
-        // Use cross-platform attention dispatch (CUDA Flash-Attn / Metal SDPA / CPU fallback)
-        // Transpose to [B, heads, seq, head_dim] for attention_dispatch
-        let q = q.transpose(1, 2)?.contiguous()?;
-        let k = k.transpose(1, 2)?.contiguous()?;
-        let v = v.transpose(1, 2)?.contiguous()?;
+        let dtype = q.dtype();
+        let q = q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+        let k = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
+        let v = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
 
-        let out = attention_dispatch(&q, &k, &v, None, self.scale, true)?;
+        let att = q.matmul(&k.transpose(D::Minus1, D::Minus2)?)?;
+        let att = (att * self.scale)?;
+        let (b_sz, h_sz, q_len, k_len) = att.dims4()?;
+        let att = att.reshape((b_sz * h_sz * q_len, k_len))?;
+        let att = candle_nn::ops::softmax(&att, D::Minus1)?;
+        let att = att.reshape((b_sz, h_sz, q_len, k_len))?;
+        let out = att.matmul(&v)?.to_dtype(dtype)?;
 
         // Reshape back: [B, heads, seq, head_dim] -> [B, seq, heads*head_dim]
         let out = out
