@@ -13,6 +13,9 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 
+use crate::interfaces::autoencoder::{AutoencoderError, VideoAutoencoder};
+use crate::interfaces::autoencoder_mixin::AutoencoderMixin;
+use crate::interfaces::video_types::VideoLatents;
 use crate::models::ltx_video::t2v_pipeline::{VaeConfig, VaeLtxVideo};
 use candle_core::{DType, IndexOp, Module, Result, Tensor};
 use candle_nn::{
@@ -2458,6 +2461,34 @@ impl VaeLtxVideo for AutoencoderKLLtxVideo {
 
     fn decode(&self, latents: &Tensor, timestep: Option<&Tensor>) -> Result<Tensor> {
         let (_, decoded) = self.decode(latents, timestep, false, false)?;
+        Ok(decoded)
+    }
+}
+
+impl AutoencoderMixin for AutoencoderKLLtxVideo {
+    fn enable_tiling(&mut self) {
+        AutoencoderKLLtxVideo::enable_tiling(self, None, None, None, None, None, None);
+    }
+
+    fn disable_tiling(&mut self) {
+        self.use_tiling = false;
+    }
+
+    fn enable_slicing(&mut self) {
+        self.use_slicing = true;
+    }
+
+    fn disable_slicing(&mut self) {
+        self.use_slicing = false;
+    }
+}
+
+impl VideoAutoencoder for AutoencoderKLLtxVideo {
+    fn decode(&self, latents: &VideoLatents) -> std::result::Result<Tensor, AutoencoderError> {
+        let latents = latents.to_canonical()?;
+        let latents = latents.tensor.permute((0, 2, 1, 3, 4))?;
+        let latents = latents.to_dtype(self.dtype())?;
+        let (_, decoded) = AutoencoderKLLtxVideo::decode(self, &latents, None, false, false)?;
         Ok(decoded)
     }
 }

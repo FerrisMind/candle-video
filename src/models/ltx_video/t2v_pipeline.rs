@@ -1,5 +1,14 @@
 use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 
+pub use crate::interfaces::autoencoder::VideoAutoencoder;
+pub use crate::interfaces::conditioning::{Conditioning, TextConditioner};
+use crate::interfaces::pipeline::{
+    apply_pipeline_io, DiffusionPipeline, PipelineInference, PipelineInput, PipelineOutput,
+};
+use crate::interfaces::processor::{VideoInput, VideoOutput, VideoProcessor};
+pub use crate::interfaces::scheduler::VideoScheduler;
+pub use crate::interfaces::video_types::{VideoLatents, VideoLayout};
+
 #[derive(Debug, Clone)]
 pub struct SchedulerConfig {
     pub base_image_seq_len: usize,
@@ -25,7 +34,7 @@ pub enum TimestepsSpec {
     Sigmas(Vec<f32>),
 }
 
-pub trait Scheduler {
+pub trait Scheduler: VideoScheduler {
     fn config(&self) -> &SchedulerConfig;
     fn order(&self) -> usize;
 
@@ -45,7 +54,7 @@ pub trait Tokenizer {
     fn model_max_length(&self) -> usize;
 }
 
-pub trait TextEncoder {
+pub trait TextEncoder: TextConditioner {
     fn dtype(&self) -> DType;
 
     /// Возвращает hidden states: [B, L, D]
@@ -88,7 +97,7 @@ pub struct VaeConfig {
     pub timestep_conditioning: bool,
 }
 
-pub trait VaeLtxVideo {
+pub trait VaeLtxVideo: VideoAutoencoder {
     fn dtype(&self) -> DType;
     fn spatial_compression_ratio(&self) -> usize;
     fn temporal_compression_ratio(&self) -> usize;
@@ -100,11 +109,6 @@ pub trait VaeLtxVideo {
 
     /// Декод: [B, C, F, H, W] -> видео (тензор)
     fn decode(&self, latents: &Tensor, timestep: Option<&Tensor>) -> Result<Tensor>;
-}
-
-pub trait VideoProcessor {
-    /// В оригинале postprocess_video умеет возвращать PIL/np; здесь оставляем тензор.
-    fn postprocess_video(&self, video: &Tensor) -> Result<Tensor>;
 }
 
 #[derive(Debug, Clone)]
@@ -144,14 +148,24 @@ impl LtxVideoProcessor {
 }
 
 impl VideoProcessor for LtxVideoProcessor {
-    fn postprocess_video(&self, video: &Tensor) -> Result<Tensor> {
+    fn preprocess_video(&self, input: &VideoInput) -> Result<Tensor> {
+        let input: &PipelineInput = input;
+        match input {
+            VideoInput::Latents(latents) => Ok(latents.tensor.clone()),
+            VideoInput::Image(_) | VideoInput::Video(_) => {
+                candle_core::bail!("LTX video processor does not support image/video inputs")
+            }
+        }
+    }
+
+    fn postprocess_video(&self, video: Tensor) -> Result<VideoOutput> {
         // v is in [-1, 1] usually from VAE
         // Postprocess: (v + 1.0) / 2.0 -> [0, 1]
         let video = video.affine(0.5, 0.5)?;
         let video = video.clamp(0.0f32, 1.0f32)?;
         // scale to 0-255
         let video = video.affine(255.0, 0.0)?;
-        Ok(video)
+        Ok(VideoOutput::Tensor(video))
     }
 }
 
@@ -194,12 +208,12 @@ pub fn retrieve_timesteps(
     }
 
     let schedule = if let Some(ts) = timesteps {
-        scheduler.set_timesteps(TimestepsSpec::Timesteps(ts), device, mu)?
+        Scheduler::set_timesteps(scheduler, TimestepsSpec::Timesteps(ts), device, mu)?
     } else if let Some(s) = sigmas {
-        scheduler.set_timesteps(TimestepsSpec::Sigmas(s), device, mu)?
+        Scheduler::set_timesteps(scheduler, TimestepsSpec::Sigmas(s), device, mu)?
     } else {
         let steps = num_inference_steps.unwrap_or(50);
-        scheduler.set_timesteps(TimestepsSpec::Steps(steps), device, mu)?
+        Scheduler::set_timesteps(scheduler, TimestepsSpec::Steps(steps), device, mu)?
     };
 
     let n = schedule.len();
@@ -280,7 +294,7 @@ impl<'a> LtxPipeline<'a> {
         let tcfg = transformer.config().clone();
         let max_len = tokenizer.model_max_length();
 
-        Self {
+        let mut pipeline = Self {
             scheduler,
             vae,
             text_encoder,
@@ -298,7 +312,22 @@ impl<'a> LtxPipeline<'a> {
             num_timesteps: 0,
             current_timestep: None,
             interrupt: false,
-        }
+        };
+
+        DiffusionPipeline::register_modules(
+            &mut pipeline,
+            &[
+                "scheduler",
+                "vae",
+                "text_encoder",
+                "tokenizer",
+                "transformer",
+                "video_processor",
+            ],
+        );
+        apply_pipeline_io(&mut pipeline);
+
+        pipeline
     }
 
     pub fn do_spatio_temporal_guidance(&self) -> bool {
@@ -651,6 +680,7 @@ impl<'a> LtxPipeline<'a> {
         skip_block_list: Option<Vec<usize>>,
         device: &Device,
     ) -> Result<LtxPipelineOutput> {
+        PipelineInference::check_inputs(self, height, width, num_frames)?;
         self.check_inputs(
             prompt.as_ref(),
             height,
@@ -666,6 +696,11 @@ impl<'a> LtxPipeline<'a> {
         self.stg_scale = stg_scale;
         self.interrupt = false;
         self.current_timestep = None;
+        let guidance_scale = PipelineInference::guidance_scale(self);
+        let do_cfg = PipelineInference::do_classifier_free_guidance(self);
+        if guidance_scale < 0.0 {
+            candle_core::bail!("guidance_scale must be >= 0");
+        }
 
         // Set skip blocks from presets (distilled models)
         // Note: In some versions this list is vec![42] (2B distilled) or others.
@@ -701,19 +736,48 @@ impl<'a> LtxPipeline<'a> {
         let prompt_in = prompt
             .clone()
             .unwrap_or_else(|| PromptInput::Single(String::new()));
-        let (mut p_emb, mut p_mask, n_emb, n_mask) = self.encode_prompt(
-            prompt_in,
-            negative_prompt,
-            self.do_classifier_free_guidance(),
-            num_videos_per_prompt,
-            prompt_embeds,
-            negative_prompt_embeds,
-            prompt_attention_mask,
-            negative_prompt_attention_mask,
-            max_sequence_length,
-            device,
-            dtype,
-        )?;
+        let conditioning = if num_videos_per_prompt == 1
+            && prompt_embeds.is_none()
+            && negative_prompt_embeds.is_none()
+            && prompt_attention_mask.is_none()
+            && negative_prompt_attention_mask.is_none()
+        {
+            match (&prompt_in, negative_prompt.as_ref()) {
+                (PromptInput::Single(p), None) => PipelineInference::encode_prompt(self, p, None, device)?,
+                (PromptInput::Single(p), Some(PromptInput::Single(n))) => {
+                    PipelineInference::encode_prompt(self, p, Some(n.as_str()), device)?
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let (mut p_emb, mut p_mask, n_emb, n_mask) = if let Some(conditioning) = conditioning {
+            let prompt_embeds = conditioning.prompt_embeds;
+            let prompt_attention_mask = conditioning.prompt_attention_mask;
+            let n_emb = conditioning
+                .negative_prompt_embeds
+                .unwrap_or(prompt_embeds.zeros_like()?);
+            let n_mask = conditioning
+                .negative_prompt_attention_mask
+                .unwrap_or(prompt_attention_mask.zeros_like()?);
+            (prompt_embeds, prompt_attention_mask, n_emb, n_mask)
+        } else {
+            self.encode_prompt(
+                prompt_in,
+                negative_prompt,
+                do_cfg,
+                num_videos_per_prompt,
+                prompt_embeds,
+                negative_prompt_embeds,
+                prompt_attention_mask,
+                negative_prompt_attention_mask,
+                max_sequence_length,
+                device,
+                dtype,
+            )?
+        };
 
         // Store individual embeds for sequential CFG
         let prompt_embeds_cond = p_emb.clone();
@@ -721,23 +785,43 @@ impl<'a> LtxPipeline<'a> {
         let prompt_embeds_uncond = n_emb.clone();
         let prompt_mask_uncond = n_mask.clone();
 
-        if self.do_classifier_free_guidance() {
+        if do_cfg {
             p_emb = Tensor::cat(&[n_emb, p_emb], 0)?;
             p_mask = Tensor::cat(&[n_mask, p_mask], 0)?;
         }
 
         // latents
         let num_channels_latents = self.transformer.config().in_channels;
-        let mut latents = self.prepare_latents(
-            effective_batch,
-            num_channels_latents,
-            height,
-            width,
-            num_frames,
-            DType::F32,
-            device,
-            latents,
-        )?;
+        let mut latents = if let Some(latents) = latents {
+            self.prepare_latents(
+                effective_batch,
+                num_channels_latents,
+                height,
+                width,
+                num_frames,
+                DType::F32,
+                device,
+                Some(latents),
+            )?
+        } else {
+            let prepared = PipelineInference::prepare_latents(
+                self,
+                effective_batch,
+                num_channels_latents,
+                height,
+                width,
+                num_frames,
+                DType::F32,
+                device,
+                None,
+            )?;
+            let prepared = prepared.to_canonical()?;
+            Self::pack_latents(
+                &prepared.tensor.permute((0, 2, 1, 3, 4))?,
+                self.transformer_spatial_patch_size,
+                self.transformer_temporal_patch_size,
+            )?
+        };
 
         // timesteps/sigmas/mu
         let latent_num_frames = (num_frames - 1) / self.vae_temporal_compression_ratio + 1;
@@ -790,6 +874,9 @@ impl<'a> LtxPipeline<'a> {
             mu,
         )?;
         self.num_timesteps = ts.len();
+        if PipelineInference::num_timesteps(self) == 0 {
+            candle_core::bail!("num_timesteps must be > 0");
+        }
 
         let num_warmup_steps = ts
             .len()
@@ -984,7 +1071,7 @@ impl<'a> LtxPipeline<'a> {
                         .to_dtype(DType::F32)?
                 };
 
-            latents = self.scheduler.step(&noise_pred, t, &latents)?;
+            latents = Scheduler::step(&mut *self.scheduler, &noise_pred, t, &latents)?;
 
             if i == ts.len() - 1
                 || ((i + 1) > num_warmup_steps && (i + 1) % self.scheduler.order() == 0)
@@ -1066,9 +1153,128 @@ impl<'a> LtxPipeline<'a> {
 
         latents = latents.to_dtype(self.vae.dtype())?;
 
-        let video = self.vae.decode(&latents, timestep_opt.as_ref())?;
-        let video = self.video_processor.postprocess_video(&video)?;
+        let video = VaeLtxVideo::decode(&*self.vae, &latents, timestep_opt.as_ref())?;
+        let video: PipelineOutput = self.video_processor.postprocess_video(video)?;
+        let video = match video {
+            VideoOutput::Tensor(tensor) => tensor,
+            VideoOutput::Frames(_) => {
+                candle_core::bail!("LTX pipeline expects tensor output from video processor")
+            }
+        };
 
         Ok(LtxPipelineOutput { frames: video })
+    }
+}
+
+impl<'a> DiffusionPipeline for LtxPipeline<'a> {}
+
+impl<'a> PipelineInference for LtxPipeline<'a> {
+    fn encode_prompt(
+        &mut self,
+        prompt: &str,
+        negative: Option<&str>,
+        device: &Device,
+    ) -> Result<Option<Conditioning>> {
+        let prompt_input = PromptInput::Single(prompt.to_string());
+        let negative_input = negative.map(|v| PromptInput::Single(v.to_string()));
+        let do_cfg = negative.is_some();
+        let dtype = self.text_encoder.dtype();
+        let max_sequence_length = self.tokenizer_max_length;
+
+        let (prompt_embeds, prompt_attention_mask, neg_embeds, neg_attention_mask) =
+            LtxPipeline::encode_prompt(
+                self,
+                prompt_input,
+                negative_input,
+                do_cfg,
+                1,
+                None,
+                None,
+                None,
+                None,
+                max_sequence_length,
+                device,
+                dtype,
+            )?;
+
+        Ok(Some(Conditioning {
+            prompt_embeds,
+            prompt_attention_mask,
+            negative_prompt_embeds: do_cfg.then_some(neg_embeds),
+            negative_prompt_attention_mask: do_cfg.then_some(neg_attention_mask),
+        }))
+    }
+
+    fn check_inputs(&self, height: usize, width: usize, num_frames: usize) -> Result<()> {
+        if !height.is_multiple_of(32) || !width.is_multiple_of(32) {
+            candle_core::bail!(
+                "`height` and `width` must be divisible by 32, got {height} and {width}"
+            );
+        }
+        if num_frames == 0 {
+            candle_core::bail!("`num_frames` must be > 0");
+        }
+        Ok(())
+    }
+
+    fn prepare_latents(
+        &self,
+        batch_size: usize,
+        num_channels_latents: usize,
+        height: usize,
+        width: usize,
+        num_frames: usize,
+        dtype: DType,
+        device: &Device,
+        latents: Option<VideoLatents>,
+    ) -> Result<VideoLatents> {
+        if let Some(latents) = latents {
+            let canonical = latents.to_canonical()?;
+            let tensor = canonical.tensor.to_device(device)?.to_dtype(dtype)?;
+            return Ok(VideoLatents {
+                tensor,
+                ..canonical
+            });
+        }
+
+        let latent_height = height / self.vae_spatial_compression_ratio;
+        let latent_width = width / self.vae_spatial_compression_ratio;
+        let latent_frames = (num_frames - 1) / self.vae_temporal_compression_ratio + 1;
+
+        let tensor = Tensor::randn(
+            0f32,
+            1f32,
+            (
+                batch_size,
+                latent_frames,
+                num_channels_latents,
+                latent_height,
+                latent_width,
+            ),
+            device,
+        )?
+        .to_dtype(dtype)?;
+
+        Ok(VideoLatents {
+            tensor,
+            layout: VideoLayout::BFCHW,
+            batch: batch_size,
+            frames: latent_frames,
+            channels: num_channels_latents,
+            height: latent_height,
+            width: latent_width,
+        })
+    }
+
+    fn guidance_scale(&self) -> f64 {
+        self.guidance_scale as f64
+    }
+
+    fn do_classifier_free_guidance(&self) -> bool {
+        LtxPipeline::do_classifier_free_guidance(self)
+    }
+
+    fn num_timesteps(&self) -> usize {
+        self.num_timesteps
     }
 }

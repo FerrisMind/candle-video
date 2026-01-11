@@ -10,6 +10,7 @@
 pub mod clip;
 pub mod config;
 pub mod pipeline;
+pub mod processor;
 pub mod scheduler;
 pub mod unet;
 pub mod vae;
@@ -22,6 +23,7 @@ pub use config::{
     SvdVaeConfig,
 };
 pub use pipeline::{SvdPipeline, load_image, save_video_frames};
+pub use processor::SvdVideoProcessor;
 pub use scheduler::EulerDiscreteScheduler;
 pub use unet::{
     CrossAttnDownBlockSpatioTemporal, CrossAttnUpBlockSpatioTemporal, DownBlockSpatioTemporal,

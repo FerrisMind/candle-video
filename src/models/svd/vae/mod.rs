@@ -12,10 +12,13 @@ pub use encoder::Encoder;
 use candle_core::{DType, Module, Result, Tensor};
 use candle_nn::VarBuilder;
 
-use crate::svd::config::SvdVaeConfig;
+use super::config::SvdVaeConfig;
+use crate::interfaces::autoencoder::{AutoencoderError, VideoAutoencoder};
+use crate::interfaces::autoencoder_mixin::AutoencoderMixin;
+use crate::interfaces::distributions::DiagonalGaussian;
+use crate::interfaces::video_types::{VideoLatents, VideoLayout};
 
-// Re-export DiagonalGaussianDistribution from candle-transformers
-pub use candle_transformers::models::stable_diffusion::vae::DiagonalGaussianDistribution as GaussianDistribution;
+pub type GaussianDistribution = DiagonalGaussian;
 
 /// AutoencoderKL with Temporal Decoder for SVD
 ///
@@ -86,7 +89,7 @@ impl AutoencoderKLTemporalDecoder {
 
         let posterior = self.encode(&x)?;
         let z = posterior.sample()?;
-        let z = (z * self.config.scaling_factor)?;
+        let z = z.affine(self.config.scaling_factor, 0.0)?;
 
         if self.config.force_upcast && original_dtype == DType::F16 {
             z.to_dtype(DType::F16)
@@ -117,7 +120,7 @@ impl AutoencoderKLTemporalDecoder {
             z.clone()
         };
 
-        let z = (z / self.config.scaling_factor)?;
+        let z = z.affine(1.0 / self.config.scaling_factor, 0.0)?;
 
         // Decode in chunks to prevent OOM (like diffusers: iterate over batch_frames dim)
         let mut decoded_chunks = Vec::new();
@@ -163,6 +166,51 @@ impl AutoencoderKLTemporalDecoder {
     pub fn scaling_factor(&self) -> f64 {
         self.config.scaling_factor
     }
+}
+
+impl VideoAutoencoder for AutoencoderKLTemporalDecoder {
+    fn decode(
+        &self,
+        latents: &VideoLatents,
+    ) -> std::result::Result<Tensor, AutoencoderError> {
+        let latents = latents.to_canonical()?;
+        let flattened = latents.tensor.reshape((
+            latents.batch * latents.frames,
+            latents.channels,
+            latents.height,
+            latents.width,
+        ))?;
+        Ok(AutoencoderKLTemporalDecoder::decode(
+            self,
+            &flattened,
+            latents.frames,
+            None,
+        )?)
+    }
+
+    fn encode(&self, video: &Tensor) -> std::result::Result<VideoLatents, AutoencoderError> {
+        let latents = AutoencoderKLTemporalDecoder::encode_to_latent(self, video)?;
+        let (b, c, h, w) = latents.dims4()?;
+        Ok(VideoLatents {
+            tensor: latents,
+            layout: VideoLayout::BfCHW,
+            batch: b,
+            frames: 1,
+            channels: c,
+            height: h,
+            width: w,
+        })
+    }
+}
+
+impl AutoencoderMixin for AutoencoderKLTemporalDecoder {
+    fn enable_tiling(&mut self) {}
+
+    fn disable_tiling(&mut self) {}
+
+    fn enable_slicing(&mut self) {}
+
+    fn disable_slicing(&mut self) {}
 }
 
 #[cfg(test)]

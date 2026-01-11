@@ -3,13 +3,23 @@
 //! Notes:
 //! - This is a self-contained module intended to compile and mirror the structure
 //!   of the provided Python file.
-//! - Some components imported in Python are implemented here minimally to match
-//!   the tensor contracts used in the file (e.g., AdaLayerNormSingle, PixArtAlphaTextProjection).
+//! - Common components are now imported from interfaces module.
 
+use crate::interfaces::attention::{
+    AttentionMixin, AttentionModule, AttentionModuleMixin, AttnProcessor, DefaultAttnProcessor,
+};
+use crate::interfaces::cache_mixin::{apply_cache_mixin, CacheMixin};
+use crate::interfaces::config_mixin::{apply_config_mixin, ConfigMixin};
+use crate::interfaces::embeddings::{AdaLayerNormSingle, PixArtAlphaTextProjection};
+use crate::interfaces::feed_forward::FeedForward;
+use crate::interfaces::model_mixin::{apply_model_mixin, ModelMixin};
+use crate::interfaces::normalization::{LayerNormNoParams, RmsNorm};
+use crate::interfaces::rope::apply_rotary_emb;
 use crate::models::ltx_video::t2v_pipeline::{TransformerConfig, VideoTransformer3D};
 use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn as nn;
 use nn::{Module, VarBuilder};
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct Transformer2DModelOutput {
@@ -58,285 +68,14 @@ impl Default for LtxVideoTransformer3DModelConfig {
     }
 }
 
-/// LayerNorm without affine parameters (elementwise_affine=False).
-#[derive(Clone, Debug)]
-pub struct LayerNormNoParams {
-    eps: f64,
-}
 
-impl LayerNormNoParams {
-    pub fn new(eps: f64) -> Self {
-        Self { eps }
-    }
-
-    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let last_dim = xs.dim(D::Minus1)?;
-        let mean = (xs.sum_keepdim(D::Minus1)? / (last_dim as f64))?;
-        let xc = xs.broadcast_sub(&mean)?;
-        let var = (xc.sqr()?.sum_keepdim(D::Minus1)? / (last_dim as f64))?;
-        let denom = (var + self.eps)?.sqrt()?;
-        xc.broadcast_div(&denom)
-    }
-}
-
-/// RMSNorm with optional affine weight (elementwise_affine=True/False).
-#[derive(Clone, Debug)]
-pub struct RmsNorm {
-    weight: Option<Tensor>,
-    eps: f64,
-}
-
-impl RmsNorm {
-    pub fn new(dim: usize, eps: f64, elementwise_affine: bool, vb: VarBuilder) -> Result<Self> {
-        let weight = if elementwise_affine {
-            Some(vb.get(dim, "weight")?)
-        } else {
-            None
-        };
-        Ok(Self { weight, eps })
-    }
-
-    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let dtype = xs.dtype();
-        let xs_f32 = xs.to_dtype(DType::F32)?;
-        let dim = xs_f32.dim(D::Minus1)? as f64;
-        let ms = xs_f32
-            .sqr()?
-            .sum_keepdim(D::Minus1)?
-            .affine(1.0 / dim, 0.0)?;
-        let denom = ms.affine(1.0, self.eps)?.sqrt()?;
-        let ys_f32 = xs_f32.broadcast_div(&denom)?;
-        let mut ys = ys_f32.to_dtype(dtype)?;
-        if let Some(w) = &self.weight {
-            // Broadcast weight over leading dims.
-            let rank = ys.rank();
-            let mut shape = vec![1usize; rank];
-            shape[rank - 1] = w.dims1()?;
-            let w = w.reshape(shape)?;
-            ys = ys.broadcast_mul(&w)?;
-        }
-        Ok(ys)
-    }
-}
-
-// Helper for GEGLU feed-forward structure usually found in diffusers
-// Helper for GELU (approximate) feed-forward projection (Layer 0 of FeedForward)
-#[derive(Clone, Debug)]
-struct GeluProjection {
-    proj: nn::Linear,
-}
-
-impl GeluProjection {
-    fn new(dim_in: usize, dim_out: usize, vb: VarBuilder) -> Result<Self> {
-        let proj = nn::linear(dim_in, dim_out, vb.pp("proj"))?;
-        Ok(Self { proj })
-    }
-
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let x = self.proj.forward(xs)?;
-        gelu_approximate(&x)
-    }
-}
-
-impl Module for GeluProjection {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        self.forward(xs)
-    }
-}
-
-// FeedForward container matching "net" structure with GEGLU
-#[derive(Clone, Debug)]
-pub struct FeedForward {
-    net_0: GeluProjection,
-    net_2: nn::Linear,
-}
-
-impl FeedForward {
-    pub fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        // net.0: GeluProjection (Linear + Gelu)
-        // net.2: Linear
-        let hidden = dim * 4;
-
-        let net_0 = GeluProjection::new(dim, hidden, vb.pp("net.0"))?;
-        let net_2 = nn::linear(hidden, dim, vb.pp("net.2"))?;
-
-        Ok(Self { net_0, net_2 })
-    }
-
-    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let x = self.net_0.forward(xs)?;
-        self.net_2.forward(&x)
-    }
-}
-
-/// Minimal PixArtAlphaTextProjection: linear projection to model inner dim.
-#[derive(Clone, Debug)]
-pub struct PixArtAlphaTextProjection {
-    linear_1: nn::Linear,
-    linear_2: nn::Linear,
-}
-
-impl PixArtAlphaTextProjection {
-    pub fn new(in_features: usize, hidden_size: usize, vb: VarBuilder) -> Result<Self> {
-        let linear_1 = nn::linear(in_features, hidden_size, vb.pp("linear_1"))?;
-        let linear_2 = nn::linear(hidden_size, hidden_size, vb.pp("linear_2"))?;
-        Ok(Self { linear_1, linear_2 })
-    }
-
-    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let x = self.linear_1.forward(xs)?;
-        let x = gelu_approximate(&x)?;
-        self.linear_2.forward(&x)
-    }
-}
-
-/// Timestep embedding with two linear layers and SiLU.
-#[derive(Clone, Debug)]
-pub struct TimestepEmbedding {
-    linear_1: nn::Linear,
-    linear_2: nn::Linear,
-}
-
-impl TimestepEmbedding {
-    pub fn new(in_channels: usize, time_embed_dim: usize, vb: VarBuilder) -> Result<Self> {
-        let linear_1 = nn::linear(in_channels, time_embed_dim, vb.pp("linear_1"))?;
-        let linear_2 = nn::linear(time_embed_dim, time_embed_dim, vb.pp("linear_2"))?;
-        Ok(Self { linear_1, linear_2 })
-    }
-
-    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let x = self.linear_1.forward(xs)?;
-        let x = x.silu()?;
-        self.linear_2.forward(&x)
-    }
-}
-
-pub fn gelu_approximate(x: &Tensor) -> Result<Tensor> {
-    // Upcast to F32 for math stability
-    let x_f32 = x.to_dtype(DType::F32)?;
-    let x_cube = x_f32.sqr()?.broadcast_mul(&x_f32)?;
-    let inner = x_f32.broadcast_add(&x_cube.affine(0.044715, 0.0)?)?;
-    let scale = (2.0f64 / std::f64::consts::PI).sqrt() as f32;
-    let tanh_input = inner.affine(scale as f64, 0.0)?;
-    let tanh_out = tanh_input.tanh()?;
-    let gelu = x_f32
-        .broadcast_mul(&tanh_out.affine(1.0, 1.0)?)?
-        .affine(0.5, 0.0)?;
-    gelu.to_dtype(x.dtype())
-}
-
-/// PixArtAlphaCombinedTimestepSizeEmbeddings
-#[derive(Clone, Debug)]
-pub struct PixArtAlphaCombinedTimestepSizeEmbeddings {
-    timestep_embedder: TimestepEmbedding,
-}
-
-impl PixArtAlphaCombinedTimestepSizeEmbeddings {
-    pub fn new(embedding_dim: usize, vb: VarBuilder) -> Result<Self> {
-        let timestep_embedder =
-            TimestepEmbedding::new(256, embedding_dim, vb.pp("timestep_embedder"))?;
-        Ok(Self { timestep_embedder })
-    }
-
-    pub fn forward(&self, timestep: &Tensor) -> Result<Tensor> {
-        // time_proj produces 256 dimensions, flip_sin_to_cos=true
-        let timesteps_proj = get_timestep_embedding(timestep, 256, true)?;
-        self.timestep_embedder.forward(&timesteps_proj)
-    }
-}
-
-/// AdaLayerNormSingle: (PixArtAlphaCombinedTimestepSizeEmbeddings + Linear)
-#[derive(Clone, Debug)]
-pub struct AdaLayerNormSingle {
-    emb: PixArtAlphaCombinedTimestepSizeEmbeddings,
-    linear: nn::Linear,
-}
-
-impl AdaLayerNormSingle {
-    pub fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        let emb = PixArtAlphaCombinedTimestepSizeEmbeddings::new(dim, vb.pp("emb"))?;
-        let linear = nn::linear(dim, 6 * dim, vb.pp("linear"))?;
-        Ok(Self { emb, linear })
-    }
-
-    pub fn forward(&self, timestep: &Tensor) -> Result<(Tensor, Tensor)> {
-        let embedded_timestep = self.emb.forward(timestep)?;
-        let x = embedded_timestep.silu()?;
-        let x = self.linear.forward(&x)?;
-        Ok((x, embedded_timestep))
-    }
-}
-
-/// This matches the implementation in Denoising Diffusion Probabilistic Models: Create sinusoidal timestep embeddings.
-fn get_timestep_embedding(
-    timesteps: &Tensor,
-    embedding_dim: usize,
-    flip_sin_to_cos: bool,
-) -> Result<Tensor> {
-    let device = timesteps.device();
-    let original_dtype = timesteps.dtype();
-
-    // Always use F32 for sinusoidal embedding math
-    let dtype = DType::F32;
-
-    let n = timesteps.dim(0)?;
-    let half = embedding_dim / 2;
-
-    let t = timesteps.to_dtype(dtype)?; // [N]
-    let t = t.unsqueeze(1)?; // [N, 1]
-
-    let inv_freq: Vec<_> = (0..half)
-        .map(|i| 1.0 / 10000f32.powf(i as f32 / (half as f32)))
-        .collect();
-    let inv_freq = Tensor::new(inv_freq.as_slice(), device)?.to_dtype(dtype)?;
-    let freqs = t.broadcast_mul(&inv_freq.unsqueeze(0)?)?; // [N, half]
-
-    let sin = freqs.sin()?;
-    let cos = freqs.cos()?;
-
-    let emb = if flip_sin_to_cos {
-        Tensor::cat(&[cos, sin], D::Minus1)?
-    } else {
-        Tensor::cat(&[sin, cos], D::Minus1)?
-    };
-
-    if embedding_dim % 2 == 1 {
-        let pad = Tensor::zeros((n, 1), dtype, device)?;
-        Tensor::cat(&[emb, pad], D::Minus1)?.to_dtype(original_dtype)
-    } else {
-        emb.to_dtype(original_dtype)
-    }
-}
-
-/// apply_rotary_emb from the Python file:
-/// - x: [B, S, C]
-/// - freqs: (cos, sin) each [B, S, C]
-pub fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
-    let dtype = x.dtype();
-    // Upcast to F32 for rotation math stability
-    let x_f32 = x.to_dtype(DType::F32)?;
-    let cos = cos.to_dtype(DType::F32)?;
-    let sin = sin.to_dtype(DType::F32)?;
-
-    let (b, s, c) = x_f32.dims3()?;
-    if c % 2 != 0 {
-        candle_core::bail!("apply_rotary_emb expects last dim even, got {c}");
-    }
-    let half = c / 2;
-
-    // x -> [B, S, half, 2]
-    let x2 = x_f32.reshape((b, s, half, 2))?;
-    let x_real = x2.i((.., .., .., 0))?;
-    let x_imag = x2.i((.., .., .., 1))?;
-
-    // [-imag, real] interleave back.
-    let x_rot = Tensor::stack(&[x_imag.neg()?, x_real.clone()], D::Minus1)?.reshape((b, s, c))?;
-
-    let out = x_f32
-        .broadcast_mul(&cos)?
-        .broadcast_add(&x_rot.broadcast_mul(&sin)?)?;
-    out.to_dtype(dtype)
-}
+// Note: The following components are now imported from crate::interfaces:
+// - RmsNorm, LayerNormNoParams (from normalization)
+// - gelu_approximate (from activations)
+// - FeedForward (from feed_forward)
+// - get_timestep_embedding, TimestepEmbedding, PixArtAlphaTextProjection,
+//   PixArtAlphaCombinedTimestepSizeEmbeddings, AdaLayerNormSingle (from embeddings)
+// - apply_rotary_emb (from rope)
 
 #[derive(Clone, Debug)]
 pub struct LtxVideoRotaryPosEmbed {
@@ -524,14 +263,11 @@ impl LtxVideoRotaryPosEmbed {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct LtxAttention {
     heads: usize,
     head_dim: usize,
     inner_dim: usize,
-    inner_kv_dim: usize,
-    cross_attention_dim: usize,
 
     norm_q: RmsNorm,
     norm_k: RmsNorm,
@@ -542,6 +278,7 @@ pub struct LtxAttention {
 
     to_out: nn::Linear,
     dropout: nn::Dropout,
+    processor: Arc<dyn AttnProcessor>,
 }
 
 impl LtxAttention {
@@ -581,8 +318,6 @@ impl LtxAttention {
             heads,
             head_dim: dim_head,
             inner_dim,
-            inner_kv_dim,
-            cross_attention_dim,
             norm_q,
             norm_k,
             to_q,
@@ -590,6 +325,7 @@ impl LtxAttention {
             to_v,
             to_out,
             dropout,
+            processor: Arc::new(DefaultAttnProcessor),
         })
     }
 
@@ -644,8 +380,25 @@ impl LtxAttention {
         }
     }
 
-    /// Mirrors LTXVideoAttnProcessor.__call__ behavior from the Python file.
     pub fn forward(
+        &self,
+        hidden_states: &Tensor,                       // [B, S, query_dim]
+        encoder_hidden_states: Option<&Tensor>,       // [B, K, cross_dim] or None
+        attention_mask: Option<&Tensor>,              // optional bias/mask
+        image_rotary_emb: Option<(&Tensor, &Tensor)>, // (cos, sin)
+    ) -> Result<Tensor> {
+        let processor = AttentionModuleMixin::processor(self);
+        processor.process(
+            self,
+            hidden_states,
+            encoder_hidden_states,
+            attention_mask,
+            image_rotary_emb,
+        )
+    }
+
+    /// Mirrors LTXVideoAttnProcessor.__call__ behavior from the Python file.
+    fn forward_inner(
         &self,
         hidden_states: &Tensor,                       // [B, S, query_dim]
         encoder_hidden_states: Option<&Tensor>,       // [B, K, cross_dim] or None
@@ -750,6 +503,33 @@ impl LtxAttention {
     }
 }
 
+impl AttentionModule for LtxAttention {
+    fn forward_internal(
+        &self,
+        hidden_states: &Tensor,
+        encoder_hidden_states: Option<&Tensor>,
+        attention_mask: Option<&Tensor>,
+        image_rotary_emb: Option<(&Tensor, &Tensor)>,
+    ) -> Result<Tensor> {
+        self.forward_inner(
+            hidden_states,
+            encoder_hidden_states,
+            attention_mask,
+            image_rotary_emb,
+        )
+    }
+}
+
+impl AttentionModuleMixin for LtxAttention {
+    fn set_processor(&mut self, processor: Arc<dyn AttnProcessor>) {
+        self.processor = processor;
+    }
+
+    fn processor(&self) -> &Arc<dyn AttnProcessor> {
+        &self.processor
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LtxVideoTransformerBlock {
     norm1: RmsNorm,
@@ -815,6 +595,11 @@ impl LtxVideoTransformerBlock {
             ff,
             scale_shift_table,
         })
+    }
+
+    fn set_attn_processor(&mut self, processor: Arc<dyn AttnProcessor>) {
+        AttentionModuleMixin::set_processor(&mut self.attn1, processor.clone());
+        AttentionModuleMixin::set_processor(&mut self.attn2, processor);
     }
 
     pub fn forward(
@@ -1002,7 +787,7 @@ impl LtxVideoTransformer3DModel {
         let norm_out = LayerNormNoParams::new(1e-6);
         let proj_out = nn::linear(inner_dim, out_channels, vb.pp("proj_out"))?;
 
-        Ok(Self {
+        let mut model = Self {
             proj_in,
             scale_shift_table,
             time_embed,
@@ -1018,7 +803,15 @@ impl LtxVideoTransformer3DModel {
                 num_layers: config.num_layers,
             },
             skip_block_list: Vec::new(),
-        })
+        };
+        ModelMixin::enable_gradient_checkpointing(&mut model, false);
+        CacheMixin::disable_caching(&mut model);
+        let _ = ConfigMixin::config(&model);
+        apply_model_mixin(&mut model);
+        apply_config_mixin(&model);
+        apply_cache_mixin(&mut model);
+        model.set_attn_processor(Arc::new(DefaultAttnProcessor));
+        Ok(model)
     }
 
     pub fn set_skip_block_list(&mut self, list: Vec<usize>) {
@@ -1169,6 +962,26 @@ impl LtxVideoTransformer3DModel {
         // LTX models usually treat it as noise prediction (epsilon or v-prediction).
         // Let's assume just return output.
         Ok(hidden_states)
+    }
+}
+
+impl ModelMixin for LtxVideoTransformer3DModel {}
+
+impl CacheMixin for LtxVideoTransformer3DModel {}
+
+impl ConfigMixin for LtxVideoTransformer3DModel {
+    type Config = TransformerConfig;
+
+    fn config(&self) -> &Self::Config {
+        &self.pipeline_config
+    }
+}
+
+impl AttentionMixin for LtxVideoTransformer3DModel {
+    fn set_attn_processor(&mut self, processor: Arc<dyn AttnProcessor>) {
+        for block in self.transformer_blocks.iter_mut() {
+            block.set_attn_processor(processor.clone());
+        }
     }
 }
 

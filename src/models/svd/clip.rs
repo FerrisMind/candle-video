@@ -8,7 +8,7 @@ use candle_nn::{Linear, VarBuilder};
 use candle_transformers::models::clip::text_model::Activation;
 use candle_transformers::models::clip::vision_model::{ClipVisionConfig, ClipVisionTransformer};
 
-use crate::svd::config::ClipEncoderConfig;
+use super::config::ClipEncoderConfig;
 
 /// CLIP Vision Model with Projection head for SVD conditioning
 ///

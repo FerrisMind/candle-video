@@ -2,7 +2,7 @@
 <p align="left">
   <a href="README.md"><img src="https://img.shields.io/badge/English-232323" alt="English"></a>
   <a href="README.RU.md"><img src="https://img.shields.io/badge/Русский-232323" alt="Русский"></a>
-  <a href="README.PT_BR.md"><img src="https://img.shields.io/badge/Português_BR-5B7CFA" alt="Português"></a>
+  <a href="README.PT_BR.md"><img src="https://img.shields.io/badge/Português_BR-3ABF7A" alt="Português"></a>
 </p>
 
 ---
@@ -13,8 +13,6 @@
 [![Rust](https://img.shields.io/badge/rust-1.82%2B-orange)](https://www.rust-lang.org/)
 
 Biblioteca Rust para geração de vídeo com IA, construída sobre o framework [Candle](https://github.com/huggingface/candle). Inferência de alto desempenho sem dependência do Python.
-
-> **Tradução:** Talita Maia Sousa
 
 ---
 
@@ -301,3 +299,7 @@ candle-video/
 Licenciado sob a Apache License, Version 2.0. Veja [LICENSE](LICENSE) para detalhes.
 
 Copyright 2025 FerrisMind
+
+---
+
+*Tradução: Talita Maia Sousa*

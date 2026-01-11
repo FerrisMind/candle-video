@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use candle_core::{DType, Device, Tensor};
+    use candle_core::{DType, Device};
     use std::path::Path;
 
     #[test]

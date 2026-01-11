@@ -5,7 +5,10 @@ use candle_video::models::ltx_video::{
     loader::WeightLoader,
     quantized_t5_encoder::QuantizedT5EncoderModel,
     scheduler::FlowMatchEulerDiscreteScheduler,
-    t2v_pipeline::{LtxPipeline, LtxVideoProcessor, OutputType, TextEncoder, Tokenizer},
+    t2v_pipeline::{
+        Conditioning, LtxPipeline, LtxVideoProcessor, OutputType, TextConditioner, TextEncoder,
+        Tokenizer,
+    },
     text_encoder::{T5EncoderConfig, T5TextEncoderWrapper},
 };
 use clap::Parser;
@@ -149,6 +152,18 @@ impl Tokenizer for TokenizerAdapter {
 }
 
 struct DummyTextEncoder;
+impl TextConditioner for DummyTextEncoder {
+    fn encode_prompt(
+        &mut self,
+        _prompt: &str,
+        _negative: Option<&str>,
+        _device: &Device,
+    ) -> candle_core::Result<Conditioning> {
+        candle_core::bail!(
+            "DummyTextEncoder: encode_prompt should not be called when embeddings are provided"
+        )
+    }
+}
 impl TextEncoder for DummyTextEncoder {
     fn dtype(&self) -> DType {
         DType::F32

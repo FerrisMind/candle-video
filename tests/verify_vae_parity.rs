@@ -69,7 +69,7 @@ mod tests {
         }
 
         // Step 3: up_blocks
-        let ref_keys = vec![
+        let ref_keys = [
             ("up_block_0_out", "UpBlock 0"),
             ("up_block_1_out", "UpBlock 1"),
             ("up_block_2_out", "UpBlock 2"),

@@ -42,6 +42,9 @@ default = ["flash-attn", "cudnn"]
 flash-attn = ["dep:candle-flash-attn"]
 # cuDNN for faster convolutions (requires CUDA)
 cudnn = ["candle-core/cudnn"]
+# Optional model groups
+svd = []
+legacy_tests = []
 # Intel MKL for CPU acceleration (Linux/Windows x86_64)
 mkl = ["candle-core/mkl"]
 # Apple Accelerate for Metal acceleration (macOS)

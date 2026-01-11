@@ -207,10 +207,10 @@ mod tests {
             let key = format!("rope_f{}_h{}_w{}", num_frames, height, width);
             let py_cos = tensors
                 .get(&format!("{}_cos", key))
-                .expect(&format!("{}_cos not found", key));
+                .unwrap_or_else(|| panic!("{}_cos not found", key));
             let py_sin = tensors
                 .get(&format!("{}_sin", key))
-                .expect(&format!("{}_sin not found", key));
+                .unwrap_or_else(|| panic!("{}_sin not found", key));
 
             println!(
                 "\n--- Config: f={}, h={}, w={} ---",
@@ -286,13 +286,13 @@ mod tests {
             let key = format!("rope_coords_f{}_h{}_w{}", num_frames, height, width);
             let py_video_coords = tensors
                 .get(&format!("{}_video_coords", key))
-                .expect(&format!("{}_video_coords not found", key));
+                .unwrap_or_else(|| panic!("{}_video_coords not found", key));
             let py_cos = tensors
                 .get(&format!("{}_cos", key))
-                .expect(&format!("{}_cos not found", key));
+                .unwrap_or_else(|| panic!("{}_cos not found", key));
             let py_sin = tensors
                 .get(&format!("{}_sin", key))
-                .expect(&format!("{}_sin not found", key));
+                .unwrap_or_else(|| panic!("{}_sin not found", key));
 
             // Create hidden states
             let hidden_states = Tensor::randn(0f32, 1f32, (batch_size, seq_len, 2048), &device)?;
@@ -575,19 +575,19 @@ mod tests {
             // Load inputs
             let hidden_states = tensors
                 .get(&format!("{}_hidden_states", prefix))
-                .expect(&format!("{}_hidden_states not found", prefix));
+                .unwrap_or_else(|| panic!("{}_hidden_states not found", prefix));
             let encoder_hidden_states = tensors
                 .get(&format!("{}_encoder_hidden_states", prefix))
-                .expect(&format!("{}_encoder_hidden_states not found", prefix));
+                .unwrap_or_else(|| panic!("{}_encoder_hidden_states not found", prefix));
             let timestep = tensors
                 .get(&format!("{}_timestep", prefix))
-                .expect(&format!("{}_timestep not found", prefix));
+                .unwrap_or_else(|| panic!("{}_timestep not found", prefix));
             let encoder_attention_mask = tensors
                 .get(&format!("{}_encoder_attention_mask", prefix))
-                .expect(&format!("{}_encoder_attention_mask not found", prefix));
+                .unwrap_or_else(|| panic!("{}_encoder_attention_mask not found", prefix));
             let expected_output = tensors
                 .get(&format!("{}_output", prefix))
-                .expect(&format!("{}_output not found", prefix));
+                .unwrap_or_else(|| panic!("{}_output not found", prefix));
 
             println!("Hidden states shape: {:?}", hidden_states.shape());
             println!(
@@ -660,13 +660,13 @@ mod tests {
         let x = Tensor::from_vec(x_data.clone(), (batch_size, seq_len, dim), &device)?;
 
         // scale: modulation scale
-        let scale_data: Vec<f32> = (0..batch_size * 1 * dim)
+        let scale_data: Vec<f32> = (0..batch_size * dim)
             .map(|i| (i as f32) * 0.01)
             .collect();
         let scale = Tensor::from_vec(scale_data.clone(), (batch_size, 1, dim), &device)?;
 
         // shift: modulation shift
-        let shift_data: Vec<f32> = (0..batch_size * 1 * dim)
+        let shift_data: Vec<f32> = (0..batch_size * dim)
             .map(|i| (i as f32) * 0.001)
             .collect();
         let shift = Tensor::from_vec(shift_data.clone(), (batch_size, 1, dim), &device)?;
@@ -753,11 +753,6 @@ mod property_tests {
         let diff = a.sub(b).unwrap();
         let sq = diff.sqr().unwrap();
         sq.mean_all().unwrap().to_vec0::<f32>().unwrap()
-    }
-
-    fn compute_max_diff(a: &Tensor, b: &Tensor) -> f32 {
-        let diff = a.sub(b).unwrap().abs().unwrap();
-        diff.max_all().unwrap().to_vec0::<f32>().unwrap()
     }
 
     // =========================================================================
