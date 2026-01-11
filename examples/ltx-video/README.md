@@ -40,15 +40,16 @@ cargo run --example ltx-video --release --features flash-attn,cudnn -- \
     --prompt "A serene mountain lake at sunset, photorealistic, 4k"
 ```
 
+> **Note**: By default it downloads **LTX-Video-0.9.8-2b-distilled** (7 steps) from [oxide-lab/LTX-Video-0.9.8-2B-distilled](https://huggingface.co/oxide-lab/LTX-Video-0.9.8-2B-distilled).
+
 ### Using Local Weights
 
 ```bash
 cargo run --example ltx-video --release --features flash-attn,cudnn -- \
     --local-weights ./models/ltx-video \
-    --ltxv-version 0.9.5 \
+    --ltxv-version 0.9.8-2b-distilled \
     --prompt "A cute robot dancing in a neon city" \
-    --width 384 --height 256 --num-frames 25 \
-    --steps 20
+    --width 384 --height 256 --num-frames 25 
 ```
 
 ### Low VRAM Mode (VAE Tiling)
@@ -71,9 +72,9 @@ cargo run --example ltx-video --release --features flash-attn,cudnn -- \
 | `--width` | Width of the generated video (divisible by 32) | `768` |
 | `--height` | Height of the generated video (divisible by 32) | `512` |
 | `--num-frames` | Number of frames (should be 8n + 1) | `97` |
-| `--steps` | Number of denoising steps | From version config (40 for 0.9.5, 8 for distilled) |
-| `--guidance-scale` | Classifier-free guidance scale | From version config (3.0 for 0.9.5, 1.0 for distilled) |
-| `--ltxv-version` | LTX-Video version (0.9.5, 0.9.8-2b-distilled, etc.) | `0.9.5` |
+| `--steps` | Number of denoising steps | From version config (7 for distilled, 40 for 0.9.5) |
+| `--guidance-scale` | Classifier-free guidance scale | From version config (1.0 for distilled, 3.0 for 0.9.5) |
+| `--ltxv-version` | LTX-Video version (0.9.8-2b-distilled, 0.9.5, etc.) | `0.9.8-2b-distilled` |
 | `--local-weights` | Path to local model weight directory | Auto-download from HuggingFace |
 | `--output-dir` | Directory to save results | `"output"` |
 | `--vae-tiling` | Enable spatial VAE tiling | `false` |

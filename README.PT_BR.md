@@ -142,7 +142,7 @@ cargo build --release --features "cudnn,flash-attn"
 Baixar de [oxide-lab/LTX-Video-0.9.8-2B-distilled](https://huggingface.co/oxide-lab/LTX-Video-0.9.8-2B-distilled):
 
 ```bash
-huggingface-cli download oxide-lab/LTX-Video-0.9.8-2B-distilled --local-dir ./models/ltx-video
+hf download oxide-lab/LTX-Video-0.9.8-2B-distilled --local-dir ./models/ltx-video
 ```
 
 > Nota: Esta é a mesma versão oficial do modelo `Lightricks/LTX-Video`, mas o repositório contém todos os arquivos necessários de uma vez. Você não precisa procurar tudo individualmente.

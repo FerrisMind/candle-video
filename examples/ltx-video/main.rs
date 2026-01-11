@@ -38,7 +38,7 @@ struct Args {
     #[arg(long, default_value_t = 97)]
     num_frames: usize,
 
-    #[arg(long, default_value = "0.9.5")]
+    #[arg(long, default_value = "0.9.8-2b-distilled")]
     ltxv_version: String,
 
     #[arg(long, default_value = "Lightricks/LTX-Video")]
@@ -325,10 +325,10 @@ fn main() -> anyhow::Result<()> {
 
             (transformer, vae, t5, tokenizer)
         } else {
-            println!("\nDownloading models from HuggingFace: oxide-lab/LTX-Video-0.9.5");
+            println!("\nDownloading models from HuggingFace: oxide-lab/LTX-Video-0.9.8-2B-distilled");
             let api = Api::new()?;
             let repo = api.repo(Repo::with_revision(
-                "oxide-lab/LTX-Video-0.9.5".into(),
+                "oxide-lab/LTX-Video-0.9.8-2B-distilled".into(),
                 RepoType::Model,
                 "main".into(),
             ));
