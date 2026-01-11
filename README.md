@@ -48,6 +48,21 @@ Rust library for AI video generation built on the [Candle](https://github.com/hu
 
 ---
 
+### Roadmap
+
+- [x] **LTX Video 0.9.5-0.9.8**  
+- [ ] **Wan 2.1**
+- [ ] **Wan 2.2** 
+- [ ] **Kandinsky 5**  
+- [ ] **LTX-2 (Video only)** 
+- [ ] **HunyuanVideo** 
+- [ ] **CogVideoX** 
+- [ ] **Mochi** 
+- [ ] **LTX-2 (Full)**
+- [ ] **SVD/SVD XT** 
+
+---
+
 ## 🚀 Key Features
 
 - **High Performance** — Native Rust with GPU acceleration via CUDA/cuDNN
