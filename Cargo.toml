@@ -32,6 +32,7 @@ statrs = "0.18"
 gif = "0.14"
 rayon = "1.0"
 rand = "0.8"
+rand_distr = "0.4"
 regex = "1.0"
 
 
@@ -75,6 +76,10 @@ harness = false
 [[example]]
 name = "ltx-video"
 path = "examples/ltx-video/main.rs"
+
+[[example]]
+name = "wan"
+path = "examples/wan/main.rs"
 
 # Verification examples
 [[example]]
@@ -163,3 +168,8 @@ path = "examples/debug/list_gguf_tensors.rs"
 [[example]]
 name = "test-rng"
 path = "examples/debug/test_rng.rs"
+
+
+[[example]]
+name = "wan-test-transformer"
+path = "examples/wan/test_transformer.rs"

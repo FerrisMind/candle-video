@@ -7,12 +7,12 @@ use candle_nn::VarBuilder;
 use tracing::{debug, info};
 
 use crate::interfaces::conditioning::Conditioning;
-use crate::interfaces::pipeline::{apply_pipeline_io, DiffusionPipeline, PipelineInference};
+use crate::interfaces::pipeline::{DiffusionPipeline, PipelineInference, apply_pipeline_io};
 use crate::interfaces::video_types::{VideoLatents, VideoLayout};
 
 use super::{
-    normalize_for_clip, AutoencoderKLTemporalDecoder, ClipVisionModelWithProjection,
-    EulerDiscreteScheduler, SvdConfig, SvdInferenceConfig, UNetSpatioTemporalConditionModel,
+    AutoencoderKLTemporalDecoder, ClipVisionModelWithProjection, EulerDiscreteScheduler, SvdConfig,
+    SvdInferenceConfig, UNetSpatioTemporalConditionModel, normalize_for_clip,
 };
 
 /// Dump tensor to .npy file for comparison with Python reference.
@@ -83,10 +83,7 @@ impl PipelineInference for SvdPipeline {
     ) -> Result<VideoLatents> {
         if let Some(latents) = latents {
             let tensor = latents.tensor.to_device(device)?.to_dtype(dtype)?;
-            return Ok(VideoLatents {
-                tensor,
-                ..latents
-            });
+            return Ok(VideoLatents { tensor, ..latents });
         }
 
         let latent_height = height / 8;

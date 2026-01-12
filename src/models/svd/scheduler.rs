@@ -320,7 +320,12 @@ impl SchedulerMixin for EulerDiscreteScheduler {
         self.add_noise(original, noise, timestep_idx)
     }
 
-    fn step(&mut self, model_output: &Tensor, t: f64, latents: &Tensor) -> Result<SchedulerStepOutput> {
+    fn step(
+        &mut self,
+        model_output: &Tensor,
+        t: f64,
+        latents: &Tensor,
+    ) -> Result<SchedulerStepOutput> {
         let timestep_idx = self
             .timesteps()
             .iter()

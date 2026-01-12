@@ -5,12 +5,12 @@
 use candle_core::{DType, IndexOp, Module, Result, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, VarBuilder, conv2d};
 
+use super::super::config::SvdUnetConfig;
 use super::blocks::{
     CrossAttnDownBlockSpatioTemporal, CrossAttnUpBlockSpatioTemporal, DownBlockSpatioTemporal,
     UNetMidBlockSpatioTemporal, UpBlockSpatioTemporal,
 };
-use super::super::config::SvdUnetConfig;
-use crate::interfaces::embeddings::{get_timestep_embedding, TimestepEmbedding};
+use crate::interfaces::embeddings::{TimestepEmbedding, get_timestep_embedding};
 
 /// Debug helper: check tensor for NaN/Inf and print if found
 fn debug_check_tensor(name: &str, tensor: &Tensor) {
@@ -36,8 +36,6 @@ fn debug_check_tensor(name: &str, tensor: &Tensor) {
         }
     }
 }
-
-
 
 /// Timesteps module for projecting scalar values to embeddings
 #[derive(Debug)]

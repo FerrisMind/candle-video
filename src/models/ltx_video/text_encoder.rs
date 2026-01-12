@@ -650,8 +650,7 @@ impl TextConditioner for T5TextEncoderWrapper {
         device: &Device,
     ) -> Result<Conditioning> {
         let max_length = self.model_max_length();
-        let (input_ids, attention_mask) =
-            self.encode_batch(&[prompt.to_string()], max_length)?;
+        let (input_ids, attention_mask) = self.encode_batch(&[prompt.to_string()], max_length)?;
         let input_ids = input_ids.to_device(device)?;
         let attention_mask = attention_mask.to_device(device)?;
         let prompt_embeds = self.forward(&input_ids)?.to_device(device)?;
@@ -869,8 +868,7 @@ impl TextConditioner for QuantizedT5Encoder {
         device: &Device,
     ) -> Result<Conditioning> {
         let max_length = self.model_max_length();
-        let (input_ids, attention_mask) =
-            self.encode_batch(&[prompt.to_string()], max_length)?;
+        let (input_ids, attention_mask) = self.encode_batch(&[prompt.to_string()], max_length)?;
         let input_ids = input_ids.to_device(device)?;
         let attention_mask = attention_mask.to_device(device)?;
         let prompt_embeds = self.forward(&input_ids)?.to_device(device)?;

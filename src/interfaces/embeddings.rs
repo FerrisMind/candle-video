@@ -4,7 +4,7 @@
 //! layers used across video generation models.
 
 use crate::interfaces::activations::gelu_approximate;
-use candle_core::{DType, Module, Result, Tensor, D};
+use candle_core::{D, DType, Module, Result, Tensor};
 use candle_nn::{self as nn, Linear, VarBuilder};
 
 /// Sinusoidal timestep embeddings (DDPM-style).

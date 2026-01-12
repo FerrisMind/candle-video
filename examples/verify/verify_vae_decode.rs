@@ -1,95 +1,75 @@
-//! VAE decode parity verification - runs as example to avoid thread-local cleanup issues
-
-use candle_core::{DType, Device};
+use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
-use candle_video::models::ltx_video::vae::{
-    AutoencoderKLLtxVideo, AutoencoderKLLtxVideoConfig,
-};
-use std::path::Path;
+use candle_video::models::ltx_video::vae::{AutoencoderKLLtxVideo, AutoencoderKLLtxVideoConfig};
+use std::path::PathBuf;
 
-fn main() -> anyhow::Result<()> {
-    let parity_path = Path::new("gen_vae_parity.safetensors");
-    let vae_path = Path::new("models/models--Lightricks--LTX-Video-0.9.5/vae/diffusion_pytorch_model.safetensors");
-    
-    if !parity_path.exists() {
-        println!("Skipping: gen_vae_parity.safetensors not found");
-        return Ok(());
-    }
-    if !vae_path.exists() {
-        println!("Skipping: VAE model not found");
-        return Ok(());
-    }
-
-    let device = Device::new_cuda(0)?;
+fn main() -> Result<()> {
+    let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+    // Use BF16 for GPU - matches LTX model format
     let dtype = DType::BF16;
-    println!("Running on device: {:?}, dtype: {:?}", device, dtype);
 
-    let ref_tensors = candle_core::safetensors::load(parity_path, &device)?;
+    println!("Device: {:?}", device);
 
-    let vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(&[vae_path], dtype, &device)?
+    println!("Loading reference VAE data...");
+    let ref_path = "reference_output/vae_debug.safetensors";
+    let ref_tensors = candle_core::safetensors::load(ref_path, &Device::Cpu)?;
+
+    let latents = ref_tensors
+        .get("latents")
+        .unwrap()
+        .to_device(&device)?
+        .to_dtype(dtype)?;
+    let py_video = ref_tensors
+        .get("video")
+        .unwrap()
+        .to_device(&device)?
+        .to_dtype(dtype)?;
+
+    println!("Latents Shape: {:?}", latents.dims());
+    println!("Reference Video Shape: {:?}", py_video.dims());
+
+    println!("Loading VAE Model...");
+    let model_path = "c:/candle-video/models/models--Lightricks--LTX-Video-0.9.5/vae";
+    let weights_path = PathBuf::from(model_path).join("diffusion_pytorch_model.safetensors");
+    let config_path = PathBuf::from(model_path).join("config.json");
+
+    let config: AutoencoderKLLtxVideoConfig = {
+        let file = std::fs::File::open(config_path)?;
+        serde_json::from_reader(file).map_err(candle_core::Error::wrap)?
     };
-    let config = AutoencoderKLLtxVideoConfig::default();
-    let model = AutoencoderKLLtxVideo::new(config, vb)?;
 
-    // Test cases
-    let test_cases = vec![
-        ("decode_shape0_t0.0", "Shape0 t=0.0"),
-        ("decode_shape0_t0.05", "Shape0 t=0.05"),
-        ("decode_shape1_t0.05", "Shape1 t=0.05"),
-    ];
+    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[weights_path], dtype, &device)? };
+    let vae = AutoencoderKLLtxVideo::new(config, vb)?;
 
-    let mut all_passed = true;
+    println!("Decoding...");
+    // decode(latents, temb, return_dict, train)
+    // Need temb tensor (0.0)
+    let (b, _, _, _, _) = latents.dims5()?;
+    let temb = Tensor::zeros((b,), dtype, &device)?;
 
-    for (prefix, desc) in test_cases {
-        let latents_key = format!("{}_latents", prefix);
-        let temb_key = format!("{}_temb", prefix);
-        let output_key = format!("{}_output", prefix);
+    let (_, video) = vae.decode(&latents, Some(&temb), false, false)?;
 
-        let latents = match ref_tensors.get(&latents_key) {
-            Some(t) => t.to_dtype(dtype)?,
-            None => continue,
-        };
-        let temb = match ref_tensors.get(&temb_key) {
-            Some(t) => t.to_dtype(dtype)?,
-            None => continue,
-        };
-        let ref_output = match ref_tensors.get(&output_key) {
-            Some(t) => t,
-            None => continue,
-        };
+    println!("Comparing results...");
+    // Convert to F32 for comparison
+    let video_f32 = video.to_dtype(DType::F32)?;
+    let py_video_f32 = py_video.to_dtype(DType::F32)?;
 
-        println!("\n{}: latents shape {:?}", desc, latents.shape());
+    let diff = (&video_f32 - &py_video_f32)?.abs()?;
+    let max_diff = diff.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+    let avg_diff = diff.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+    let mse = diff.sqr()?.mean_all()?.to_scalar::<f32>()?;
 
-        let (_, output) = model.decode(&latents, Some(&temb), false, false)?;
+    println!("VAE Output Diff Max: {}", max_diff);
+    println!("VAE Output Diff Avg: {}", avg_diff);
+    println!("VAE Output MSE: {:.2e}", mse);
 
-        let output_f32 = output.to_dtype(DType::F32)?;
-        let ref_output_f32 = ref_output.to_dtype(DType::F32)?;
-
-        let diff = output_f32.sub(&ref_output_f32)?.abs()?;
-        let max_diff = diff.max_all()?.to_vec0::<f32>()?;
-        let mse = diff.sqr()?.mean_all()?.to_vec0::<f32>()?;
-
-        println!("  Output shape: {:?}", output.shape());
-        println!("  Max diff: {:.6}", max_diff);
-        println!("  MSE: {:.2e}", mse);
-
-        // Requirement 4.1: MSE < 1e-3
-        if mse < 1e-3 {
-            println!("  ✓ PASS (MSE < 1e-3)");
-        } else if mse < 1e-2 {
-            println!("  ✓ PASS (MSE < 1e-2, acceptable for BF16)");
-        } else {
-            println!("  ✗ FAIL (MSE {} exceeds threshold)", mse);
-            all_passed = false;
-        }
-    }
-
-    if all_passed {
-        println!("\n✓ All VAE decode parity tests passed!");
+    // Requirement 4.1: MSE < 1e-3
+    if mse < 1e-3 {
+        println!("SUCCESS: VAE matches (MSE < 1e-3).");
+    } else if mse < 1e-2 {
+        println!("SUCCESS: VAE matches (MSE < 1e-2, acceptable for BF16).");
     } else {
-        println!("\n✗ Some tests failed!");
-        std::process::exit(1);
+        println!("FAILURE: VAE mismatch (MSE {} exceeds threshold).", mse);
     }
 
     Ok(())

@@ -382,16 +382,14 @@ impl FlowMatchEulerDiscreteScheduler {
             if timesteps.is_some_and(|t| t.len() != n) {
                 bail!("timesteps length must match num_inference_steps.");
             }
+        } else if let Some(s) = sigmas {
+            num_inference_steps = Some(s.len());
+        } else if let Some(t) = timesteps {
+            num_inference_steps = Some(t.len());
         } else {
-            if let Some(s) = sigmas {
-                num_inference_steps = Some(s.len());
-            } else if let Some(t) = timesteps {
-                num_inference_steps = Some(t.len());
-            } else {
-                bail!(
-                    "num_inference_steps must be provided if neither sigmas nor timesteps are provided."
-                );
-            }
+            bail!(
+                "num_inference_steps must be provided if neither sigmas nor timesteps are provided."
+            );
         }
         let num_inference_steps = num_inference_steps.unwrap();
         self.num_inference_steps = Some(num_inference_steps);
@@ -724,7 +722,12 @@ impl SchedulerMixin for FlowMatchEulerDiscreteScheduler {
         original.broadcast_add(&scaled)
     }
 
-    fn step(&mut self, model_output: &Tensor, t: f64, latents: &Tensor) -> Result<SchedulerStepOutput> {
+    fn step(
+        &mut self,
+        model_output: &Tensor,
+        t: f64,
+        latents: &Tensor,
+    ) -> Result<SchedulerStepOutput> {
         let out = self.step_inner(model_output, t as f32, latents, None)?;
         Ok(SchedulerStepOutput {
             prev_sample: out.prev_sample,
@@ -734,7 +737,7 @@ impl SchedulerMixin for FlowMatchEulerDiscreteScheduler {
 }
 
 // =============================================================================
-// Helper Functions 
+// Helper Functions
 // =============================================================================
 
 /// Calculate shift for dynamic shifting (from diffusers.pipelines.flux)

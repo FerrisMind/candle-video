@@ -12,8 +12,10 @@
 #[cfg(test)]
 mod tests {
     use candle_core::{DType, Device, Tensor};
+    use candle_video::interfaces::scheduler_mixin::SchedulerMixin;
     use candle_video::models::ltx_video::scheduler::{
         FlowMatchEulerDiscreteScheduler, FlowMatchEulerDiscreteSchedulerConfig, TimeShiftType,
+        Scheduler, TimestepsSpec,
     };
     use std::path::Path;
 
@@ -195,7 +197,7 @@ mod tests {
 
         for num_steps in [10, 20, 30, 40, 50] {
             let mut scheduler = FlowMatchEulerDiscreteScheduler::new(config.clone())?;
-            scheduler.set_timesteps(Some(num_steps), &device, None, None, None)?;
+            Scheduler::set_timesteps(&mut scheduler, TimestepsSpec::Steps(num_steps), &device, 0.0)?;
 
             let ts_key = format!("basic_timesteps_{}", num_steps);
             let sig_key = format!("basic_sigmas_{}", num_steps);
@@ -262,7 +264,7 @@ mod tests {
         for mu in mu_values {
             for num_steps in step_counts {
                 let mut scheduler = FlowMatchEulerDiscreteScheduler::new(config.clone())?;
-                scheduler.set_timesteps(Some(num_steps), &device, None, Some(mu), None)?;
+                Scheduler::set_timesteps(&mut scheduler, TimestepsSpec::Steps(num_steps), &device, mu)?;
 
                 let ts_key = format!("dynamic_timesteps_mu{}_steps{}", mu, num_steps);
                 let sig_key = format!("dynamic_sigmas_mu{}_steps{}", mu, num_steps);
@@ -452,11 +454,11 @@ mod tests {
                 tensors.get(&output_key),
             ) {
                 let mut scheduler = FlowMatchEulerDiscreteScheduler::new(config.clone())?;
-                scheduler.set_timesteps(Some(num_steps), &device, None, Some(mu), None)?;
+                Scheduler::set_timesteps(&mut scheduler, TimestepsSpec::Steps(num_steps), &device, mu)?;
 
                 let t = timestep.to_vec1::<f32>()?[0];
-                let step_result = scheduler.step(model_output, t, sample, None)?;
-                let rust_output = step_result.prev_sample;
+                let step_result = Scheduler::step(&mut scheduler, model_output, t as i64, sample)?;
+                let rust_output = step_result;
 
                 let mse = compute_mse(&rust_output, ref_output);
                 let max_diff = compute_max_abs_diff(&rust_output, ref_output);
@@ -491,7 +493,7 @@ mod tests {
         };
 
         let mut scheduler = FlowMatchEulerDiscreteScheduler::new(config)?;
-        scheduler.set_timesteps(Some(40), &device, None, Some(1.5), None)?;
+        Scheduler::set_timesteps(&mut scheduler, TimestepsSpec::Steps(40), &device, 1.5)?;
 
         // Create test tensors in BF16 (typical model dtype)
         let sample_bf16 =
@@ -502,11 +504,11 @@ mod tests {
         let timesteps = scheduler.timesteps().to_vec1::<f32>()?;
         let t = timesteps[0];
 
-        let result = scheduler.step(&model_output_bf16, t, &sample_bf16, None)?;
+        let result = Scheduler::step(&mut scheduler, &model_output_bf16, t as i64, &sample_bf16)?;
 
         // Verify output is F32 (for precision during denoising loop)
         assert_eq!(
-            result.prev_sample.dtype(),
+            result.dtype(),
             DType::F32,
             "Step output should be F32 for precision"
         );
@@ -540,7 +542,7 @@ mod tests {
 
         let config = FlowMatchEulerDiscreteSchedulerConfig::default();
         let mut scheduler = FlowMatchEulerDiscreteScheduler::new(config)?;
-        scheduler.set_timesteps(Some(40), &device, None, Some(ref_mu), None)?;
+        Scheduler::set_timesteps(&mut scheduler, TimestepsSpec::Steps(40), &device, ref_mu)?;
 
         let rust_timesteps = scheduler.timesteps().to_vec1::<f32>()?;
         let rust_sigmas = scheduler.sigmas().to_vec1::<f32>()?;
@@ -588,8 +590,10 @@ mod tests {
 #[cfg(test)]
 mod property_tests {
     use candle_core::{DType, Device, Tensor};
+    use candle_video::interfaces::scheduler_mixin::SchedulerMixin;
     use candle_video::models::ltx_video::scheduler::{
         FlowMatchEulerDiscreteScheduler, FlowMatchEulerDiscreteSchedulerConfig, TimeShiftType,
+        Scheduler, TimestepsSpec,
     };
     use proptest::prelude::*;
     use std::path::Path;
@@ -655,7 +659,7 @@ mod property_tests {
 
                 let mut scheduler = FlowMatchEulerDiscreteScheduler::new(config)
                     .expect("Failed to create scheduler");
-                scheduler.set_timesteps(Some(actual_steps), &device, None, Some(mu), None)
+                Scheduler::set_timesteps(&mut scheduler, TimestepsSpec::Steps(actual_steps), &device, mu)
                     .expect("Failed to set timesteps");
 
                 let rust_ts = scheduler.timesteps();
@@ -731,13 +735,13 @@ mod property_tests {
 
                 let mut scheduler = FlowMatchEulerDiscreteScheduler::new(config)
                     .expect("Failed to create scheduler");
-                scheduler.set_timesteps(Some(num_steps), &device, None, Some(mu), None)
+                Scheduler::set_timesteps(&mut scheduler, TimestepsSpec::Steps(num_steps), &device, mu)
                     .expect("Failed to set timesteps");
 
                 let t = timestep.to_vec1::<f32>().expect("Failed to get timestep")[0];
-                let step_result = scheduler.step(model_output, t, sample, None)
+                let step_result = Scheduler::step(&mut scheduler, model_output, t as i64, sample)
                     .expect("Failed to execute step");
-                let rust_output = step_result.prev_sample;
+                let rust_output = step_result;
 
                 let mse = compute_mse(&rust_output, ref_output);
 
@@ -813,7 +817,7 @@ mod property_tests {
 
             let mut scheduler = FlowMatchEulerDiscreteScheduler::new(config)
                 .expect("Failed to create scheduler");
-            scheduler.set_timesteps(Some(40), &device, None, Some(1.5), None)
+            Scheduler::set_timesteps(&mut scheduler, TimestepsSpec::Steps(40), &device, 1.5)
                 .expect("Failed to set timesteps");
 
             // Create deterministic test tensors
@@ -837,7 +841,7 @@ mod property_tests {
             let sigma_next = sigmas[1];
             let dt = sigma_next - sigma;
 
-            let step_result = scheduler.step(&model_output, t, &sample, None)
+            let step_result = Scheduler::step(&mut scheduler, &model_output, t as i64, &sample)
                 .expect("Failed to execute step");
 
             // Manually compute expected result
@@ -847,7 +851,7 @@ mod property_tests {
             let scaled = model_output_f32.broadcast_mul(&dt_tensor).expect("Failed to scale");
             let expected = sample_f32.broadcast_add(&scaled).expect("Failed to add");
 
-            let mse = compute_mse(&step_result.prev_sample, &expected);
+            let mse = compute_mse(&step_result, &expected);
 
             prop_assert!(
                 mse < 1e-10,

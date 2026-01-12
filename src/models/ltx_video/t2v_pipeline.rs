@@ -2,48 +2,16 @@ use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 
 pub use crate::interfaces::autoencoder::VideoAutoencoder;
 pub use crate::interfaces::conditioning::{Conditioning, TextConditioner};
+// Re-export Scheduler trait and related types from flow_match_scheduler
+pub use crate::interfaces::flow_match_scheduler::{
+    Scheduler, SchedulerConfig, TimestepsSpec, calculate_shift, retrieve_timesteps,
+};
 use crate::interfaces::pipeline::{
-    apply_pipeline_io, DiffusionPipeline, PipelineInference, PipelineInput, PipelineOutput,
+    DiffusionPipeline, PipelineInference, PipelineInput, PipelineOutput, apply_pipeline_io,
 };
 use crate::interfaces::processor::{VideoInput, VideoOutput, VideoProcessor};
 pub use crate::interfaces::scheduler::VideoScheduler;
 pub use crate::interfaces::video_types::{VideoLatents, VideoLayout};
-
-#[derive(Debug, Clone)]
-pub struct SchedulerConfig {
-    pub base_image_seq_len: usize,
-    pub max_image_seq_len: usize,
-    pub base_shift: f32,
-    pub max_shift: f32,
-}
-
-impl Default for SchedulerConfig {
-    fn default() -> Self {
-        Self {
-            base_image_seq_len: 256,
-            max_image_seq_len: 4096,
-            base_shift: 0.5,
-            max_shift: 1.15,
-        }
-    }
-}
-
-pub enum TimestepsSpec {
-    Steps(usize),
-    Timesteps(Vec<i64>),
-    Sigmas(Vec<f32>),
-}
-
-pub trait Scheduler: VideoScheduler {
-    fn config(&self) -> &SchedulerConfig;
-    fn order(&self) -> usize;
-
-    /// Должен сохранить внутренний schedule и вернуть timesteps (в torch это scheduler.timesteps).
-    fn set_timesteps(&mut self, spec: TimestepsSpec, device: &Device, mu: f32) -> Result<Vec<i64>>;
-
-    /// x_t -> x_{t-1}
-    fn step(&mut self, noise_pred: &Tensor, timestep: i64, latents: &Tensor) -> Result<Tensor>;
-}
 
 pub trait Tokenizer {
     /// Должен вернуть:
@@ -169,19 +137,6 @@ impl VideoProcessor for LtxVideoProcessor {
     }
 }
 
-// Copied from diffusers.pipelines.flux.pipeline_flux.calculate_shift
-pub fn calculate_shift(
-    image_seq_len: usize,
-    base_seq_len: usize,
-    max_seq_len: usize,
-    base_shift: f32,
-    max_shift: f32,
-) -> f32 {
-    let m = (max_shift - base_shift) / ((max_seq_len - base_seq_len) as f32);
-    let b = base_shift - m * (base_seq_len as f32);
-    (image_seq_len as f32) * m + b
-}
-
 fn linspace(start: f32, end: f32, steps: usize) -> Vec<f32> {
     if steps == 0 {
         return vec![];
@@ -193,31 +148,6 @@ fn linspace(start: f32, end: f32, steps: usize) -> Vec<f32> {
     (0..steps)
         .map(|i| start + (end - start) * (i as f32) / denom)
         .collect()
-}
-
-pub fn retrieve_timesteps(
-    scheduler: &mut dyn Scheduler,
-    num_inference_steps: Option<usize>,
-    device: &Device,
-    timesteps: Option<Vec<i64>>,
-    sigmas: Option<Vec<f32>>,
-    mu: f32,
-) -> Result<(Vec<i64>, usize)> {
-    if timesteps.is_some() && sigmas.is_some() {
-        candle_core::bail!("Only one of `timesteps` or `sigmas` can be passed.");
-    }
-
-    let schedule = if let Some(ts) = timesteps {
-        Scheduler::set_timesteps(scheduler, TimestepsSpec::Timesteps(ts), device, mu)?
-    } else if let Some(s) = sigmas {
-        Scheduler::set_timesteps(scheduler, TimestepsSpec::Sigmas(s), device, mu)?
-    } else {
-        let steps = num_inference_steps.unwrap_or(50);
-        Scheduler::set_timesteps(scheduler, TimestepsSpec::Steps(steps), device, mu)?
-    };
-
-    let n = schedule.len();
-    Ok((schedule, n))
 }
 
 fn std_over_dims_except0_keepdim(x: &Tensor) -> Result<Tensor> {
@@ -743,7 +673,9 @@ impl<'a> LtxPipeline<'a> {
             && negative_prompt_attention_mask.is_none()
         {
             match (&prompt_in, negative_prompt.as_ref()) {
-                (PromptInput::Single(p), None) => PipelineInference::encode_prompt(self, p, None, device)?,
+                (PromptInput::Single(p), None) => {
+                    PipelineInference::encode_prompt(self, p, None, device)?
+                }
                 (PromptInput::Single(p), Some(PromptInput::Single(n))) => {
                     PipelineInference::encode_prompt(self, p, Some(n.as_str()), device)?
                 }

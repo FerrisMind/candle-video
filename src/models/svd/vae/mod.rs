@@ -169,10 +169,7 @@ impl AutoencoderKLTemporalDecoder {
 }
 
 impl VideoAutoencoder for AutoencoderKLTemporalDecoder {
-    fn decode(
-        &self,
-        latents: &VideoLatents,
-    ) -> std::result::Result<Tensor, AutoencoderError> {
+    fn decode(&self, latents: &VideoLatents) -> std::result::Result<Tensor, AutoencoderError> {
         let latents = latents.to_canonical()?;
         let flattened = latents.tensor.reshape((
             latents.batch * latents.frames,

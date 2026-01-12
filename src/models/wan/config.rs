@@ -55,18 +55,18 @@ impl WanTransformer3DConfig {
     /// Wan2.1-T2V-1.3B configuration (480p/720p).
     ///
     /// - 1.3B parameters
-    /// - 20 layers, 20 heads × 128 dim = 2560 inner_dim
+    /// - 30 layers, 12 heads × 128 dim = 1536 inner_dim
     pub fn wan_t2v_1_3b() -> Self {
         Self {
             patch_size: (1, 2, 2),
-            num_attention_heads: 20,
+            num_attention_heads: 12,
             attention_head_dim: 128,
             in_channels: 16,
             out_channels: 16,
             text_dim: 4096,
             freq_dim: 256,
-            ffn_dim: 8960,  // ~3.5 * inner_dim
-            num_layers: 20,
+            ffn_dim: 8960, // ~5.8 * inner_dim
+            num_layers: 30,
             cross_attn_norm: true,
             qk_norm: Some("rms_norm_across_heads".to_string()),
             eps: 1e-6,
@@ -89,7 +89,7 @@ impl WanTransformer3DConfig {
             out_channels: 16,
             text_dim: 4096,
             freq_dim: 256,
-            ffn_dim: 13824,  // ~2.7 * inner_dim
+            ffn_dim: 13824, // ~2.7 * inner_dim
             num_layers: 40,
             cross_attn_norm: true,
             qk_norm: Some("rms_norm_across_heads".to_string()),
@@ -171,12 +171,12 @@ impl AutoencoderKLWanConfig {
             scale_factor_spatial: 8,
             scale_factor_temporal: 4,
             latents_mean: vec![
-                -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508,
-                0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921,
+                -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508, 0.4134,
+                -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921,
             ],
             latents_std: vec![
-                2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743,
-                3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.9160,
+                2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743, 3.2687, 2.1526,
+                2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.9160,
             ],
         }
     }
@@ -202,8 +202,9 @@ mod tests {
     #[test]
     fn test_wan_t2v_1_3b_config() {
         let cfg = WanTransformer3DConfig::wan_t2v_1_3b();
-        assert_eq!(cfg.num_layers, 20);
-        assert_eq!(cfg.inner_dim(), 2560);
+        assert_eq!(cfg.num_layers, 30);
+        assert_eq!(cfg.num_attention_heads, 12);
+        assert_eq!(cfg.inner_dim(), 1536);
     }
 
     #[test]

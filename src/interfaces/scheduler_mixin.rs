@@ -12,7 +12,12 @@ pub trait SchedulerMixin {
     fn init_noise_sigma(&self) -> f64;
     fn scale_model_input(&self, latents: &Tensor, t: f64) -> Result<Tensor>;
     fn add_noise(&self, original: &Tensor, noise: &Tensor, t: f64) -> Result<Tensor>;
-    fn step(&mut self, model_output: &Tensor, t: f64, latents: &Tensor) -> Result<SchedulerStepOutput>;
+    fn step(
+        &mut self,
+        model_output: &Tensor,
+        t: f64,
+        latents: &Tensor,
+    ) -> Result<SchedulerStepOutput>;
 }
 
 #[cfg(test)]

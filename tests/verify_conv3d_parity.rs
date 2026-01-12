@@ -6,7 +6,7 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn test_causal_conv3d_parity() -> anyhow::Result<()> {
+    fn test_conv3d_parity() -> anyhow::Result<()> {
         if std::env::var("CANDLE_VIDEO_RUN_CUDA_TESTS").is_err() {
             println!("Skipping test: CANDLE_VIDEO_RUN_CUDA_TESTS is not set");
             return Ok(());

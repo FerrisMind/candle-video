@@ -181,7 +181,7 @@ impl T5EncoderConfig {
     /// - 4096 embedding dimension
     /// - 64 attention heads
     /// - 24 encoder layers
-    /// - vocab_size: 250112 (main difference from T5)
+    /// - vocab_size: 256384 (main difference from T5)
     /// - max_seq_len: 512 (Wan uses longer sequences)
     pub fn umt5_xxl() -> Self {
         Self {
@@ -190,11 +190,11 @@ impl T5EncoderConfig {
             d_kv: 64,
             num_heads: 64,
             num_layers: 24,
-            vocab_size: 250112,  // UMT5 vocab size
+            vocab_size: 256384, // UMT5 vocab size
             layer_norm_epsilon: 1e-6,
             relative_attention_num_buckets: 32,
             relative_attention_max_distance: 128,
-            max_seq_len: 512,    // Wan uses 512
+            max_seq_len: 512, // Wan uses 512
             cpu_offload: false,
             dropout_rate: 0.0,
             feed_forward_proj: "gated-gelu".to_string(),
@@ -209,7 +209,7 @@ impl T5EncoderConfig {
             d_kv: 64,
             num_heads: 16,
             num_layers: 24,
-            vocab_size: 250112,
+            vocab_size: 256384,
             layer_norm_epsilon: 1e-6,
             relative_attention_num_buckets: 32,
             relative_attention_max_distance: 128,
@@ -227,9 +227,8 @@ impl T5EncoderConfig {
     /// Load configuration from a JSON file.
     pub fn from_json(path: impl AsRef<Path>) -> std::io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        serde_json::from_str(&content).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })
+        serde_json::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
 
     /// Enable/disable CPU offloading.
@@ -293,8 +292,8 @@ impl T5EncoderConfig {
 // Embedding Cache
 // =============================================================================
 
-use std::collections::HashMap;
 use candle_core::Tensor;
+use std::collections::HashMap;
 
 /// Cache for storing computed text embeddings.
 #[derive(Debug)]
@@ -383,7 +382,7 @@ mod tests {
     #[test]
     fn test_umt5_xxl_config() {
         let config = T5EncoderConfig::umt5_xxl();
-        assert_eq!(config.vocab_size, 250112);
+        assert_eq!(config.vocab_size, 256384);
         assert_eq!(config.d_model, 4096);
         assert_eq!(config.max_seq_len, 512);
         assert!(config.is_umt5());
@@ -401,7 +400,7 @@ mod tests {
     fn test_embedding_cache() {
         let mut cache = EmbeddingCache::new();
         cache.enable(true);
-        
+
         assert!(!cache.contains("test"));
         assert_eq!(cache.len(), 0);
     }

@@ -40,8 +40,6 @@ impl Module for FeedForward {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

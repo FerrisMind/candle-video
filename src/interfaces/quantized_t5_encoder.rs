@@ -26,7 +26,7 @@ fn gelu_new(x: &Tensor) -> Result<Tensor> {
 // =============================================================================
 
 /// Configuration for quantized T5 encoder (GGUF-specific).
-/// 
+///
 /// For general configuration, use `T5EncoderConfig` from `t5_encoder.rs`.
 #[derive(Debug, Clone)]
 pub struct QuantizedT5Config {
@@ -411,7 +411,8 @@ impl T5EncoderBlock {
     ) -> Result<(Tensor, Option<Tensor>)> {
         let normed = self.attn_norm.forward(hidden_states)?;
         let (attn_output, position_bias_out) =
-            self.attention.forward(&normed, position_bias, attention_mask)?;
+            self.attention
+                .forward(&normed, position_bias, attention_mask)?;
         let hidden_states = (hidden_states + attn_output)?;
 
         let normed = self.ffn_norm.forward(&hidden_states)?;
@@ -427,7 +428,7 @@ impl T5EncoderBlock {
 // =============================================================================
 
 /// Quantized T5 Encoder Model (GGUF format).
-/// 
+///
 /// Supports T5-XXL (LTX-Video) and UMT5-XXL (Wan).
 pub struct QuantizedT5EncoderModel {
     embedding: Arc<QTensor>,
@@ -479,7 +480,7 @@ impl QuantizedT5EncoderModel {
     }
 
     /// Forward pass through encoder.
-    /// 
+    ///
     /// # Arguments
     /// * `input_ids` - Token IDs [batch, seq_len]
     /// * `attention_mask` - Optional mask [batch, seq_len] (1.0 keep, 0.0 mask)
@@ -546,7 +547,7 @@ mod tests {
     #[test]
     fn test_umt5_config() {
         let config = QuantizedT5Config::umt5_xxl();
-        assert_eq!(config.vocab_size, 250112);
+        assert_eq!(config.vocab_size, 256384);
         assert_eq!(config.d_model, 4096);
     }
 }

@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use candle_core::{Device, Tensor};
 use candle_video::models::ltx_video::scheduler::{
-    FlowMatchEulerDiscreteScheduler, FlowMatchEulerDiscreteSchedulerConfig, TimeShiftType,
+    FlowMatchEulerDiscreteScheduler, FlowMatchEulerDiscreteSchedulerConfig, Scheduler,
+    TimeShiftType, TimestepsSpec,
 };
 
 fn main() -> Result<()> {
@@ -39,7 +40,7 @@ fn main() -> Result<()> {
     let mut scheduler = FlowMatchEulerDiscreteScheduler::new(config)?;
 
     println!("Setting timesteps (50 steps)...");
-    scheduler.set_timesteps(Some(50), &device, None, None, None)?;
+    scheduler.set_timesteps(TimestepsSpec::Steps(50), &device, 0.0)?;
 
     let rust_timesteps = scheduler.timesteps();
     let rust_sigmas = scheduler.sigmas();
@@ -51,14 +52,9 @@ fn main() -> Result<()> {
     // Test Step
     println!("Testing scheduler.step()...");
     let ts_vec = py_timesteps.to_vec1::<f32>()?;
-    let rust_step_out = scheduler.step(model_output, ts_vec[0], sample_in, None)?;
+    let rust_step_out = scheduler.step(model_output, ts_vec[0] as i64, sample_in)?;
 
-    compare_tensors(
-        "Step Output",
-        &rust_step_out.prev_sample,
-        py_sample_out,
-        1e-5,
-    )?;
+    compare_tensors("Step Output", &rust_step_out, py_sample_out, 1e-5)?;
 
     println!("\nALL TESTS PASSED!");
     Ok(())

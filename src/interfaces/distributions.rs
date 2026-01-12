@@ -28,7 +28,7 @@ impl DiagonalGaussianDistribution {
             );
         }
         let ch2 = dims[1];
-        if ch2 % 2 != 0 {
+        if !ch2.is_multiple_of(2) {
             candle_core::bail!("moments channels must be even, got {}", ch2);
         }
         let ch = ch2 / 2;
@@ -47,7 +47,7 @@ impl DiagonalGaussianDistribution {
             );
         }
         let ch2 = dims[1];
-        if ch2 % 2 != 0 {
+        if !ch2.is_multiple_of(2) {
             candle_core::bail!("moments channels must be even, got {}", ch2);
         }
         let ch = ch2 / 2;
@@ -81,13 +81,13 @@ impl DiagonalGaussianDistribution {
         let mu_sq = self.mean.sqr()?;
         let exp_logvar = self.logvar.exp()?;
         let one = Tensor::ones_like(&self.logvar)?;
-        
+
         let kl = mu_sq
             .add(&exp_logvar)?
             .sub(&one)?
             .sub(&self.logvar)?
             .affine(0.5, 0.0)?;
-        
+
         // Sum over all dimensions except batch
         let dims: Vec<usize> = (1..kl.rank()).collect();
         kl.sum(dims.as_slice())

@@ -660,15 +660,11 @@ mod tests {
         let x = Tensor::from_vec(x_data.clone(), (batch_size, seq_len, dim), &device)?;
 
         // scale: modulation scale
-        let scale_data: Vec<f32> = (0..batch_size * dim)
-            .map(|i| (i as f32) * 0.01)
-            .collect();
+        let scale_data: Vec<f32> = (0..batch_size * dim).map(|i| (i as f32) * 0.01).collect();
         let scale = Tensor::from_vec(scale_data.clone(), (batch_size, 1, dim), &device)?;
 
         // shift: modulation shift
-        let shift_data: Vec<f32> = (0..batch_size * dim)
-            .map(|i| (i as f32) * 0.001)
-            .collect();
+        let shift_data: Vec<f32> = (0..batch_size * dim).map(|i| (i as f32) * 0.001).collect();
         let shift = Tensor::from_vec(shift_data.clone(), (batch_size, 1, dim), &device)?;
 
         // Compute: x * (1 + scale) + shift

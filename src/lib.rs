@@ -3,14 +3,14 @@
 //! This crate provides Rust implementations of video generation models,
 //! specifically LTX-Video and Stable Video Diffusion.
 
+pub mod interfaces;
 pub mod models;
 pub mod utils;
-pub(crate) mod interfaces;
 
 // LTX Video exports (primary API)
 pub use models::ltx_video::{
-    loader, ltx_transformer, scheduler, vae, t2v_pipeline,
-    configs, quantized_t5_encoder, text_encoder, weight_format,
+    configs, loader, ltx_transformer, quantized_t5_encoder, scheduler, t2v_pipeline, text_encoder,
+    vae, weight_format,
 };
 
 // SVD exports (under svd namespace to avoid conflicts)

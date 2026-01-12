@@ -31,12 +31,24 @@ impl VideoLatents {
                 if bf != expected_bf || c != self.channels || h != self.height || w != self.width {
                     return Err(Error::Msg(format!(
                         "VideoLatents shape mismatch: expected [{}*{}, {}, {}, {}], got [{}, {}, {}, {}]",
-                        self.batch, self.frames, self.channels, self.height, self.width, bf, c, h, w
+                        self.batch,
+                        self.frames,
+                        self.channels,
+                        self.height,
+                        self.width,
+                        bf,
+                        c,
+                        h,
+                        w
                     )));
                 }
-                let tensor = self
-                    .tensor
-                    .reshape((self.batch, self.frames, self.channels, self.height, self.width))?;
+                let tensor = self.tensor.reshape((
+                    self.batch,
+                    self.frames,
+                    self.channels,
+                    self.height,
+                    self.width,
+                ))?;
                 Ok(Self {
                     tensor,
                     layout: VideoLayout::BFCHW,

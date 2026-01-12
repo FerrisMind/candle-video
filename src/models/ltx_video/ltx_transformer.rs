@@ -8,11 +8,11 @@
 use crate::interfaces::attention::{
     AttentionMixin, AttentionModule, AttentionModuleMixin, AttnProcessor, DefaultAttnProcessor,
 };
-use crate::interfaces::cache_mixin::{apply_cache_mixin, CacheMixin};
-use crate::interfaces::config_mixin::{apply_config_mixin, ConfigMixin};
+use crate::interfaces::cache_mixin::{CacheMixin, apply_cache_mixin};
+use crate::interfaces::config_mixin::{ConfigMixin, apply_config_mixin};
 use crate::interfaces::embeddings::{AdaLayerNormSingle, PixArtAlphaTextProjection};
 use crate::interfaces::feed_forward::FeedForward;
-use crate::interfaces::model_mixin::{apply_model_mixin, ModelMixin};
+use crate::interfaces::model_mixin::{ModelMixin, apply_model_mixin};
 use crate::interfaces::normalization::{LayerNormNoParams, RmsNorm};
 use crate::interfaces::rope::apply_rotary_emb;
 use crate::models::ltx_video::t2v_pipeline::{TransformerConfig, VideoTransformer3D};
@@ -67,7 +67,6 @@ impl Default for LtxVideoTransformer3DModelConfig {
         }
     }
 }
-
 
 // Note: The following components are now imported from crate::interfaces:
 // - RmsNorm, LayerNormNoParams (from normalization)

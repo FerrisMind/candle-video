@@ -23,8 +23,6 @@ pub fn gelu_approximate(x: &Tensor) -> Result<Tensor> {
     gelu.to_dtype(x.dtype())
 }
 
-
-
 /// GELU projection layer (Linear + GELU approximate).
 ///
 /// Used as the first layer in LTX-style FeedForward.
@@ -84,8 +82,6 @@ impl Module for GeGluProjection {
         self.forward(xs)
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

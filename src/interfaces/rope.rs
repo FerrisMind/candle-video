@@ -2,7 +2,7 @@
 //!
 //! Provides the apply_rotary_emb function and trait for RoPE implementations.
 
-use candle_core::{DType, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, IndexOp, Result, Tensor};
 
 /// Apply rotary position embeddings to a tensor.
 ///
@@ -21,7 +21,7 @@ pub fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor
     let sin = sin.to_dtype(DType::F32)?;
 
     let (b, s, c) = x_f32.dims3()?;
-    if c % 2 != 0 {
+    if !c.is_multiple_of(2) {
         candle_core::bail!("apply_rotary_emb expects last dim even, got {c}");
     }
     let half = c / 2;
@@ -58,15 +58,15 @@ pub fn apply_rotary_emb_4d(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Ten
     let sin = sin.to_dtype(DType::F32)?;
 
     let (b, s, h, d) = x_f32.dims4()?;
-    if d % 2 != 0 {
+    if !d.is_multiple_of(2) {
         candle_core::bail!("apply_rotary_emb_4d expects last dim even, got {d}");
     }
 
     // Split even/odd: x_even = x[..., 0::2], x_odd = x[..., 1::2]
     let half = d / 2;
     let x2 = x_f32.reshape((b, s, h, half, 2))?;
-    let x_even = x2.i((.., .., .., .., 0))?;  // [b, s, h, half]
-    let x_odd = x2.i((.., .., .., .., 1))?;   // [b, s, h, half]
+    let x_even = x2.i((.., .., .., .., 0))?; // [b, s, h, half]
+    let x_odd = x2.i((.., .., .., .., 1))?; // [b, s, h, half]
 
     // cos/sin also need splitting for even/odd positions
     let cos_dims = cos.dims();
@@ -78,13 +78,17 @@ pub fn apply_rotary_emb_4d(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Ten
 
     // Rotation: out_even = x_even * cos - x_odd * sin
     //           out_odd = x_even * sin + x_odd * cos
-    let out_even = x_even.broadcast_mul(&cos_even)?.broadcast_sub(&x_odd.broadcast_mul(&sin_even)?)?;
-    let out_odd = x_even.broadcast_mul(&sin_even)?.broadcast_add(&x_odd.broadcast_mul(&cos_even)?)?;
+    let out_even = x_even
+        .broadcast_mul(&cos_even)?
+        .broadcast_sub(&x_odd.broadcast_mul(&sin_even)?)?;
+    let out_odd = x_even
+        .broadcast_mul(&sin_even)?
+        .broadcast_add(&x_odd.broadcast_mul(&cos_even)?)?;
 
     // Interleave even/odd back to [b, s, h, d]
-    let out_even = out_even.unsqueeze(D::Minus1)?;  // [b, s, h, half, 1]
-    let out_odd = out_odd.unsqueeze(D::Minus1)?;    // [b, s, h, half, 1]
-    let stacked = Tensor::cat(&[&out_even, &out_odd], 4)?;  // [b, s, h, half, 2]
+    let out_even = out_even.unsqueeze(D::Minus1)?; // [b, s, h, half, 1]
+    let out_odd = out_odd.unsqueeze(D::Minus1)?; // [b, s, h, half, 1]
+    let stacked = Tensor::cat(&[&out_even, &out_odd], 4)?; // [b, s, h, half, 2]
     let out = stacked.reshape((b, s, h, d))?;
 
     out.to_dtype(dtype)
@@ -110,7 +114,7 @@ pub fn get_1d_rotary_pos_embed(
     theta: f64,
     device: &candle_core::Device,
 ) -> Result<(Tensor, Tensor)> {
-    if dim % 2 != 0 {
+    if !dim.is_multiple_of(2) {
         candle_core::bail!("rotary dim must be even, got {dim}");
     }
 
@@ -126,13 +130,13 @@ pub fn get_1d_rotary_pos_embed(
 
     // positions: [max_seq_len]
     let pos: Vec<f32> = (0..max_seq_len).map(|i| i as f32).collect();
-    let pos = Tensor::from_vec(pos, (max_seq_len, 1), device)?;  // [L, 1]
+    let pos = Tensor::from_vec(pos, (max_seq_len, 1), device)?; // [L, 1]
 
     // angles: [L, half] = pos @ inv_freq.T
-    let angles = pos.matmul(&inv_freq.unsqueeze(0)?)?;  // [L, half]
+    let angles = pos.matmul(&inv_freq.unsqueeze(0)?)?; // [L, half]
 
     // repeat_interleave_real=True => expand to [L, dim] by cat
-    let angles2 = Tensor::cat(&[&angles, &angles], 1)?;  // [L, dim]
+    let angles2 = Tensor::cat(&[&angles, &angles], 1)?; // [L, dim]
 
     let cos = angles2.cos()?;
     let sin = angles2.sin()?;

@@ -3,7 +3,7 @@
 //! This module provides common normalization implementations used across
 //! video generation models (LTX, Wan, CogVideoX, etc.).
 
-use candle_core::{DType, Result, Tensor, D};
+use candle_core::{D, DType, Result, Tensor};
 use candle_nn::VarBuilder;
 
 /// RMSNorm with optional affine weight (elementwise_affine=True/False).
