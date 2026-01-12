@@ -5,6 +5,7 @@
 
 pub mod interfaces;
 pub mod models;
+pub mod ops;
 pub mod utils;
 
 // LTX Video exports (primary API)

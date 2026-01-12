@@ -10,6 +10,7 @@ use candle_nn::{Conv2d, Conv2dConfig, VarBuilder};
 
 use crate::interfaces::distributions::DiagonalGaussianDistribution;
 use crate::models::wan::config::AutoencoderKLWanConfig;
+use crate::ops::conv3d::{Conv3d, Conv3dConfig, PaddingMode};
 
 // =============================================================================
 // Constants
@@ -141,183 +142,39 @@ impl WanRmsNorm {
 }
 
 // =============================================================================
-// WanCausalConv3d - Causal 3D Convolution via Conv2d slices
+// WanCausalConv3d - Causal 3D Convolution (now using native Conv3d)
 // =============================================================================
 
-/// Causal 3D convolution implemented via Conv2d slices.
-#[derive(Debug, Clone)]
-pub struct WanCausalConv3d {
-    conv2d_slices: Vec<Conv2d>,
-    bias: Option<Tensor>,
-    kernel_t: usize,
-    #[allow(dead_code)]
-    kernel_h: usize,
-    #[allow(dead_code)]
-    kernel_w: usize,
-    stride_t: usize,
-    #[allow(dead_code)]
-    stride_h: usize,
-    #[allow(dead_code)]
-    stride_w: usize,
-    pad_h: usize,
-    pad_w: usize,
-}
+/// Causal 3D convolution - now a type alias to native Conv3d.
+/// Kept for backward compatibility.
+pub type WanCausalConv3d = Conv3d;
 
-impl WanCausalConv3d {
-    pub fn new(
-        in_channels: usize,
-        out_channels: usize,
-        kernel_size: (usize, usize, usize), // (t, h, w)
-        stride: (usize, usize, usize),
-        padding: (usize, usize, usize),
-        vb: VarBuilder,
-    ) -> Result<Self> {
-        let (kt, kh, kw) = kernel_size;
-        let (st, sh, sw) = stride;
-        let (_pt, ph, pw) = padding;
+/// Helper function to create a WanCausalConv3d with the expected parameters.
+/// This matches the old WanCausalConv3d::new() signature.
+pub fn wan_causal_conv3d_new(
+    in_channels: usize,
+    out_channels: usize,
+    kernel_size: (usize, usize, usize), // (t, h, w)
+    stride: (usize, usize, usize),
+    padding: (usize, usize, usize),
+    vb: VarBuilder,
+) -> Result<Conv3d> {
+    let (kt, kh, kw) = kernel_size;
+    let (st, sh, sw) = stride;
+    let (_pt, ph, pw) = padding;
 
-        // Load 3D weight: (out, in, kt, kh, kw)
-        let w = vb.get((out_channels, in_channels, kt, kh, kw), "weight")?;
-        let bias = vb.get(out_channels, "bias").ok();
+    // Create causal config with replicate padding
+    let config = Conv3dConfig {
+        kernel: (kt, kh, kw),
+        stride: (st, sh, sw),
+        padding: (0, ph, pw), // Temporal padding handled by causal mode
+        dilation: (1, 1, 1),
+        groups: 1,
+        is_causal: true,
+        padding_mode: PaddingMode::Replicate,
+    };
 
-        // Create Conv2d for each temporal slice
-        // Note: We handle spatial padding manually in forward() via pad_hw_replicate,
-        // so Conv2d should have padding=0 to avoid double-padding
-        let mut conv2d_slices = Vec::with_capacity(kt);
-        for ti in 0..kt {
-            let w2 = w.i((.., .., ti, .., ..))?.contiguous()?;
-            let c2cfg = Conv2dConfig {
-                padding: 0,  // Padding is handled manually in forward()
-                stride: sh,
-                dilation: 1,
-                groups: 1,
-                ..Default::default()
-            };
-            conv2d_slices.push(Conv2d::new(w2, None, c2cfg));
-        }
-
-        Ok(Self {
-            conv2d_slices,
-            bias,
-            kernel_t: kt,
-            kernel_h: kh,
-            kernel_w: kw,
-            stride_t: st,
-            stride_h: sh,
-            stride_w: sw,
-            pad_h: ph,
-            pad_w: pw,
-        })
-    }
-
-    /// Forward with optional cache for causal inference.
-    /// 
-    /// OPTIMIZATION: Instead of creating Vec<Tensor> and concatenating in a loop,
-    /// we collect output frames and do a single concatenation at the end.
-    pub fn forward(&self, x: &Tensor, cache_x: Option<&Tensor>) -> Result<Tensor> {
-        let kt = self.kernel_t;
-        let mut pad_t_total = 2 * (kt / 2); // Causal padding
-
-        // OPTIMIZATION: Avoid cloning x when possible
-        // Only concatenate with cache if cache is provided AND padding is needed
-        let x_with_cache: std::borrow::Cow<'_, Tensor> = if let Some(cx) = cache_x {
-            let cx = cx.to_device(x.device())?;
-            let t_cached = cx.dims5()?.2;
-            pad_t_total = pad_t_total.saturating_sub(t_cached);
-            let cat = Tensor::cat(&[&cx, x], 2)?;
-            std::borrow::Cow::Owned(cat.contiguous()?)
-        } else {
-            std::borrow::Cow::Borrowed(x)
-        };
-
-        // Pad time (front only for causal) - only if needed
-        let x_padded_t = if pad_t_total > 0 {
-            std::borrow::Cow::Owned(pad_time_front(&x_with_cache, pad_t_total)?)
-        } else {
-            x_with_cache
-        };
-        
-        // Pad spatial - only if needed
-        let x2 = if self.pad_h > 0 || self.pad_w > 0 {
-            pad_hw_replicate(&x_padded_t, self.pad_h, self.pad_w)?
-        } else {
-            x_padded_t.into_owned()
-        };
-
-        let (b, c_in, t_pad, h, w) = x2.dims5()?;
-        let dt = 1; // dilation
-        let needed = (kt - 1) * dt + 1;
-        if t_pad < needed {
-            candle_core::bail!(
-                "time dim too small after padding: t_pad={}, needed={}",
-                t_pad,
-                needed
-            );
-        }
-        let t_out = (t_pad - needed) / self.stride_t + 1;
-
-        // OPTIMIZATION: For kt == 1 (common 1x1x1 conv), avoid loop entirely
-        if kt == 1 {
-            // Simple case: single temporal kernel
-            let x_4d = x2.permute((0, 2, 1, 3, 4))?.reshape((b * t_pad, c_in, h, w))?;
-            let y_4d = x_4d.apply(&self.conv2d_slices[0])?;
-            let (_, c_out, h_out, w_out) = y_4d.dims4()?;
-            let y = y_4d.reshape((b, t_pad, c_out, h_out, w_out))?.permute((0, 2, 1, 3, 4))?;
-            
-            // Apply stride if needed
-            let y = if self.stride_t > 1 {
-                // Stride selection: take every stride_t frame
-                let mut frames = Vec::with_capacity(t_out);
-                for i in 0..t_out {
-                    frames.push(y.narrow(2, i * self.stride_t, 1)?);
-                }
-                let refs: Vec<&Tensor> = frames.iter().collect();
-                Tensor::cat(&refs, 2)?
-            } else {
-                y
-            };
-            
-            if let Some(bias) = &self.bias {
-                let bias = bias.reshape((1, bias.dims1()?, 1, 1, 1))?;
-                return y.broadcast_add(&bias);
-            }
-            return Ok(y);
-        }
-
-        // General case with kt > 1: process output time frames
-        // Pre-allocate vector for output frames
-        let mut ys: Vec<Tensor> = Vec::with_capacity(t_out);
-        
-        for to in 0..t_out {
-            let base_t = to * self.stride_t;
-            // OPTIMIZATION: Accumulate directly instead of Option<Tensor>
-            let xt0 = x2.i((.., .., base_t, .., ..))?;
-            let mut acc = xt0.apply(&self.conv2d_slices[0])?;
-            
-            for ki in 1..kt {
-                let ti = base_t + ki * dt;
-                let xt = x2.i((.., .., ti, .., ..))?;
-                let yt = xt.apply(&self.conv2d_slices[ki])?;
-                acc = acc.add(&yt)?;
-            }
-            ys.push(acc.unsqueeze(2)?);
-        }
-
-        // Single concat at the end
-        let y = if ys.len() == 1 {
-            ys.into_iter().next().unwrap()
-        } else {
-            let refs: Vec<&Tensor> = ys.iter().collect();
-            Tensor::cat(&refs, 2)?
-        };
-
-        if let Some(bias) = &self.bias {
-            let bias = bias.reshape((1, bias.dims1()?, 1, 1, 1))?;
-            y.broadcast_add(&bias)
-        } else {
-            Ok(y)
-        }
-    }
+    Conv3d::new(in_channels, out_channels, config, vb)
 }
 
 // =============================================================================
@@ -657,7 +514,7 @@ impl WanResample {
                         ..Default::default()
                     },
                 );
-                let tc = WanCausalConv3d::new(
+                let tc = wan_causal_conv3d_new(
                     dim,
                     dim * 2,
                     (3, 1, 1),
@@ -694,7 +551,7 @@ impl WanResample {
                         ..Default::default()
                     },
                 );
-                let tc = WanCausalConv3d::new(
+                let tc = wan_causal_conv3d_new(
                     dim,
                     dim,
                     (3, 1, 1),
@@ -769,16 +626,18 @@ impl WanResample {
                         // First chunk: no time conv, just pass through to 2D upsample
                         x_tc = x.clone();
                     } else {
-                        eprintln!("      Resample: Upsample3d build_cache_frames...");
-                        let cache_x = build_cache_frames(x, &cache[idx])?;
-                        let tc = self.time_conv.as_ref().unwrap();
                         eprintln!("      Resample: Upsample3d time_conv forward...");
-                        let x_conv = if matches!(cache[idx], FeatCache::Rep) {
-                            tc.forward(x, None)?
+                        let tc = self.time_conv.as_ref().unwrap();
+                        // Use native Conv3d's forward_with_cache
+                        let cache_tensor = if matches!(cache[idx], FeatCache::Rep) {
+                            None
                         } else {
-                            tc.forward(x, cache[idx].as_tensor())?
+                            cache[idx].as_tensor()
                         };
-                        cache[idx] = FeatCache::Tensor(cache_x);
+                        let (x_conv, new_cache) = tc.forward_with_cache(x, cache_tensor)?;
+                        if let Some(nc) = new_cache {
+                            cache[idx] = FeatCache::Tensor(nc);
+                        }
                         *feat_idx += 1;
 
                         eprintln!("      Resample: Upsample3d reshape/stack...");
@@ -791,7 +650,7 @@ impl WanResample {
                 } else {
                     eprintln!("      Resample: Upsample3d (no cache) time_conv forward...");
                     let tc = self.time_conv.as_ref().unwrap();
-                    let x_conv = tc.forward(x, None)?;
+                    let x_conv = tc.forward(x)?;
                     let x_tc2 = x_conv.reshape((b, 2, c, t, h, w))?;
                     let a = x_tc2.i((.., 0, .., .., .., ..))?;
                     let b2 = x_tc2.i((.., 1, .., .., .., ..))?;
@@ -852,7 +711,8 @@ impl WanResample {
                         let prev_last = slice_time(prev_tensor, prev_t - 1, 1)?;
                         let x_cat = Tensor::cat(&[&prev_last, x], 2)?;
                         let tc = self.time_conv.as_ref().unwrap();
-                        let x_conv = tc.forward(&x_cat, None)?;
+                        // Use native Conv3d forward (no cache needed here since we manually concatenate)
+                        let x_conv = tc.forward(&x_cat)?;
                         
                         // Store only last frame for next iteration
                         let x_t = x.dims5()?.2;
@@ -872,7 +732,8 @@ impl WanResample {
                     }
                 } else {
                     let tc = self.time_conv.as_ref().unwrap();
-                    let x_conv = tc.forward(x, None)?;
+                    // Use native Conv3d forward
+                    let x_conv = tc.forward(x)?;
                     
                     // 2D downsample
                     let (b2, c2, t2, h2, w2) = x_conv.dims5()?;
@@ -1004,7 +865,7 @@ impl WanResidualBlock {
 }
 
 fn causal_conv_cached(
-    conv: &WanCausalConv3d,
+    conv: &Conv3d,
     x: &Tensor,
     feat_cache: Option<&mut Vec<FeatCache>>,
     feat_idx: &mut usize,
@@ -1012,13 +873,22 @@ fn causal_conv_cached(
     if let Some(cache) = feat_cache {
         let idx = *feat_idx;
         cache.ensure_len(idx + 1);
-        let cache_x = build_cache_frames(x, &cache[idx])?;
-        let out = conv.forward(x, cache[idx].as_tensor())?;
-        cache[idx] = FeatCache::Tensor(cache_x);
+        
+        // Get the existing cache tensor if available
+        let cache_tensor = cache[idx].as_tensor();
+        
+        // Use native Conv3d's forward_with_cache
+        let (out, new_cache) = conv.forward_with_cache(x, cache_tensor)?;
+        
+        // Store the new cache
+        if let Some(nc) = new_cache {
+            cache[idx] = FeatCache::Tensor(nc);
+        }
         *feat_idx += 1;
         Ok(out)
     } else {
-        conv.forward(x, None)
+        // No caching - use regular forward
+        conv.forward(x)
     }
 }
 

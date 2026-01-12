@@ -802,7 +802,7 @@ impl WanTransformer3DModel {
             padding: (0, 0, 0),
             ..Default::default()
         };
-        let patch_embedding = Conv3d::new(
+        let patch_embedding = Conv3d::new_with_kernel(
             cfg.in_channels,
             inner_dim,
             cfg.patch_size,
