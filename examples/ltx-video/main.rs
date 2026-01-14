@@ -241,135 +241,79 @@ fn main() -> anyhow::Result<()> {
     let dtype = DType::BF16;
 
     // 1. Locate weights
-<<<<<<< Updated upstream
-    let (transformer_file, vae_file, t5_file, tokenizer_file) =
-        if let Some(local_path) = &args.local_weights {
-            let base = PathBuf::from(local_path);
-=======
     let mut unified_weights = args.unified_weights.clone();
     let (transformer_file, vae_file, t5_file, tokenizer_file) = if let Some(local_path) =
         &args.local_weights
     {
         let base = PathBuf::from(local_path);
->>>>>>> Stashed changes
 
-            let transformer = if args.unified_weights.is_some() {
-                // When using unified weights, transformer is embedded in the single file
-                PathBuf::from("dummy") // Will be ignored
-            } else if base
-                .join("transformer/diffusion_pytorch_model.safetensors")
-                .exists()
-            {
-                base.join("transformer/diffusion_pytorch_model.safetensors")
-            } else if base.join("ltx_video_transformer_3d.safetensors").exists() {
-                base.join("ltx_video_transformer_3d.safetensors")
-            } else {
-                anyhow::bail!("Transformer weights not found in {:?}", base);
-            };
-
-            let vae = if args.unified_weights.is_some() {
-                // When using unified weights, VAE is embedded in the single file
-                PathBuf::from("dummy") // Will be ignored
-            } else if base
-                .join("vae/diffusion_pytorch_model.safetensors")
-                .exists()
-            {
-                base.join("vae/diffusion_pytorch_model.safetensors")
-            } else if base.join("vae.safetensors").exists() {
-                base.join("vae.safetensors")
-            } else {
-                anyhow::bail!("VAE weights not found in {:?}", base);
-            };
-
-            // T5 file: prefer BF16 if --use-bf16-t5, otherwise GGUF
-            let t5 = if args.use_bf16_t5 {
-                // BF16 model.safetensors
-                let bf16_path = base.join("text_encoder").join("model.safetensors");
-                if bf16_path.exists() {
-                    bf16_path
-                } else {
-                    anyhow::bail!(
-                        "BF16 T5 not found at {:?}. Use GGUF or download BF16 weights.",
-                        bf16_path
-                    );
-                }
-            } else {
-                // GGUF quantized
-                if base.join("t5-v1_1-xxl-encoder-Q8_0.gguf").exists() {
-                    base.join("t5-v1_1-xxl-encoder-Q8_0.gguf")
-                } else if base
-                    .join("text_encoder_gguf")
-                    .join("t5-v1_1-xxl-encoder-Q8_0.gguf")
-                    .exists()
-                {
-                    base.join("text_encoder_gguf")
-                        .join("t5-v1_1-xxl-encoder-Q8_0.gguf")
-                } else if base.join("t5-xxl.gguf").exists() {
-                    base.join("t5-xxl.gguf")
-                } else if base
-                    .join("text_encoder_gguf")
-                    .join("t5-v1_1-xxl-encoder-Q5_K_M.gguf")
-                    .exists()
-                {
-                    base.join("text_encoder_gguf")
-                        .join("t5-v1_1-xxl-encoder-Q5_K_M.gguf")
-                } else {
-                    anyhow::bail!(
-                        "T5 GGUF not found in {:?}. Try --use-bf16-t5 if you have BF16 weights.",
-                        base
-                    );
-                }
-            };
-            let tokenizer = {
-                let path1 = base.join("tokenizer").join("tokenizer.json");
-                let path2 = base.join("text_encoder").join("tokenizer.json");
-                let path3 = base.join("text_encoder_8bit").join("tokenizer.json");
-                let path4 = base.join("text_encoder_gguf").join("tokenizer.json");
-                if path1.exists() {
-                    path1
-                } else if path2.exists() {
-                    path2
-                } else if path3.exists() {
-                    path3
-                } else if path4.exists() {
-                    path4
-                } else {
-                    println!("    Tokenizer not found locally, downloading from HF...");
-                    let _ = std::io::stdout().flush();
-                    // Standard T5 tokenizer from google repository is usually safer
-                    Api::new()?
-                        .repo(Repo::new(
-                            "google-t5/t5-v1_1-xxl".to_string(),
-                            RepoType::Model,
-                        ))
-                        .get("tokenizer.json")?
-                }
-            };
-
-            (transformer, vae, t5, tokenizer)
+        let transformer = if args.unified_weights.is_some() {
+            // When using unified weights, transformer is embedded in the single file
+            PathBuf::from("dummy") // Will be ignored
+        } else if base
+            .join("transformer/diffusion_pytorch_model.safetensors")
+            .exists()
+        {
+            base.join("transformer/diffusion_pytorch_model.safetensors")
+        } else if base.join("ltx_video_transformer_3d.safetensors").exists() {
+            base.join("ltx_video_transformer_3d.safetensors")
         } else {
-            println!("\nDownloading models from HuggingFace: oxide-lab/LTX-Video-0.9.8-2B-distilled");
-            let api = Api::new()?;
-            let repo = api.repo(Repo::with_revision(
-                "oxide-lab/LTX-Video-0.9.8-2B-distilled".into(),
-                RepoType::Model,
-                "main".into(),
-            ));
-
-            let transformer = repo.get("transformer/diffusion_pytorch_model.safetensors")?;
-            let _ = repo.get("transformer/config.json")?;
-
-            let vae = repo.get("vae/diffusion_pytorch_model.safetensors")?;
-            let _ = repo.get("vae/config.json")?;
-
-            let t5 = repo.get("text_encoder_gguf/t5-v1_1-xxl-encoder-Q5_K_M.gguf")?;
-
-            let tokenizer = repo.get("text_encoder_gguf/tokenizer.json")?;
-
-            (transformer, vae, t5, tokenizer)
+            anyhow::bail!("Transformer weights not found in {:?}", base);
         };
-<<<<<<< Updated upstream
-=======
+
+        let vae = if args.unified_weights.is_some() {
+            // When using unified weights, VAE is embedded in the single file
+            PathBuf::from("dummy") // Will be ignored
+        } else if base
+            .join("vae/diffusion_pytorch_model.safetensors")
+            .exists()
+        {
+            base.join("vae/diffusion_pytorch_model.safetensors")
+        } else if base.join("vae.safetensors").exists() {
+            base.join("vae.safetensors")
+        } else {
+            anyhow::bail!("VAE weights not found in {:?}", base);
+        };
+
+        // T5 file: prefer BF16 if --use-bf16-t5, otherwise GGUF
+        let t5 = if args.use_bf16_t5 {
+            // BF16 model.safetensors
+            let bf16_path = base.join("text_encoder").join("model.safetensors");
+            if bf16_path.exists() {
+                bf16_path
+            } else {
+                anyhow::bail!(
+                    "BF16 T5 not found at {:?}. Use GGUF or download BF16 weights.",
+                    bf16_path
+                );
+            }
+        } else {
+            // GGUF quantized
+            if base.join("t5-v1_1-xxl-encoder-Q8_0.gguf").exists() {
+                base.join("t5-v1_1-xxl-encoder-Q8_0.gguf")
+            } else if base
+                .join("text_encoder_gguf")
+                .join("t5-v1_1-xxl-encoder-Q8_0.gguf")
+                .exists()
+            {
+                base.join("text_encoder_gguf")
+                    .join("t5-v1_1-xxl-encoder-Q8_0.gguf")
+            } else if base.join("t5-xxl.gguf").exists() {
+                base.join("t5-xxl.gguf")
+            } else if base
+                .join("text_encoder_gguf")
+                .join("t5-v1_1-xxl-encoder-Q5_K_M.gguf")
+                .exists()
+            {
+                base.join("text_encoder_gguf")
+                    .join("t5-v1_1-xxl-encoder-Q5_K_M.gguf")
+            } else {
+                anyhow::bail!(
+                    "T5 GGUF not found in {:?}. Try --use-bf16-t5 if you have BF16 weights.",
+                    base
+                );
+            }
+        };
         let tokenizer = {
             let path1 = base.join("tokenizer").join("tokenizer.json");
             let path2 = base.join("text_encoder").join("tokenizer.json");
@@ -416,7 +360,6 @@ fn main() -> anyhow::Result<()> {
         // Return the unified path for both; the unified_weights flag will trigger correct loading
         (unified_path.clone(), unified_path, t5, tokenizer)
     };
->>>>>>> Stashed changes
 
     if args.local_weights.is_some() {
         println!(
