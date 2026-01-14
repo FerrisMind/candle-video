@@ -1,15 +1,6 @@
-//! Normalization layers for transformer models.
-//!
-//! This module provides common normalization implementations used across
-//! video generation models (LTX, Wan, CogVideoX, etc.).
-
-use candle_core::{DType, Result, Tensor, D};
+use candle_core::{D, DType, Result, Tensor};
 use candle_nn::VarBuilder;
 
-/// RMSNorm with optional affine weight (elementwise_affine=True/False).
-///
-/// Implements Root Mean Square Layer Normalization as used in LTX Video
-/// and other modern transformer architectures.
 #[derive(Clone, Debug)]
 pub struct RmsNorm {
     weight: Option<Tensor>,
@@ -17,13 +8,6 @@ pub struct RmsNorm {
 }
 
 impl RmsNorm {
-    /// Create a new RmsNorm layer.
-    ///
-    /// # Arguments
-    /// * `dim` - Dimension of the normalization (last dim of input)
-    /// * `eps` - Epsilon for numerical stability
-    /// * `elementwise_affine` - Whether to use learnable affine weight
-    /// * `vb` - VarBuilder for loading weights
     pub fn new(dim: usize, eps: f64, elementwise_affine: bool, vb: VarBuilder) -> Result<Self> {
         let weight = if elementwise_affine {
             Some(vb.get(dim, "weight")?)
@@ -45,7 +29,6 @@ impl RmsNorm {
         let ys_f32 = xs_f32.broadcast_div(&denom)?;
         let mut ys = ys_f32.to_dtype(dtype)?;
         if let Some(w) = &self.weight {
-            // Broadcast weight over leading dims.
             let rank = ys.rank();
             let mut shape = vec![1usize; rank];
             shape[rank - 1] = w.dims1()?;
@@ -56,9 +39,6 @@ impl RmsNorm {
     }
 }
 
-/// LayerNorm without affine parameters (elementwise_affine=False).
-///
-/// Simple layer normalization that only normalizes without learned scale/bias.
 #[derive(Clone, Debug)]
 pub struct LayerNormNoParams {
     eps: f64,
@@ -77,6 +57,24 @@ impl LayerNormNoParams {
         let denom = (var + self.eps)?.sqrt()?;
         xc.broadcast_div(&denom)
     }
+}
+
+pub fn rmsnorm_channels_first(norm: &candle_nn::RmsNorm, x: &Tensor) -> Result<Tensor> {
+    x.permute((0, 2, 3, 4, 1))?
+        .apply(norm)?
+        .permute((0, 4, 1, 2, 3))
+}
+
+pub fn layernorm_channels_first(norm: &candle_nn::LayerNorm, x: &Tensor) -> Result<Tensor> {
+    x.permute((0, 2, 3, 4, 1))?
+        .apply(norm)?
+        .permute((0, 4, 1, 2, 3))
+}
+
+pub fn rmsnorm_channels_first_custom(norm: &RmsNorm, x: &Tensor) -> Result<Tensor> {
+    let permuted = x.permute((0, 2, 3, 4, 1))?;
+    let normed = norm.forward(&permuted)?;
+    normed.permute((0, 4, 1, 2, 3))
 }
 
 #[cfg(test)]
@@ -102,7 +100,7 @@ mod tests {
         let norm = LayerNormNoParams::new(1e-5);
         let out = norm.forward(&xs)?;
         assert_eq!(out.dims(), xs.dims());
-        // Check that output is normalized (mean ~0, std ~1)
+
         let mean = out.sum_keepdim(D::Minus1)?.squeeze(D::Minus1)?;
         let mean_vals: Vec<f32> = mean.to_vec1()?;
         for m in mean_vals {

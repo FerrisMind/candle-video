@@ -1,8 +1,5 @@
 use candle_core::{Device, Result, Tensor};
 
-/// PCG32 Random Number Generator
-/// Simple, fast, and statistically good RNG.
-/// Matches standard PCG32 implementation.
 pub struct Pcg32 {
     state: u64,
     inc: u64,
@@ -22,11 +19,11 @@ impl Pcg32 {
 
     pub fn next_u32(&mut self) -> u32 {
         let oldstate = self.state;
-        // Advance internal state
+
         self.state = oldstate
             .wrapping_mul(6364136223846793005)
             .wrapping_add(self.inc);
-        // Calculate output function (XSH-RR)
+
         let xorshifted = ((oldstate >> 18) ^ oldstate) >> 27;
         let rot = (oldstate >> 59) as u32;
         let xorshifted = xorshifted as u32;
@@ -34,13 +31,9 @@ impl Pcg32 {
     }
 
     pub fn next_f32(&mut self) -> f32 {
-        // Generate random float in [0, 1)
-        // 2^{-24} = 5.9604645e-8
         (self.next_u32() >> 8) as f32 * 5.9604645e-8
     }
 
-    /// Generate Gaussian noise using Box-Muller transform
-    /// Returns 2 standard normal random numbers
     pub fn next_gaussian(&mut self) -> (f32, f32) {
         let u1 = loop {
             let x = self.next_f32();
@@ -57,7 +50,6 @@ impl Pcg32 {
         (z0, z1)
     }
 
-    /// Create a Tensor of Gaussian noise with shape
     pub fn randn(
         &mut self,
         shape: impl Into<candle_core::Shape>,

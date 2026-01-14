@@ -35,7 +35,12 @@ impl AttnProcessor for DefaultAttnProcessor {
         attention_mask: Option<&Tensor>,
         image_rotary_emb: Option<(&Tensor, &Tensor)>,
     ) -> Result<Tensor> {
-        attention.forward_internal(hidden_states, encoder_hidden_states, attention_mask, image_rotary_emb)
+        attention.forward_internal(
+            hidden_states,
+            encoder_hidden_states,
+            attention_mask,
+            image_rotary_emb,
+        )
     }
 }
 

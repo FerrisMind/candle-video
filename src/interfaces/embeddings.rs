@@ -1,15 +1,7 @@
-//! Embedding layers for transformer models.
-//!
-//! Provides timestep embeddings, text projections, and adaptive normalization
-//! layers used across video generation models.
-
 use crate::interfaces::activations::gelu_approximate;
-use candle_core::{DType, Module, Result, Tensor, D};
+use candle_core::{D, DType, Module, Result, Tensor};
 use candle_nn::{self as nn, Linear, VarBuilder};
 
-/// Sinusoidal timestep embeddings (DDPM-style).
-///
-/// Creates sinusoidal position embeddings for diffusion timesteps.
 pub fn get_timestep_embedding(
     timesteps: &Tensor,
     embedding_dim: usize,
@@ -48,7 +40,6 @@ pub fn get_timestep_embedding(
     }
 }
 
-/// Timestep embedding with two linear layers and SiLU.
 #[derive(Clone, Debug)]
 pub struct TimestepEmbedding {
     linear_1: Linear,
@@ -69,7 +60,6 @@ impl TimestepEmbedding {
     }
 }
 
-/// PixArt-Alpha text projection (two linear layers with GELU).
 #[derive(Clone, Debug)]
 pub struct PixArtAlphaTextProjection {
     linear_1: Linear,
@@ -90,7 +80,6 @@ impl PixArtAlphaTextProjection {
     }
 }
 
-/// PixArt-Alpha combined timestep + size embeddings.
 #[derive(Clone, Debug)]
 pub struct PixArtAlphaCombinedTimestepSizeEmbeddings {
     timestep_embedder: TimestepEmbedding,
@@ -109,9 +98,6 @@ impl PixArtAlphaCombinedTimestepSizeEmbeddings {
     }
 }
 
-/// Adaptive Layer Normalization (Single) for DiT architectures.
-///
-/// Returns 6 scale/shift/gate parameters for attention and FFN.
 #[derive(Clone, Debug)]
 pub struct AdaLayerNormSingle {
     emb: PixArtAlphaCombinedTimestepSizeEmbeddings,
@@ -125,7 +111,6 @@ impl AdaLayerNormSingle {
         Ok(Self { emb, linear })
     }
 
-    /// Returns (ada_params, embedded_timestep) where ada_params has 6*dim values.
     pub fn forward(&self, timestep: &Tensor) -> Result<(Tensor, Tensor)> {
         let embedded_timestep = self.emb.forward(timestep)?;
         let x = embedded_timestep.silu()?;

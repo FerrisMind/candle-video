@@ -3,9 +3,8 @@ use candle_core::{Error, Result, Tensor};
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoLayout {
-    /// [batch, frames, channels, height, width]
     BFCHW,
-    /// [batch*frames, channels, height, width]
+
     BfCHW,
 }
 
@@ -21,7 +20,6 @@ pub struct VideoLatents {
 }
 
 impl VideoLatents {
-    /// Convert to canonical BFCHW layout.
     pub fn to_canonical(&self) -> Result<Self> {
         match self.layout {
             VideoLayout::BFCHW => Ok(self.clone()),
@@ -31,12 +29,24 @@ impl VideoLatents {
                 if bf != expected_bf || c != self.channels || h != self.height || w != self.width {
                     return Err(Error::Msg(format!(
                         "VideoLatents shape mismatch: expected [{}*{}, {}, {}, {}], got [{}, {}, {}, {}]",
-                        self.batch, self.frames, self.channels, self.height, self.width, bf, c, h, w
+                        self.batch,
+                        self.frames,
+                        self.channels,
+                        self.height,
+                        self.width,
+                        bf,
+                        c,
+                        h,
+                        w
                     )));
                 }
-                let tensor = self
-                    .tensor
-                    .reshape((self.batch, self.frames, self.channels, self.height, self.width))?;
+                let tensor = self.tensor.reshape((
+                    self.batch,
+                    self.frames,
+                    self.channels,
+                    self.height,
+                    self.width,
+                ))?;
                 Ok(Self {
                     tensor,
                     layout: VideoLayout::BFCHW,

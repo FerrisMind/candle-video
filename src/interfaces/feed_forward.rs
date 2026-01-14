@@ -1,14 +1,7 @@
-//! Feed-forward networks for transformer models.
-//!
-//! Provides configurable FeedForward layers with different activation functions.
-
 use crate::interfaces::activations::GeluProjection;
 use candle_core::{Result, Tensor};
 use candle_nn::{self as nn, Linear, Module, VarBuilder};
 
-/// Feed-forward network with GELU approximate activation.
-///
-/// LTX-style FeedForward: Linear+GELU_approx -> Linear
 #[derive(Clone, Debug)]
 pub struct FeedForward {
     net_0: GeluProjection,
@@ -23,7 +16,6 @@ impl FeedForward {
         Ok(Self { net_0, net_2 })
     }
 
-    /// Create FeedForward with default configuration (mult=4).
     pub fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
         Self::new_gelu(dim, 4, vb)
     }
@@ -39,8 +31,6 @@ impl Module for FeedForward {
         self.forward(xs)
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
