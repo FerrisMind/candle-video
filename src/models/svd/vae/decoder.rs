@@ -1,13 +1,10 @@
-//! Temporal Decoder for SVD VAE
-//!
-//! Decoder with temporal awareness for producing temporally consistent video frames.
-
 use candle_core::{Module, Result, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, VarBuilder, conv2d};
 
 use super::super::config::SvdVaeConfig;
 
-/// Spatio-temporal residual block for temporal decoder
+use crate::ops::conv3d::{Conv3d as NativeConv3d, Conv3dConfig};
+
 #[derive(Debug)]
 struct SpatioTemporalResBlock {
     spatial_res_block: ResnetBlock2D,
@@ -43,7 +40,6 @@ impl SpatioTemporalResBlock {
     }
 }
 
-/// Standard ResnetBlock2D
 #[derive(Debug)]
 struct ResnetBlock2D {
     norm1: candle_nn::GroupNorm,
@@ -120,7 +116,6 @@ impl ResnetBlock2D {
     }
 }
 
-/// Temporal ResnetBlock for mixing across frames
 #[derive(Debug)]
 struct TemporalResnetBlock {
     norm1: candle_nn::GroupNorm,
@@ -131,13 +126,9 @@ struct TemporalResnetBlock {
     out_channels: usize,
 }
 
-/// Simple Conv3d wrapper (using candle's conv2d repeated for temporal)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Conv3d {
-    weight: Tensor,
-    bias: Option<Tensor>,
-    kernel_size: (usize, usize, usize),
-    padding: (usize, usize, usize),
+    conv: NativeConv3d,
 }
 
 impl Conv3d {
@@ -148,58 +139,17 @@ impl Conv3d {
         kernel_size: (usize, usize, usize),
         padding: (usize, usize, usize),
     ) -> Result<Self> {
-        let (kt, kh, kw) = kernel_size;
-        let weight = vb.get((out_channels, in_channels, kt, kh, kw), "weight")?;
-        let bias = vb.get(out_channels, "bias").ok();
+        let config = Conv3dConfig::new(kernel_size)
+            .with_padding(padding)
+            .with_stride((1, 1, 1));
 
-        Ok(Self {
-            weight,
-            bias,
-            kernel_size,
-            padding,
-        })
+        let conv = NativeConv3d::new(in_channels, out_channels, config, vb)?;
+
+        Ok(Self { conv })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // x: [B, C, T, H, W]
-        let (_kt, kh, kw) = self.kernel_size;
-        let (pt, _ph, _pw) = self.padding;
-
-        // Pad temporal dimension
-        let x = if pt > 0 {
-            x.pad_with_zeros(2, pt, pt)?
-        } else {
-            x.clone()
-        };
-
-        // For kernel_size=(3,1,1), we can use conv1d for temporal
-        if kh == 1 && kw == 1 {
-            // Temporal-only convolution
-            let x = x.permute((0, 3, 4, 1, 2))?; // [B, H, W, C, T]
-            let (b, h, w, c, t) = x.dims5()?;
-            let x = x.reshape((b * h * w, c, t))?;
-
-            // Use conv1d for temporal
-            let weight = self.weight.squeeze(3)?.squeeze(3)?; // [out, in, kt]
-            let out = x.conv1d(&weight, 0, 1, 1, 1)?;
-
-            if let Some(bias) = &self.bias {
-                let out = out.broadcast_add(&bias.reshape((1, bias.dim(0)?, 1))?)?;
-                let out = out.reshape((b, h, w, bias.dim(0)?, out.dim(2)?))?;
-                out.permute((0, 3, 4, 1, 2))
-            } else {
-                let out_c = self.weight.dim(0)?;
-                let out = out.reshape((b, h, w, out_c, out.dim(2)?))?;
-                out.permute((0, 3, 4, 1, 2))
-            }
-        } else {
-            // Only (kt, 1, 1) kernels are supported via conv1d optimization
-            panic!(
-                "Conv3d only supports (kt, 1, 1) kernels, got ({}, {}, {}). \
-                 Full 3D convolution not implemented.",
-                self.kernel_size.0, kh, kw
-            );
-        }
+        self.conv.forward(x)
     }
 }
 
@@ -233,60 +183,50 @@ impl TemporalResnetBlock {
     }
 
     fn forward(&self, x: &Tensor, num_frames: usize) -> Result<Tensor> {
-        // x: [B*T, C, H, W] - reshape to [B, C, T, H, W] for temporal conv
         let (batch_frames, c, h, w) = x.dims4()?;
         let batch_size = batch_frames / num_frames;
 
-        // Reshape to [B, T, C, H, W] then [B, C, T, H, W]
         let x_5d = x
             .reshape((batch_size, num_frames, c, h, w))?
-            .permute((0, 2, 1, 3, 4))?; // [B, C, T, H, W]
+            .permute((0, 2, 1, 3, 4))?;
 
         let residual = &x_5d;
 
-        // Apply norm1 to each frame: need to reshape for GroupNorm
-        // GroupNorm expects [N, C, ...], so flatten B*T dimension
         let h = x_5d
-            .permute((0, 2, 1, 3, 4))? // [B, T, C, H, W]
+            .permute((0, 2, 1, 3, 4))?
             .reshape((batch_frames, c, h, w))?;
         let h = self.norm1.forward(&h)?;
         let h = candle_nn::ops::silu(&h)?;
 
-        // Reshape back to 5D for conv3d
         let h = h
             .reshape((batch_size, num_frames, c, h.dim(2)?, h.dim(3)?))?
-            .permute((0, 2, 1, 3, 4))?; // [B, C, T, H, W]
+            .permute((0, 2, 1, 3, 4))?;
         let h = self.conv1.forward(&h)?;
 
-        // Apply norm2
         let (_, c2, _, h2, w2) = h.dims5()?;
         let h = h
-            .permute((0, 2, 1, 3, 4))? // [B, T, C, H, W]
+            .permute((0, 2, 1, 3, 4))?
             .reshape((batch_frames, c2, h2, w2))?;
         let h = self.norm2.forward(&h)?;
         let h = candle_nn::ops::silu(&h)?;
 
-        // Reshape back and apply conv2
         let h = h
             .reshape((batch_size, num_frames, c2, h2, w2))?
             .permute((0, 2, 1, 3, 4))?;
         let h = self.conv2.forward(&h)?;
 
-        // Residual connection (identity if same channels)
         let out = if self.in_channels == self.out_channels {
             (h + residual)?
         } else {
             h
         };
 
-        // Reshape back to [B*T, C, H, W]
         let (_, c_out, _, h_out, w_out) = out.dims5()?;
-        out.permute((0, 2, 1, 3, 4))? // [B, T, C, H, W]
+        out.permute((0, 2, 1, 3, 4))?
             .reshape((batch_frames, c_out, h_out, w_out))
     }
 }
 
-/// Alpha blender for mixing spatial and temporal features
 #[derive(Debug)]
 struct AlphaBlender {
     mix_factor: Tensor,
@@ -304,19 +244,14 @@ impl AlphaBlender {
         x_temporal: &Tensor,
         _image_only_indicator: &Tensor,
     ) -> Result<Tensor> {
-        // diffusers formula with switch_spatial_to_temporal_mix=True (for VAE decoder):
-        // alpha = 1.0 - alpha, then: alpha * spatial + (1-alpha) * temporal
-        // Simplified: (1-alpha) * spatial + alpha * temporal
         let alpha = candle_nn::ops::sigmoid(&self.mix_factor)?;
         let alpha = alpha.broadcast_as(x_spatial.shape())?;
 
-        // With switch_spatial_to_temporal_mix=True, we swap the roles
         let one_minus_alpha = (1.0 - &alpha)?;
         (x_spatial * one_minus_alpha)? + (x_temporal * &alpha)?
     }
 }
 
-/// Upsample block for decoder
 #[derive(Debug)]
 struct Upsample2D {
     conv: Conv2d,
@@ -344,7 +279,6 @@ impl Upsample2D {
     }
 }
 
-/// Up block for Temporal Decoder
 #[derive(Debug)]
 struct UpBlockTemporalDecoder {
     resnets: Vec<SpatioTemporalResBlock>,
@@ -398,7 +332,6 @@ impl UpBlockTemporalDecoder {
     }
 }
 
-/// Attention block for decoder mid-block (matches diffusers)
 #[derive(Debug)]
 struct AttentionBlock {
     group_norm: candle_nn::GroupNorm,
@@ -449,7 +382,6 @@ impl AttentionBlock {
     }
 }
 
-/// Mid block for Temporal Decoder (with self-attention like diffusers)
 #[derive(Debug)]
 struct MidBlockTemporalDecoder {
     resnets: Vec<SpatioTemporalResBlock>,
@@ -469,7 +401,6 @@ impl MidBlockTemporalDecoder {
             )?);
         }
 
-        // diffusers has 1 attention block applied after first resnet
         attentions.push(AttentionBlock::new(vb.pp("attentions").pp("0"), channels)?);
 
         Ok(Self {
@@ -484,10 +415,8 @@ impl MidBlockTemporalDecoder {
         image_only_indicator: &Tensor,
         num_frames: usize,
     ) -> Result<Tensor> {
-        // Process first resnet
         let mut h = self.resnets[0].forward(x, image_only_indicator, num_frames)?;
 
-        // Apply attention after first resnet, then remaining resnets
         for (resnet, attn) in self.resnets[1..].iter().zip(&self.attentions) {
             h = attn.forward(&h)?;
             h = resnet.forward(&h, image_only_indicator, num_frames)?;
@@ -496,7 +425,6 @@ impl MidBlockTemporalDecoder {
     }
 }
 
-/// Temporal Decoder for SVD VAE
 #[derive(Debug)]
 pub struct TemporalDecoder {
     conv_in: Conv2d,
@@ -601,18 +529,15 @@ impl TemporalDecoder {
         h = candle_nn::ops::silu(&h)?;
         h = self.conv_out.forward(&h)?;
 
-        // Apply temporal conv
         let (batch_frames, c, height, width) = h.dims4()?;
         let batch_size = batch_frames / num_frames;
 
-        // Reshape to [B, C, T, H, W]
         let h = h
             .reshape((batch_size, num_frames, c, height, width))?
             .permute((0, 2, 1, 3, 4))?;
 
         let h = self.time_conv_out.forward(&h)?;
 
-        // Reshape back to [B*T, C, H, W]
         let h = h
             .permute((0, 2, 1, 3, 4))?
             .reshape((batch_frames, c, height, width))?;

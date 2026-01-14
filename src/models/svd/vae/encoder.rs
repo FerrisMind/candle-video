@@ -1,13 +1,8 @@
-//! VAE Encoder for SVD
-//!
-//! Standard 2D encoder with downsampling blocks.
-
 use candle_core::{Module, Result, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, VarBuilder, conv2d};
 
 use super::super::config::SvdVaeConfig;
 
-/// ResnetBlock2D for encoder
 #[derive(Debug)]
 struct ResnetBlock2D {
     norm1: candle_nn::GroupNorm,
@@ -80,7 +75,6 @@ impl ResnetBlock2D {
     }
 }
 
-/// Downsample2D
 #[derive(Debug)]
 struct Downsample2D {
     conv: Conv2d,
@@ -107,7 +101,6 @@ impl Downsample2D {
     }
 }
 
-/// Attention block for encoder mid_block
 #[derive(Debug)]
 struct AttentionBlock {
     group_norm: candle_nn::GroupNorm,
@@ -158,7 +151,6 @@ impl AttentionBlock {
     }
 }
 
-/// DownBlock for encoder
 #[derive(Debug)]
 struct DownEncoderBlock2D {
     resnets: Vec<ResnetBlock2D>,
@@ -210,7 +202,6 @@ impl DownEncoderBlock2D {
     }
 }
 
-/// MidBlock for encoder
 #[derive(Debug)]
 struct MidBlock2D {
     resnets: Vec<ResnetBlock2D>,
@@ -253,7 +244,6 @@ impl MidBlock2D {
     }
 }
 
-/// VAE Encoder
 #[derive(Debug)]
 pub struct Encoder {
     conv_in: Conv2d,
@@ -296,7 +286,7 @@ impl Encoder {
         let mid_block = MidBlock2D::new(
             vb.pp("mid_block"),
             *config.block_out_channels.last().unwrap(),
-            1, // num_layers for attention
+            1,
         )?;
 
         let conv_norm_out = candle_nn::group_norm(

@@ -1,18 +1,13 @@
-//! UNet Spatio-Temporal Condition Model for SVD
-//!
-//! Main UNet architecture for Stable Video Diffusion.
-
 use candle_core::{DType, IndexOp, Module, Result, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, VarBuilder, conv2d};
 
+use super::super::config::SvdUnetConfig;
 use super::blocks::{
     CrossAttnDownBlockSpatioTemporal, CrossAttnUpBlockSpatioTemporal, DownBlockSpatioTemporal,
     UNetMidBlockSpatioTemporal, UpBlockSpatioTemporal,
 };
-use super::super::config::SvdUnetConfig;
-use crate::interfaces::embeddings::{get_timestep_embedding, TimestepEmbedding};
+use crate::interfaces::embeddings::{TimestepEmbedding, get_timestep_embedding};
 
-/// Debug helper: check tensor for NaN/Inf and print if found
 fn debug_check_tensor(name: &str, tensor: &Tensor) {
     if std::env::var("DEBUG_UNET").is_ok()
         && let Ok(f32_tensor) = tensor.to_dtype(DType::F32)
@@ -37,9 +32,6 @@ fn debug_check_tensor(name: &str, tensor: &Tensor) {
     }
 }
 
-
-
-/// Timesteps module for projecting scalar values to embeddings
 #[derive(Debug)]
 pub struct Timesteps {
     num_channels: usize,
@@ -55,7 +47,6 @@ impl Timesteps {
     }
 }
 
-/// Add time embedding for conditioning (fps, motion_bucket_id, noise_aug_strength)
 #[derive(Debug)]
 pub struct AddTimeEmbedding {
     time_proj: Timesteps,
@@ -70,7 +61,7 @@ impl AddTimeEmbedding {
     ) -> Result<Self> {
         let time_proj = Timesteps::new(addition_time_embed_dim);
         let time_embedding = TimestepEmbedding::new(
-            addition_time_embed_dim * 3, // fps + motion + noise_aug
+            addition_time_embed_dim * 3,
             time_embed_dim,
             vb.pp("add_embedding"),
         )?;
@@ -95,7 +86,6 @@ impl AddTimeEmbedding {
     }
 }
 
-/// Full UNet Spatio-Temporal Condition Model
 #[derive(Debug)]
 pub struct UNetSpatioTemporalConditionModel {
     conv_in: Conv2d,
@@ -112,14 +102,12 @@ pub struct UNetSpatioTemporalConditionModel {
     conv_out: Conv2d,
 }
 
-/// Enum for down blocks (3 has attention, last one doesn't)
 #[derive(Debug)]
 enum DownBlock {
     Standard(DownBlockSpatioTemporal),
     CrossAttn(CrossAttnDownBlockSpatioTemporal),
 }
 
-/// Enum for up blocks (first one has no attention)
 #[derive(Debug)]
 enum UpBlock {
     Standard(UpBlockSpatioTemporal),
@@ -128,7 +116,6 @@ enum UpBlock {
 
 impl UNetSpatioTemporalConditionModel {
     pub fn new(vb: VarBuilder, config: &SvdUnetConfig) -> Result<Self> {
-        // Input convolution
         let conv_in = conv2d(
             config.in_channels,
             config.block_out_channels[0],
@@ -140,7 +127,6 @@ impl UNetSpatioTemporalConditionModel {
             vb.pp("conv_in"),
         )?;
 
-        // Time embedding
         let time_proj = Timesteps::new(config.block_out_channels[0]);
         let time_embed_dim = config.block_out_channels[0] * 4;
         let time_embedding = TimestepEmbedding::new(
@@ -149,7 +135,6 @@ impl UNetSpatioTemporalConditionModel {
             vb.pp("time_embedding"),
         )?;
 
-        // Add time projection (for fps, motion_bucket_id, noise_aug_strength)
         let add_time_proj = Timesteps::new(config.addition_time_embed_dim);
         let add_embedding = TimestepEmbedding::new(
             config.addition_time_embed_dim * 3,
@@ -157,7 +142,6 @@ impl UNetSpatioTemporalConditionModel {
             vb.pp("add_embedding"),
         )?;
 
-        // Build down blocks - last one has NO attention
         let mut down_blocks = Vec::new();
         let mut output_channel = config.block_out_channels[0];
 
@@ -167,14 +151,13 @@ impl UNetSpatioTemporalConditionModel {
             let is_final = i == config.block_out_channels.len() - 1;
 
             if is_final {
-                // Last down_block has NO attention
                 down_blocks.push(DownBlock::Standard(DownBlockSpatioTemporal::new(
                     vb.pp("down_blocks").pp(i),
                     input_channel,
                     output_channel,
                     config.layers_per_block,
                     Some(time_embed_dim),
-                    false, // No downsampler for last block
+                    false,
                 )?));
             } else {
                 down_blocks.push(DownBlock::CrossAttn(CrossAttnDownBlockSpatioTemporal::new(
@@ -185,12 +168,11 @@ impl UNetSpatioTemporalConditionModel {
                     config.num_attention_heads.get(i).copied().unwrap_or(8),
                     config.cross_attention_dim,
                     Some(time_embed_dim),
-                    true, // Has downsampler
+                    true,
                 )?));
             }
         }
 
-        // Mid block
         let mid_block = UNetMidBlockSpatioTemporal::new(
             vb.pp("mid_block"),
             *config.block_out_channels.last().unwrap(),
@@ -199,16 +181,11 @@ impl UNetSpatioTemporalConditionModel {
             config.cross_attention_dim,
         )?;
 
-        // Build up blocks - exact input channels from diffusers weights analysis
-        // up_blocks.0: in=[2560,2560,2560], out=1280 (no attention)
-        // up_blocks.1: in=[2560,2560,1920], out=1280 (attention)
-        // up_blocks.2: in=[1920,1280,960], out=640 (attention)
-        // up_blocks.3: in=[960,640,640], out=320 (attention)
         let up_block_configs: Vec<(Vec<usize>, usize, bool, bool)> = vec![
-            (vec![2560, 2560, 2560], 1280, false, true), // no attn, has upsample
-            (vec![2560, 2560, 1920], 1280, true, true),  // has attn, has upsample
-            (vec![1920, 1280, 960], 640, true, true),    // has attn, has upsample
-            (vec![960, 640, 640], 320, true, false),     // has attn, no upsample (final)
+            (vec![2560, 2560, 2560], 1280, false, true),
+            (vec![2560, 2560, 1920], 1280, true, true),
+            (vec![1920, 1280, 960], 640, true, true),
+            (vec![960, 640, 640], 320, true, false),
         ];
 
         let mut up_blocks = Vec::new();
@@ -236,7 +213,6 @@ impl UNetSpatioTemporalConditionModel {
             }
         }
 
-        // Output
         let conv_norm_out = candle_nn::group_norm(
             32,
             config.block_out_channels[0],
@@ -278,18 +254,14 @@ impl UNetSpatioTemporalConditionModel {
         num_frames: usize,
         image_only_indicator: Option<&Tensor>,
     ) -> Result<Tensor> {
-        // Debug: check all inputs
         debug_check_tensor("INPUT sample", sample);
         debug_check_tensor("INPUT encoder_hidden_states", encoder_hidden_states);
         debug_check_tensor("INPUT added_time_ids", added_time_ids);
 
-        // 1. Time embedding
         let t_emb = self.time_proj.forward(timestep)?;
         let t_emb = self.time_embedding.forward(&t_emb)?;
         debug_check_tensor("t_emb", &t_emb);
 
-        // 2. Additional time embeddings (fps, motion_bucket_id, noise_aug_strength)
-        // added_time_ids: [B, 3] where dims are [fps, motion_bucket_id, noise_aug_strength]
         let fps = added_time_ids.i((.., 0))?;
         let motion = added_time_ids.i((.., 1))?;
         let noise_aug = added_time_ids.i((.., 2))?;
@@ -302,15 +274,12 @@ impl UNetSpatioTemporalConditionModel {
         let aug_emb = self.add_embedding.forward(&aug_emb)?;
         debug_check_tensor("aug_emb", &aug_emb);
 
-        // Combined time embedding
         let emb = (t_emb + aug_emb)?;
         debug_check_tensor("combined_emb", &emb);
 
-        // 3. Pre-process
         let sample = self.conv_in.forward(sample)?;
         debug_check_tensor("after_conv_in", &sample);
 
-        // 4. Down blocks
         let mut down_block_res_samples = vec![sample.clone()];
         let mut sample = sample;
 
@@ -332,7 +301,6 @@ impl UNetSpatioTemporalConditionModel {
             debug_check_tensor(&format!("after_down_block[{}]", idx), &sample);
         }
 
-        // 5. Mid block
         sample = self.mid_block.forward(
             &sample,
             Some(&emb),
@@ -342,7 +310,6 @@ impl UNetSpatioTemporalConditionModel {
         )?;
         debug_check_tensor("after_mid_block", &sample);
 
-        // 6. Up blocks
         for (idx, up_block) in self.up_blocks.iter().enumerate() {
             sample = match up_block {
                 UpBlock::Standard(block) => block.forward(
@@ -364,7 +331,6 @@ impl UNetSpatioTemporalConditionModel {
             debug_check_tensor(&format!("after_up_block[{}]", idx), &sample);
         }
 
-        // 7. Post-process
         let sample = self.conv_norm_out.forward(&sample)?;
         let sample = candle_nn::ops::silu(&sample)?;
         debug_check_tensor("after_conv_norm_out_silu", &sample);

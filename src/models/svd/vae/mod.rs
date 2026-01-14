@@ -1,11 +1,6 @@
-//! SVD VAE Module - AutoencoderKLTemporalDecoder
-//!
-//! Uses standard VAE encoder and temporal-aware decoder for video.
-
 pub mod decoder;
 pub mod encoder;
 
-// Re-exports
 pub use decoder::TemporalDecoder;
 pub use encoder::Encoder;
 
@@ -20,27 +15,20 @@ use crate::interfaces::video_types::{VideoLatents, VideoLayout};
 
 pub type GaussianDistribution = DiagonalGaussian;
 
-/// AutoencoderKL with Temporal Decoder for SVD
-///
-/// This VAE uses a standard 2D encoder and a temporal-aware decoder
-/// that produces temporally consistent video frames.
 #[derive(Debug)]
 pub struct AutoencoderKLTemporalDecoder {
-    /// Standard VAE encoder
     encoder: Encoder,
-    /// Quant conv for encoding
+
     quant_conv: candle_nn::Conv2d,
-    /// Temporal decoder for video frames
+
     temporal_decoder: TemporalDecoder,
     config: SvdVaeConfig,
 }
 
 impl AutoencoderKLTemporalDecoder {
     pub fn new(vb: VarBuilder, config: &SvdVaeConfig) -> Result<Self> {
-        // Load encoder separately (standard structure)
         let encoder = Encoder::new(vb.pp("encoder"), config)?;
 
-        // Quant conv
         let quant_conv = candle_nn::conv2d(
             2 * config.latent_channels,
             2 * config.latent_channels,
@@ -49,7 +37,6 @@ impl AutoencoderKLTemporalDecoder {
             vb.pp("quant_conv"),
         )?;
 
-        // Temporal decoder for video
         let temporal_decoder = TemporalDecoder::new(vb.pp("decoder"), config)?;
 
         Ok(Self {
@@ -60,9 +47,6 @@ impl AutoencoderKLTemporalDecoder {
         })
     }
 
-    /// Encode image to latent distribution
-    /// Input: [B, 3, H, W]
-    /// Output: DiagonalGaussianDistribution
     pub fn encode(&self, x: &Tensor) -> Result<GaussianDistribution> {
         let x = if self.config.force_upcast && x.dtype() == DType::F16 {
             x.to_dtype(DType::F32)?
@@ -75,9 +59,6 @@ impl AutoencoderKLTemporalDecoder {
         GaussianDistribution::new(&h)
     }
 
-    /// Encode image to latent (mode of distribution, scaled)
-    /// Input: [B, 3, H, W]
-    /// Output: [B, 4, H/8, W/8] scaled latents
     pub fn encode_to_latent(&self, x: &Tensor) -> Result<Tensor> {
         let original_dtype = x.dtype();
 
@@ -98,11 +79,6 @@ impl AutoencoderKLTemporalDecoder {
         }
     }
 
-    /// Decode latents to video frames using temporal decoder
-    /// Input: [B*F, 4, H/8, W/8] latents
-    /// Output: [B*F, 3, H, W] frames
-    ///
-    /// If chunk_size is Some, decodes frames in chunks to reduce VRAM usage.
     pub fn decode(
         &self,
         z: &Tensor,
@@ -122,17 +98,13 @@ impl AutoencoderKLTemporalDecoder {
 
         let z = z.affine(1.0 / self.config.scaling_factor, 0.0)?;
 
-        // Decode in chunks to prevent OOM (like diffusers: iterate over batch_frames dim)
         let mut decoded_chunks = Vec::new();
         for start in (0..batch_frames).step_by(chunk_size) {
             let end = std::cmp::min(start + chunk_size, batch_frames);
             let chunk_len = end - start;
 
-            // Extract chunk: [chunk_len, C, H, W]
             let z_chunk = z.narrow(0, start, chunk_len)?;
 
-            // For image_only_indicator, we need batch_size and num_frames_in_chunk
-            // Each chunk may not align perfectly with num_frames, so we compute dynamically
             let num_frames_in_chunk = chunk_len.min(num_frames);
             let batch_for_chunk = chunk_len.div_ceil(num_frames_in_chunk);
             let image_only_indicator = Tensor::zeros(
@@ -149,7 +121,6 @@ impl AutoencoderKLTemporalDecoder {
             decoded_chunks.push(decoded);
         }
 
-        // Concatenate all chunks
         let decoded = if decoded_chunks.len() == 1 {
             decoded_chunks.remove(0)
         } else {
@@ -169,10 +140,7 @@ impl AutoencoderKLTemporalDecoder {
 }
 
 impl VideoAutoencoder for AutoencoderKLTemporalDecoder {
-    fn decode(
-        &self,
-        latents: &VideoLatents,
-    ) -> std::result::Result<Tensor, AutoencoderError> {
+    fn decode(&self, latents: &VideoLatents) -> std::result::Result<Tensor, AutoencoderError> {
         let latents = latents.to_canonical()?;
         let flattened = latents.tensor.reshape((
             latents.batch * latents.frames,

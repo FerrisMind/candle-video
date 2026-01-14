@@ -1,14 +1,9 @@
-//! UNet Spatio-Temporal Blocks for SVD
-//!
-//! Down, Mid, and Up blocks with temporal processing.
-
 use candle_core::{Module, Result, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, VarBuilder, conv2d};
 
 use super::resnet::SpatioTemporalResBlock;
 use super::transformer::TransformerSpatioTemporalModel;
 
-/// Downsample 2D with convolution
 #[derive(Debug)]
 pub struct Downsample2D {
     conv: Conv2d,
@@ -35,7 +30,6 @@ impl Downsample2D {
     }
 }
 
-/// Upsample 2D with convolution
 #[derive(Debug)]
 pub struct Upsample2D {
     conv: Conv2d,
@@ -63,7 +57,6 @@ impl Upsample2D {
     }
 }
 
-/// Down block without attention
 #[derive(Debug)]
 pub struct DownBlockSpatioTemporal {
     resnets: Vec<SpatioTemporalResBlock>,
@@ -129,7 +122,6 @@ impl DownBlockSpatioTemporal {
     }
 }
 
-/// Down block with cross-attention
 #[derive(Debug)]
 pub struct CrossAttnDownBlockSpatioTemporal {
     resnets: Vec<SpatioTemporalResBlock>,
@@ -211,7 +203,6 @@ impl CrossAttnDownBlockSpatioTemporal {
     }
 }
 
-/// Mid block
 #[derive(Debug)]
 pub struct UNetMidBlockSpatioTemporal {
     resnets: Vec<SpatioTemporalResBlock>,
@@ -270,7 +261,6 @@ impl UNetMidBlockSpatioTemporal {
     }
 }
 
-/// Up block without attention - takes list of input channel sizes for each resnet
 #[derive(Debug)]
 pub struct UpBlockSpatioTemporal {
     resnets: Vec<SpatioTemporalResBlock>,
@@ -280,7 +270,7 @@ pub struct UpBlockSpatioTemporal {
 impl UpBlockSpatioTemporal {
     pub fn new(
         vb: VarBuilder,
-        in_channels_list: &[usize], // Input channels for each resnet
+        in_channels_list: &[usize],
         out_channels: usize,
         temb_channels: Option<usize>,
         add_upsample: bool,
@@ -321,7 +311,6 @@ impl UpBlockSpatioTemporal {
                 .pop()
                 .expect("Not enough skip connections");
 
-            // DEBUG: Check skip connection before cat
             if std::env::var("DEBUG_UNET").is_ok()
                 && let Ok(f) = res_state
                     .flatten_all()
@@ -335,7 +324,6 @@ impl UpBlockSpatioTemporal {
             h = Tensor::cat(&[&h, &res_state], 1)?;
             h = resnet.forward(&h, temb, image_only_indicator, num_frames)?;
 
-            // DEBUG: Check after resnet
             if std::env::var("DEBUG_UNET").is_ok()
                 && let Ok(f) = h
                     .flatten_all()
@@ -353,7 +341,6 @@ impl UpBlockSpatioTemporal {
     }
 }
 
-/// Up block with cross-attention - takes list of input channel sizes for each resnet
 #[derive(Debug)]
 pub struct CrossAttnUpBlockSpatioTemporal {
     resnets: Vec<SpatioTemporalResBlock>,
@@ -365,7 +352,7 @@ impl CrossAttnUpBlockSpatioTemporal {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         vb: VarBuilder,
-        in_channels_list: &[usize], // Input channels for each resnet
+        in_channels_list: &[usize],
         out_channels: usize,
         num_attention_heads: usize,
         cross_attention_dim: usize,

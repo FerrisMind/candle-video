@@ -1,11 +1,8 @@
-//! Spatio-Temporal ResNet blocks for SVD UNet
-//!
-//! These blocks extend standard ResNet blocks with temporal mixing capabilities.
-
 use candle_core::{Module, Result, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, VarBuilder, conv2d};
 
-/// Standard ResNet 2D block (matches diffusers format)
+use crate::ops::conv3d::{Conv3d, Conv3dConfig};
+
 #[derive(Debug)]
 pub struct ResnetBlock2D {
     norm1: candle_nn::GroupNorm,
@@ -85,11 +82,10 @@ impl ResnetBlock2D {
         h = candle_nn::ops::silu(&h)?;
         h = self.conv1.forward(&h)?;
 
-        // Add time embedding if present
         if let (Some(proj), Some(temb)) = (&self.time_emb_proj, temb) {
             let temb_out = candle_nn::ops::silu(temb)?;
             let temb_out = proj.forward(&temb_out)?;
-            // temb_out: [B, C] -> [B, C, 1, 1]
+
             let temb_out = temb_out.unsqueeze(2)?.unsqueeze(3)?;
             h = h.broadcast_add(&temb_out)?;
         }
@@ -108,68 +104,37 @@ impl ResnetBlock2D {
     }
 }
 
-/// Conv3D for temporal convolutions - weights shape: [out, in, T, H, W]
-/// For SVD temporal blocks: T=3, H=1, W=1
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TemporalConv3d {
-    weight: Tensor,
-    bias: Option<Tensor>,
-    padding: usize,
+    conv: Conv3d,
 }
 
 impl TemporalConv3d {
     pub fn new(vb: VarBuilder, in_channels: usize, out_channels: usize) -> Result<Self> {
-        // Weight shape: [out_ch, in_ch, 3, 1, 1] for temporal conv
-        let weight = vb.get((out_channels, in_channels, 3, 1, 1), "weight")?;
-        let bias = vb.get(out_channels, "bias").ok();
+        let config = Conv3dConfig::new((3, 1, 1))
+            .with_padding((1, 0, 0))
+            .with_stride((1, 1, 1));
 
-        Ok(Self {
-            weight,
-            bias,
-            padding: 1, // padding=1 for kernel_size=3
-        })
+        let conv = Conv3d::new(in_channels, out_channels, config, vb)?;
+
+        Ok(Self { conv })
     }
 
     pub fn forward(&self, x: &Tensor, num_frames: usize) -> Result<Tensor> {
-        // x: [B*T, C, H, W]
         let (batch_frames, c, h, w) = x.dims4()?;
         let batch_size = batch_frames / num_frames;
 
-        // Weight: [out_ch, in_ch, 3, 1, 1]
-        let (out_ch, _in_ch, _kt, kh, kw) = self.weight.dims5()?;
+        let x_5d = x.reshape((batch_size, num_frames, c, h, w))?;
+        let x_5d = x_5d.permute((0, 2, 1, 3, 4))?;
 
-        if kh == 1 && kw == 1 {
-            // Temporal-only convolution: reshape and use conv1d
-            // Reshape: [B*T, C, H, W] -> [B, C, T, H, W] -> [B*H*W, C, T]
-            let x = x.reshape((batch_size, num_frames, c, h, w))?;
-            let x = x.permute((0, 3, 4, 2, 1))?; // [B, H, W, C, T]
-            let x = x.reshape((batch_size * h * w, c, num_frames))?;
+        let out_5d = self.conv.forward(&x_5d)?;
 
-            // Squeeze weight to [out_ch, in_ch, kt]
-            let weight_1d = self.weight.squeeze(4)?.squeeze(3)?;
-
-            // Apply conv1d
-            let out = x.conv1d(&weight_1d, self.padding, 1, 1, 1)?;
-
-            // Add bias
-            let out = if let Some(bias) = &self.bias {
-                out.broadcast_add(&bias.reshape((1, out_ch, 1))?)?
-            } else {
-                out
-            };
-
-            // Reshape back: [B*H*W, out_ch, T] -> [B*T, out_ch, H, W]
-            let out = out.reshape((batch_size, h, w, out_ch, num_frames))?;
-            let out = out.permute((0, 4, 3, 1, 2))?; // [B, T, C, H, W]
-            out.reshape((batch_frames, out_ch, h, w))
-        } else {
-            // Fallback: identity
-            Ok(x.clone())
-        }
+        let (b, out_c, t, h_out, w_out) = out_5d.dims5()?;
+        let out_4d = out_5d.permute((0, 2, 1, 3, 4))?;
+        out_4d.reshape((b * t, out_c, h_out, w_out))
     }
 }
 
-/// Temporal ResNet block using Conv3D (kernel 3x1x1 for temporal mixing)
 #[derive(Debug)]
 pub struct TemporalResnetBlock {
     norm1: candle_nn::GroupNorm,
@@ -213,12 +178,10 @@ impl TemporalResnetBlock {
     pub fn forward(&self, x: &Tensor, temb: Option<&Tensor>, num_frames: usize) -> Result<Tensor> {
         let residual = x;
 
-        // Norm + SiLU + Conv1
         let mut h = self.norm1.forward(x)?;
         h = candle_nn::ops::silu(&h)?;
         h = self.conv1.forward(&h, num_frames)?;
 
-        // Add time embedding
         if let (Some(proj), Some(temb)) = (&self.time_emb_proj, temb) {
             let temb_out = candle_nn::ops::silu(temb)?;
             let temb_out = proj.forward(&temb_out)?;
@@ -226,17 +189,14 @@ impl TemporalResnetBlock {
             h = h.broadcast_add(&temb_out)?;
         }
 
-        // Norm + SiLU + Conv2
         h = self.norm2.forward(&h)?;
         h = candle_nn::ops::silu(&h)?;
         h = self.conv2.forward(&h, num_frames)?;
 
-        // Skip connection (identity for same channels)
         h + residual
     }
 }
 
-/// Alpha blender for merging spatial and temporal features
 #[derive(Debug)]
 pub struct AlphaBlender {
     mix_factor: Tensor,
@@ -274,13 +234,11 @@ impl AlphaBlender {
 
         let alpha = alpha.broadcast_as(x_spatial.shape())?;
         let one_minus_alpha = (1.0 - &alpha)?;
-        // diffusers formula: alpha * spatial + (1-alpha) * temporal
+
         (x_spatial * &alpha)? + (x_temporal * one_minus_alpha)?
     }
 }
 
-/// Spatio-Temporal ResNet block combining spatial and temporal processing
-/// Matches diffusers structure: spatial_res_block, temporal_res_block, time_mixer
 #[derive(Debug)]
 pub struct SpatioTemporalResBlock {
     spatial_res_block: ResnetBlock2D,
@@ -323,15 +281,12 @@ impl SpatioTemporalResBlock {
         image_only_indicator: Option<&Tensor>,
         num_frames: usize,
     ) -> Result<Tensor> {
-        // Spatial processing
         let h_spatial = self.spatial_res_block.forward(x, temb)?;
 
-        // Temporal processing
         let h_temporal = self
             .temporal_res_block
             .forward(&h_spatial, temb, num_frames)?;
 
-        // Blend spatial and temporal
         self.time_mixer
             .forward(&h_spatial, &h_temporal, image_only_indicator)
     }

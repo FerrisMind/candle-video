@@ -1,8 +1,5 @@
-//! Configuration structures for SVD components
-
 use serde::{Deserialize, Serialize};
 
-/// Main SVD pipeline configuration
 #[derive(Debug, Clone, Default)]
 pub struct SvdConfig {
     pub unet: SvdUnetConfig,
@@ -11,7 +8,6 @@ pub struct SvdConfig {
     pub clip: ClipEncoderConfig,
 }
 
-/// UNet spatio-temporal condition model configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SvdUnetConfig {
     pub in_channels: usize,
@@ -45,7 +41,6 @@ impl Default for SvdUnetConfig {
     }
 }
 
-/// VAE with temporal decoder configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SvdVaeConfig {
     pub in_channels: usize,
@@ -73,7 +68,6 @@ impl Default for SvdVaeConfig {
     }
 }
 
-/// Euler discrete scheduler configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EulerSchedulerConfig {
     pub num_train_timesteps: usize,
@@ -109,7 +103,6 @@ impl Default for EulerSchedulerConfig {
     }
 }
 
-/// CLIP vision encoder configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipEncoderConfig {
     pub hidden_size: usize,
@@ -141,7 +134,6 @@ impl Default for ClipEncoderConfig {
     }
 }
 
-/// SVD inference parameters (runtime configuration)
 #[derive(Debug, Clone)]
 pub struct SvdInferenceConfig {
     pub num_frames: usize,
@@ -169,7 +161,7 @@ impl Default for SvdInferenceConfig {
             fps: 7,
             motion_bucket_id: 127,
             noise_aug_strength: 0.02,
-            decode_chunk_size: Some(2), // Chunk decode to prevent OOM
+            decode_chunk_size: Some(2),
             seed: 42,
         }
     }
