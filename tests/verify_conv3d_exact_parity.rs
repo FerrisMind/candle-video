@@ -37,13 +37,17 @@ mod tests {
         let bias_key = format!("{}_bias", name);
         let output_key = format!("{}_output", name);
 
-        let input = tensors.get(&input_key)
+        let input = tensors
+            .get(&input_key)
             .ok_or_else(|| anyhow::anyhow!("Missing {}", input_key))?;
-        let weight = tensors.get(&weight_key)
+        let weight = tensors
+            .get(&weight_key)
             .ok_or_else(|| anyhow::anyhow!("Missing {}", weight_key))?;
-        let bias = tensors.get(&bias_key)
+        let bias = tensors
+            .get(&bias_key)
             .ok_or_else(|| anyhow::anyhow!("Missing {}", bias_key))?;
-        let ref_output = tensors.get(&output_key)
+        let ref_output = tensors
+            .get(&output_key)
             .ok_or_else(|| anyhow::anyhow!("Missing {}", output_key))?;
 
         // Get dimensions
@@ -64,7 +68,7 @@ mod tests {
         // Create VarBuilder with weights
         let weight_dev = weight.to_device(device)?;
         let bias_dev = bias.to_device(device)?;
-        
+
         let mut weights_map = HashMap::new();
         weights_map.insert("weight".to_string(), weight_dev);
         weights_map.insert("bias".to_string(), bias_dev);
@@ -97,7 +101,7 @@ mod tests {
             // Get more details
             let rust_flat = rust_output.flatten_all()?.to_vec1::<f32>()?;
             let ref_flat = ref_output_dev.flatten_all()?.to_vec1::<f32>()?;
-            
+
             let mut max_idx = 0;
             let mut max_diff_val = 0.0f32;
             for (i, (r, p)) in rust_flat.iter().zip(ref_flat.iter()).enumerate() {
@@ -107,7 +111,7 @@ mod tests {
                     max_idx = i;
                 }
             }
-            
+
             return Ok((
                 false,
                 format!(
@@ -131,7 +135,7 @@ mod tests {
 
         let device = Device::Cpu;
         let tensors = candle_core::safetensors::load(ref_path, &device)?;
-        
+
         println!("\nRunning exact Conv3d parity tests");
         println!("Tolerance: {}", TOLERANCE);
         println!();
@@ -143,106 +147,187 @@ mod tests {
         let (success, msg) = run_test(
             "basic_3x3x3",
             &tensors,
-            (3, 3, 3), (1, 1, 1), (1, 1, 1), (1, 1, 1),
-            1, false, PaddingMode::Zeros,
+            (3, 3, 3),
+            (1, 1, 1),
+            (1, 1, 1),
+            (1, 1, 1),
+            1,
+            false,
+            PaddingMode::Zeros,
             &device,
         )?;
         println!("  {}", msg);
-        if success { passed += 1; } else { failed += 1; }
+        if success {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
 
         // Test 2: Causal 3x3x3
         let (success, msg) = run_test(
             "causal_3x3x3",
             &tensors,
-            (3, 3, 3), (1, 1, 1), (0, 1, 1), (1, 1, 1),
-            1, true, PaddingMode::Replicate,
+            (3, 3, 3),
+            (1, 1, 1),
+            (0, 1, 1),
+            (1, 1, 1),
+            1,
+            true,
+            PaddingMode::Replicate,
             &device,
         )?;
         println!("  {}", msg);
-        if success { passed += 1; } else { failed += 1; }
+        if success {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
 
         // Test 3: Pointwise
         let (success, msg) = run_test(
             "pointwise",
             &tensors,
-            (1, 1, 1), (1, 1, 1), (0, 0, 0), (1, 1, 1),
-            1, false, PaddingMode::Zeros,
+            (1, 1, 1),
+            (1, 1, 1),
+            (0, 0, 0),
+            (1, 1, 1),
+            1,
+            false,
+            PaddingMode::Zeros,
             &device,
         )?;
         println!("  {}", msg);
-        if success { passed += 1; } else { failed += 1; }
+        if success {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
 
         // Test 4: Temporal-only
         let (success, msg) = run_test(
             "temporal",
             &tensors,
-            (3, 1, 1), (1, 1, 1), (1, 0, 0), (1, 1, 1),
-            1, false, PaddingMode::Zeros,
+            (3, 1, 1),
+            (1, 1, 1),
+            (1, 0, 0),
+            (1, 1, 1),
+            1,
+            false,
+            PaddingMode::Zeros,
             &device,
         )?;
         println!("  {}", msg);
-        if success { passed += 1; } else { failed += 1; }
+        if success {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
 
         // Test 5: Spatial-only
         let (success, msg) = run_test(
             "spatial",
             &tensors,
-            (1, 3, 3), (1, 1, 1), (0, 1, 1), (1, 1, 1),
-            1, false, PaddingMode::Zeros,
+            (1, 3, 3),
+            (1, 1, 1),
+            (0, 1, 1),
+            (1, 1, 1),
+            1,
+            false,
+            PaddingMode::Zeros,
             &device,
         )?;
         println!("  {}", msg);
-        if success { passed += 1; } else { failed += 1; }
+        if success {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
 
         // Test 6: Grouped
         let (success, msg) = run_test(
             "grouped",
             &tensors,
-            (3, 3, 3), (1, 1, 1), (1, 1, 1), (1, 1, 1),
-            2, false, PaddingMode::Zeros,
+            (3, 3, 3),
+            (1, 1, 1),
+            (1, 1, 1),
+            (1, 1, 1),
+            2,
+            false,
+            PaddingMode::Zeros,
             &device,
         )?;
         println!("  {}", msg);
-        if success { passed += 1; } else { failed += 1; }
+        if success {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
 
         // Test 7: Strided
         let (success, msg) = run_test(
             "strided",
             &tensors,
-            (3, 3, 3), (2, 2, 2), (1, 1, 1), (1, 1, 1),
-            1, false, PaddingMode::Zeros,
+            (3, 3, 3),
+            (2, 2, 2),
+            (1, 1, 1),
+            (1, 1, 1),
+            1,
+            false,
+            PaddingMode::Zeros,
             &device,
         )?;
         println!("  {}", msg);
-        if success { passed += 1; } else { failed += 1; }
+        if success {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
 
         // Test 8: Wan VAE style
         let (success, msg) = run_test(
             "wan_vae",
             &tensors,
-            (3, 3, 3), (1, 1, 1), (0, 1, 1), (1, 1, 1),
-            1, true, PaddingMode::Replicate,
+            (3, 3, 3),
+            (1, 1, 1),
+            (0, 1, 1),
+            (1, 1, 1),
+            1,
+            true,
+            PaddingMode::Replicate,
             &device,
         )?;
         println!("  {}", msg);
-        if success { passed += 1; } else { failed += 1; }
+        if success {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
 
         // Test 9: Single frame causal
         let (success, msg) = run_test(
             "single_frame_causal",
             &tensors,
-            (3, 3, 3), (1, 1, 1), (0, 1, 1), (1, 1, 1),
-            1, true, PaddingMode::Replicate,
+            (3, 3, 3),
+            (1, 1, 1),
+            (0, 1, 1),
+            (1, 1, 1),
+            1,
+            true,
+            PaddingMode::Replicate,
             &device,
         )?;
         println!("  {}", msg);
-        if success { passed += 1; } else { failed += 1; }
+        if success {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
 
         println!();
         println!("Results: {} passed, {} failed", passed, failed);
-        
+
         assert_eq!(failed, 0, "Some parity tests failed");
-        
+
         Ok(())
     }
 }

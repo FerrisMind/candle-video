@@ -49,15 +49,14 @@ mod property_tests {
         let _ = vs.get_with_hints(
             (out_channels, in_channels / groups, kt, kh, kw),
             "weight",
-            candle_nn::Init::Randn { mean: 0.0, stdev: 0.1 },
+            candle_nn::Init::Randn {
+                mean: 0.0,
+                stdev: 0.1,
+            },
         )?;
 
         // Initialize bias
-        let _ = vs.get_with_hints(
-            out_channels,
-            "bias",
-            candle_nn::Init::Const(0.0),
-        )?;
+        let _ = vs.get_with_hints(out_channels, "bias", candle_nn::Init::Const(0.0))?;
 
         Conv3d::new(in_channels, out_channels, config, vs)
     }
@@ -81,15 +80,14 @@ mod property_tests {
         let _ = vs.get_with_hints(
             (out_channels, in_channels / groups, kt, kh, kw),
             "weight",
-            candle_nn::Init::Randn { mean: 0.0, stdev: 0.1 },
+            candle_nn::Init::Randn {
+                mean: 0.0,
+                stdev: 0.1,
+            },
         )?;
 
         // Initialize bias
-        let _ = vs.get_with_hints(
-            out_channels,
-            "bias",
-            candle_nn::Init::Const(0.0),
-        )?;
+        let _ = vs.get_with_hints(out_channels, "bias", candle_nn::Init::Const(0.0))?;
 
         Conv3d::new(in_channels, out_channels, config, vs)
     }
@@ -103,7 +101,13 @@ mod property_tests {
 
     /// Calculate expected output dimension using the standard convolution formula.
     /// out = (in + 2*pad - dilation*(kernel-1) - 1) / stride + 1
-    fn calc_output_dim(input: usize, pad: usize, dilation: usize, kernel: usize, stride: usize) -> usize {
+    fn calc_output_dim(
+        input: usize,
+        pad: usize,
+        dilation: usize,
+        kernel: usize,
+        stride: usize,
+    ) -> usize {
         let dilated_k = dilation * (kernel - 1) + 1;
         let padded = input + 2 * pad;
         if padded < dilated_k {
@@ -117,7 +121,6 @@ mod property_tests {
     fn cpu_supported_dtypes() -> Vec<DType> {
         vec![DType::F32, DType::F64, DType::BF16, DType::F16]
     }
-
 
     // =========================================================================
     // Property 1: Output Shape Formula
@@ -233,7 +236,6 @@ mod property_tests {
         }
     }
 
-
     // =========================================================================
     // Property 4: Causal Padding Correctness
     // **Validates: Requirements 2.3, 4.1**
@@ -309,7 +311,6 @@ mod property_tests {
             }
         }
     }
-
 
     // =========================================================================
     // Property 8: Dtype Support
@@ -568,7 +569,6 @@ mod property_tests {
         }
     }
 
-
     // =========================================================================
     // Property 6: Cache Round-Trip Correctness
     // **Validates: Requirements 4.2, 4.3, 4.4, 4.6**
@@ -757,7 +757,6 @@ mod property_tests {
         }
     }
 
-
     // =========================================================================
     // Property 9: PyTorch Parity (Standard Mode)
     // **Validates: Requirements 10.1, 10.3**
@@ -769,12 +768,12 @@ mod property_tests {
         /// Feature: native-conv3d, Property 9: PyTorch Parity (Standard Mode)
         /// For any Conv3d configuration and any input tensor, the convolution output
         /// SHALL satisfy mathematical properties consistent with PyTorch nn.Conv3d.
-        /// 
+        ///
         /// This test verifies:
         /// 1. Output shape matches the standard convolution formula
         /// 2. Convolution is linear (f(ax + by) = a*f(x) + b*f(y))
         /// 3. Zero input produces output equal to bias (when bias is present)
-        /// 
+        ///
         /// **Validates: Requirements 10.1, 10.3**
         #[test]
         fn prop_pytorch_parity_standard_linearity(
@@ -920,7 +919,6 @@ mod property_tests {
         }
     }
 
-
     // =========================================================================
     // Property 10: PyTorch Parity (Causal Mode)
     // **Validates: Requirements 10.2**
@@ -932,12 +930,12 @@ mod property_tests {
         /// Feature: native-conv3d, Property 10: PyTorch Parity (Causal Mode)
         /// For any causal Conv3d configuration and any input tensor, the convolution
         /// output SHALL satisfy mathematical properties consistent with diffusers CausalConv3d.
-        /// 
+        ///
         /// This test verifies:
         /// 1. Output preserves temporal dimension (causal padding adds kt-1 frames)
         /// 2. Convolution is linear in causal mode
         /// 3. Temporal causality is maintained
-        /// 
+        ///
         /// **Validates: Requirements 10.2**
         #[test]
         fn prop_pytorch_parity_causal_linearity(
@@ -1137,7 +1135,6 @@ mod property_tests {
             }
         }
     }
-
 
     // =========================================================================
     // Property 11: Invalid Input Rejection
@@ -1388,7 +1385,7 @@ mod property_tests {
             // Verify error message mentions output dimension
             let err_msg = result.unwrap_err().to_string();
             prop_assert!(
-                err_msg.to_lowercase().contains("output") || 
+                err_msg.to_lowercase().contains("output") ||
                 err_msg.to_lowercase().contains("dimension") ||
                 err_msg.to_lowercase().contains("negative"),
                 "Error message should mention output dimension or negative: {}",
@@ -1449,7 +1446,7 @@ mod property_tests {
             // Verify error message mentions cache or shape
             let err_msg = result.unwrap_err().to_string();
             prop_assert!(
-                err_msg.to_lowercase().contains("cache") || 
+                err_msg.to_lowercase().contains("cache") ||
                 err_msg.to_lowercase().contains("shape") ||
                 err_msg.to_lowercase().contains("mismatch"),
                 "Error message should mention cache or shape: {}",
@@ -1509,7 +1506,6 @@ mod property_tests {
     }
 }
 
-
 // =============================================================================
 // Property 12: Device Transfer Correctness
 // =============================================================================
@@ -1541,14 +1537,13 @@ mod device_transfer_tests {
         let _ = vs.get_with_hints(
             (out_channels, in_channels / groups, kt, kh, kw),
             "weight",
-            candle_nn::Init::Randn { mean: 0.0, stdev: 0.1 },
+            candle_nn::Init::Randn {
+                mean: 0.0,
+                stdev: 0.1,
+            },
         )?;
 
-        let _ = vs.get_with_hints(
-            out_channels,
-            "bias",
-            candle_nn::Init::Const(0.0),
-        )?;
+        let _ = vs.get_with_hints(out_channels, "bias", candle_nn::Init::Const(0.0))?;
 
         Conv3d::new(in_channels, out_channels, config, vs)
     }
@@ -1564,149 +1559,155 @@ mod device_transfer_tests {
     #[test]
     fn test_cpu_to_cpu_transfer() -> candle_core::Result<()> {
         let device = Device::Cpu;
-        
-        let config = Conv3dConfig::new((3, 3, 3))
-            .with_padding((1, 1, 1));
-        
+
+        let config = Conv3dConfig::new((3, 3, 3)).with_padding((1, 1, 1));
+
         let conv = create_test_conv3d(4, 8, (3, 3, 3), config, &device)?;
-        
+
         // Create input
         let input = Tensor::randn(0f32, 1.0, (1, 4, 4, 8, 8), &device)?;
-        
+
         // Forward on CPU
         let output1 = conv.forward(&input)?;
-        
+
         // Transfer input to CPU (no-op) and forward again
         let input_cpu = input.to_device(&Device::Cpu)?;
         let output2 = conv.forward(&input_cpu)?;
-        
+
         // Should be identical
         let diff = max_abs_diff(&output1, &output2)?;
-        assert!(diff < 1e-6, "CPU to CPU transfer should be exact, got diff={}", diff);
-        
+        assert!(
+            diff < 1e-6,
+            "CPU to CPU transfer should be exact, got diff={}",
+            diff
+        );
+
         Ok(())
     }
 
     #[test]
     fn test_contiguous_vs_non_contiguous() -> candle_core::Result<()> {
         let device = Device::Cpu;
-        
-        let config = Conv3dConfig::new((3, 3, 3))
-            .with_padding((1, 1, 1));
-        
+
+        let config = Conv3dConfig::new((3, 3, 3)).with_padding((1, 1, 1));
+
         let conv = create_test_conv3d(4, 8, (3, 3, 3), config, &device)?;
-        
+
         // Create contiguous input
         let input = Tensor::randn(0f32, 1.0, (1, 4, 4, 8, 8), &device)?;
-        
+
         // Forward with contiguous input
         let output1 = conv.forward(&input)?;
-        
+
         // Create non-contiguous input via transpose and back
         let input_t = input.permute((0, 1, 2, 4, 3))?; // Swap H and W
         let input_back = input_t.permute((0, 1, 2, 4, 3))?; // Swap back
-        
+
         // Forward with non-contiguous input
         let output2 = conv.forward(&input_back)?;
-        
+
         // Should produce same result
         let diff = max_abs_diff(&output1, &output2)?;
-        assert!(diff < 1e-5, "Contiguous vs non-contiguous should match, got diff={}", diff);
-        
+        assert!(
+            diff < 1e-5,
+            "Contiguous vs non-contiguous should match, got diff={}",
+            diff
+        );
+
         Ok(())
     }
 
     #[test]
     fn test_dtype_conversion_f32_to_f32() -> candle_core::Result<()> {
         let device = Device::Cpu;
-        
-        let config = Conv3dConfig::new((3, 3, 3))
-            .with_padding((1, 1, 1));
-        
+
+        let config = Conv3dConfig::new((3, 3, 3)).with_padding((1, 1, 1));
+
         let conv = create_test_conv3d(4, 8, (3, 3, 3), config, &device)?;
-        
+
         // Create f32 input
         let input = Tensor::randn(0f32, 1.0, (1, 4, 4, 8, 8), &device)?;
-        
+
         // Forward
         let output = conv.forward(&input)?;
-        
+
         // Output should be f32
         assert_eq!(output.dtype(), DType::F32);
-        
+
         Ok(())
     }
 
     #[test]
     fn test_output_device_matches_input() -> candle_core::Result<()> {
         let device = Device::Cpu;
-        
-        let config = Conv3dConfig::new((3, 3, 3))
-            .with_padding((1, 1, 1));
-        
+
+        let config = Conv3dConfig::new((3, 3, 3)).with_padding((1, 1, 1));
+
         let conv = create_test_conv3d(4, 8, (3, 3, 3), config, &device)?;
-        
+
         // Create input on CPU
         let input = Tensor::randn(0f32, 1.0, (1, 4, 4, 8, 8), &device)?;
-        
+
         // Forward
         let output = conv.forward(&input)?;
-        
+
         // Output device should match input device
         assert!(matches!(output.device(), Device::Cpu));
-        
+
         Ok(())
     }
 
     #[test]
     fn test_causal_device_transfer() -> candle_core::Result<()> {
         let device = Device::Cpu;
-        
-        let config = Conv3dConfig::causal((3, 3, 3))
-            .with_padding((0, 1, 1));
-        
+
+        let config = Conv3dConfig::causal((3, 3, 3)).with_padding((0, 1, 1));
+
         let conv = create_test_conv3d(4, 8, (3, 3, 3), config, &device)?;
-        
+
         // Create input
         let input = Tensor::randn(0f32, 1.0, (1, 4, 4, 8, 8), &device)?;
-        
+
         // Forward on CPU
         let output1 = conv.forward(&input)?;
-        
+
         // Transfer and forward again
         let input_cpu = input.to_device(&Device::Cpu)?;
         let output2 = conv.forward(&input_cpu)?;
-        
+
         // Should be identical
         let diff = max_abs_diff(&output1, &output2)?;
-        assert!(diff < 1e-6, "Causal CPU transfer should be exact, got diff={}", diff);
-        
+        assert!(
+            diff < 1e-6,
+            "Causal CPU transfer should be exact, got diff={}",
+            diff
+        );
+
         Ok(())
     }
 
     #[test]
     fn test_cache_device_consistency() -> candle_core::Result<()> {
         let device = Device::Cpu;
-        
-        let config = Conv3dConfig::causal((3, 3, 3))
-            .with_padding((0, 1, 1));
-        
+
+        let config = Conv3dConfig::causal((3, 3, 3)).with_padding((0, 1, 1));
+
         let conv = create_test_conv3d(4, 8, (3, 3, 3), config, &device)?;
-        
+
         // Create input
         let input = Tensor::randn(0f32, 1.0, (1, 4, 4, 8, 8), &device)?;
-        
+
         // Forward with cache
         let (output, cache) = conv.forward_with_cache(&input, None)?;
-        
+
         // Cache should be on same device as input
         if let Some(cache) = &cache {
             assert!(matches!(cache.device(), Device::Cpu));
         }
-        
+
         // Output should be on same device
         assert!(matches!(output.device(), Device::Cpu));
-        
+
         Ok(())
     }
 }

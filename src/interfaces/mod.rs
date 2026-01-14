@@ -1,5 +1,3 @@
-//! Internal interfaces for pipeline components.
-
 pub mod activations;
 pub(crate) mod attention;
 pub(crate) mod autoencoder;

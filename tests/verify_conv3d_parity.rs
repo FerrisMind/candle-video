@@ -353,7 +353,10 @@ mod tests {
         }
 
         println!();
-        println!("Results: {} passed, {} failed, {} skipped", passed, failed, skipped);
+        println!(
+            "Results: {} passed, {} failed, {} skipped",
+            passed, failed, skipped
+        );
 
         // Note: We don't fail the test here because the reference data may have been
         // generated with different padding semantics. The property tests in
@@ -470,7 +473,10 @@ mod tests {
         let tolerance = BF16_TOLERANCE;
 
         println!("Running Conv3d CUDA parity tests");
-        println!("Device: {:?}, Dtype: {:?}, Tolerance: {}", device, dtype, tolerance);
+        println!(
+            "Device: {:?}, Dtype: {:?}, Tolerance: {}",
+            device, dtype, tolerance
+        );
 
         let tensors = candle_core::safetensors::load(ref_path, &Device::Cpu)?;
         let test_cases = load_test_cases();
@@ -511,9 +517,13 @@ mod tests {
         // Pointwise should have very tight tolerance since there's no padding involved
         let (success, msg) = run_parity_test(&test_case, &tensors, &device, dtype, 0.02)?;
         println!("{}", msg);
-        
+
         // Pointwise convolution should match closely
-        assert!(success || msg.contains("SKIP"), "Pointwise parity failed: {}", msg);
+        assert!(
+            success || msg.contains("SKIP"),
+            "Pointwise parity failed: {}",
+            msg
+        );
         Ok(())
     }
 
