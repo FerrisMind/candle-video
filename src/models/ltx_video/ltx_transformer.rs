@@ -1,18 +1,11 @@
-//! Rust 2024 + candle port of transformer_ltx.py (LTX-Video transformer core).
-//!
-//! Notes:
-//! - This is a self-contained module intended to compile and mirror the structure
-//!   of the provided Python file.
-//! - Common components are now imported from interfaces module.
-
 use crate::interfaces::attention::{
     AttentionMixin, AttentionModule, AttentionModuleMixin, AttnProcessor, DefaultAttnProcessor,
 };
-use crate::interfaces::cache_mixin::{apply_cache_mixin, CacheMixin};
-use crate::interfaces::config_mixin::{apply_config_mixin, ConfigMixin};
+use crate::interfaces::cache_mixin::{CacheMixin, apply_cache_mixin};
+use crate::interfaces::config_mixin::{ConfigMixin, apply_config_mixin};
 use crate::interfaces::embeddings::{AdaLayerNormSingle, PixArtAlphaTextProjection};
 use crate::interfaces::feed_forward::FeedForward;
-use crate::interfaces::model_mixin::{apply_model_mixin, ModelMixin};
+use crate::interfaces::model_mixin::{ModelMixin, apply_model_mixin};
 use crate::interfaces::normalization::{LayerNormNoParams, RmsNorm};
 use crate::interfaces::rope::apply_rotary_emb;
 use crate::models::ltx_video::t2v_pipeline::{TransformerConfig, VideoTransformer3D};
@@ -28,7 +21,6 @@ pub struct Transformer2DModelOutput {
 
 use serde::{Deserialize, Serialize};
 
-/// Configuration for LtxVideoTransformer3DModel
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LtxVideoTransformer3DModelConfig {
     pub in_channels: usize,
@@ -52,9 +44,9 @@ impl Default for LtxVideoTransformer3DModelConfig {
         Self {
             in_channels: 128,
             out_channels: 128,
-            patch_size: 1, // 0.9.5 uses patch_size 1? Json says 1.
+            patch_size: 1,
             patch_size_t: 1,
-            num_attention_heads: 32, // 2048 hidden size / 64
+            num_attention_heads: 32,
             attention_head_dim: 64,
             cross_attention_dim: 2048,
             num_layers: 28,
@@ -67,15 +59,6 @@ impl Default for LtxVideoTransformer3DModelConfig {
         }
     }
 }
-
-
-// Note: The following components are now imported from crate::interfaces:
-// - RmsNorm, LayerNormNoParams (from normalization)
-// - gelu_approximate (from activations)
-// - FeedForward (from feed_forward)
-// - get_timestep_embedding, TimestepEmbedding, PixArtAlphaTextProjection,
-//   PixArtAlphaCombinedTimestepSizeEmbeddings, AdaLayerNormSingle (from embeddings)
-// - apply_rotary_emb (from rope)
 
 #[derive(Clone, Debug)]
 pub struct LtxVideoRotaryPosEmbed {
@@ -118,15 +101,12 @@ impl LtxVideoRotaryPosEmbed {
         rope_interpolation_scale: Option<(f64, f64, f64)>,
         device: &Device,
     ) -> Result<Tensor> {
-        // Compute coords in F32 for precision, convert to model dtype later
         let dtype = DType::F32;
 
-        let grid_h = Tensor::arange(0u32, height as u32, device)?.to_dtype(dtype)?; // [H]
-        let grid_w = Tensor::arange(0u32, width as u32, device)?.to_dtype(dtype)?; // [W]
-        let grid_f = Tensor::arange(0u32, num_frames as u32, device)?.to_dtype(dtype)?; // [F]
+        let grid_h = Tensor::arange(0u32, height as u32, device)?.to_dtype(dtype)?;
+        let grid_w = Tensor::arange(0u32, width as u32, device)?.to_dtype(dtype)?;
+        let grid_f = Tensor::arange(0u32, num_frames as u32, device)?.to_dtype(dtype)?;
 
-        // meshgrid ij:
-        // f: [F,H,W], h: [F,H,W], w: [F,H,W]
         let f = grid_f
             .reshape((num_frames, 1, 1))?
             .broadcast_as((num_frames, height, width))?;
@@ -137,15 +117,13 @@ impl LtxVideoRotaryPosEmbed {
             .reshape((1, 1, width))?
             .broadcast_as((num_frames, height, width))?;
 
-        // stack -> [3,F,H,W]
-        let mut grid = Tensor::stack(&[f, h, w], 0)?; // [3,F,H,W]
-        // [B,3,F,H,W]
+        let mut grid = Tensor::stack(&[f, h, w], 0)?;
+
         grid = grid
             .unsqueeze(0)?
             .broadcast_as((batch_size, 3, num_frames, height, width))?;
 
         if let Some((sf, sh, sw)) = rope_interpolation_scale {
-            // grid[:,0:1] *= sf * patch_size_t / base_num_frames
             let f_scale = (sf * self.patch_size_t as f64 / self.base_num_frames as f64) as f32;
             let h_scale = (sh * self.patch_size as f64 / self.base_height as f64) as f32;
             let w_scale = (sw * self.patch_size as f64 / self.base_width as f64) as f32;
@@ -162,7 +140,6 @@ impl LtxVideoRotaryPosEmbed {
             grid = Tensor::cat(&[gf, gh, gw], 1)?;
         }
 
-        // flatten dims 2..4 => seq, transpose(1,2): [B, seq, 3]
         let seq = num_frames * height * width;
         let grid = grid
             .reshape((batch_size, 3, seq))?
@@ -171,7 +148,6 @@ impl LtxVideoRotaryPosEmbed {
         Ok(grid)
     }
 
-    /// Returns (cos, sin), both shaped [B, seq, dim].
     pub fn forward(
         &self,
         hidden_states: &Tensor,
@@ -185,7 +161,6 @@ impl LtxVideoRotaryPosEmbed {
         let batch_size = hidden_states.dim(0)?;
 
         let grid = if let Some(coords) = video_coords {
-            // Expect [B, seq, 3] and normalize by base sizes.
             let (b, seq, c) = coords.dims3()?;
             if b != batch_size || c != 3 {
                 candle_core::bail!("video_coords must be [B, seq, 3], got [{b}, {seq}, {c}]");
@@ -209,37 +184,31 @@ impl LtxVideoRotaryPosEmbed {
             )?
         };
 
-        // freqs: theta ** linspace(log(start,theta), log(end,theta), dim//6)
-        // In the file: start=1.0, end=theta => exponents go 0..1.
         let steps = self.dim / 6;
-        let dtype = DType::F32; // Use F32 for coordinate math
+        let dtype = DType::F32;
 
         let lin = if steps <= 1 {
             Tensor::zeros((1,), dtype, device)?
         } else {
-            // linspace [0, 1], inclusive
             let idx = Tensor::arange(0u32, steps as u32, device)?.to_dtype(dtype)?;
             idx.affine(1.0 / ((steps - 1) as f64), 0.0)?
         };
 
         let theta_ln = (self.theta.ln()) as f32;
-        let freqs = (lin.affine(theta_ln as f64, 0.0)?).exp()?; // exp(lin * ln(theta)) => theta**lin
-        let freqs = freqs.affine(std::f64::consts::PI / 2.0, 0.0)?; // * pi/2
+        let freqs = (lin.affine(theta_ln as f64, 0.0)?).exp()?;
+        let freqs = freqs.affine(std::f64::consts::PI / 2.0, 0.0)?;
 
-        // freqs = freqs * (grid.unsqueeze(-1) * 2 - 1)
-        // grid: [B, seq, 3] -> [B, seq, 3, 1]
         let grid = grid.to_dtype(dtype)?;
-        let grid_scaled = grid.unsqueeze(D::Minus1)?.affine(2.0, -1.0)?; // *2 -1
-        let freqs = grid_scaled.broadcast_mul(&freqs.reshape((1, 1, 1, steps))?)?; // [B,seq,3,steps]
+        let grid_scaled = grid.unsqueeze(D::Minus1)?.affine(2.0, -1.0)?;
+        let freqs = grid_scaled.broadcast_mul(&freqs.reshape((1, 1, 1, steps))?)?;
         let freqs = freqs
             .transpose(D::Minus1, D::Minus2)?
             .contiguous()?
-            .flatten_from(2)?; // [B,seq,3*steps]
+            .flatten_from(2)?;
 
-        // Manually implement repeat_interleave(2, D::Minus1) for cos/sin
         fn repeat_interleave_2(t: &Tensor) -> Result<Tensor> {
-            let t_unsq = t.unsqueeze(D::Minus1)?; // [..., C, 1]
-            let t_rep = Tensor::cat(&[t_unsq.clone(), t_unsq], D::Minus1)?; // [..., C, 2]
+            let t_unsq = t.unsqueeze(D::Minus1)?;
+            let t_rep = Tensor::cat(&[t_unsq.clone(), t_unsq], D::Minus1)?;
             let shape = t.dims();
             let new_last = shape[shape.len() - 1] * 2;
             let mut new_shape: Vec<usize> = shape[..shape.len() - 1].to_vec();
@@ -303,7 +272,6 @@ impl LtxAttention {
         let inner_kv_dim = dim_head * kv_heads;
         let cross_attention_dim = cross_attention_dim.unwrap_or(query_dim);
 
-        // Python uses eps=1e-5 and elementwise_affine=True for these.
         let norm_q = RmsNorm::new(inner_dim, 1e-5, true, vb.pp("norm_q"))?;
         let norm_k = RmsNorm::new(inner_kv_dim, 1e-5, true, vb.pp("norm_k"))?;
 
@@ -335,10 +303,6 @@ impl LtxAttention {
         q_len: usize,
         k_len: usize,
     ) -> Result<Tensor> {
-        // The Python file relies on AttentionModuleMixin.prepare_attention_mask.
-        // Here we support the shapes that are consistent with the file usage:
-        // - [B, 1, k_len] bias -> expand to [B, heads, q_len, k_len]
-        // - [B, heads, q_len, k_len] already prepared
         match attention_mask.rank() {
             2 => {
                 let (b, kk) = attention_mask.dims2()?;
@@ -351,10 +315,9 @@ impl LtxAttention {
                         kk
                     );
                 }
-                // Convert 0/1 mask from tokenizer (where 1 is keep, 0 is mask)
-                // to additive offset (-10000.0 for mask, 0.0 for keep)
+
                 let mask = (1.0 - attention_mask.to_dtype(DType::F32)?)? * -10000.0;
-                // [B, k_len] -> [B, 1, 1, k_len]
+
                 let m = mask?.unsqueeze(1)?.unsqueeze(1)?;
 
                 m.broadcast_as((b, self.heads, q_len, k_len))?.contiguous()
@@ -372,7 +335,7 @@ impl LtxAttention {
                         kk
                     );
                 }
-                let m = attention_mask.unsqueeze(2)?; // [B,1,1,k_len]
+                let m = attention_mask.unsqueeze(2)?;
                 m.broadcast_as((b, self.heads, q_len, k_len))?.contiguous()
             }
             4 => Ok(attention_mask.clone()),
@@ -382,10 +345,10 @@ impl LtxAttention {
 
     pub fn forward(
         &self,
-        hidden_states: &Tensor,                       // [B, S, query_dim]
-        encoder_hidden_states: Option<&Tensor>,       // [B, K, cross_dim] or None
-        attention_mask: Option<&Tensor>,              // optional bias/mask
-        image_rotary_emb: Option<(&Tensor, &Tensor)>, // (cos, sin)
+        hidden_states: &Tensor,
+        encoder_hidden_states: Option<&Tensor>,
+        attention_mask: Option<&Tensor>,
+        image_rotary_emb: Option<(&Tensor, &Tensor)>,
     ) -> Result<Tensor> {
         let processor = AttentionModuleMixin::processor(self);
         processor.process(
@@ -397,13 +360,12 @@ impl LtxAttention {
         )
     }
 
-    /// Mirrors LTXVideoAttnProcessor.__call__ behavior from the Python file.
     fn forward_inner(
         &self,
-        hidden_states: &Tensor,                       // [B, S, query_dim]
-        encoder_hidden_states: Option<&Tensor>,       // [B, K, cross_dim] or None
-        attention_mask: Option<&Tensor>,              // optional bias/mask
-        image_rotary_emb: Option<(&Tensor, &Tensor)>, // (cos, sin)
+        hidden_states: &Tensor,
+        encoder_hidden_states: Option<&Tensor>,
+        attention_mask: Option<&Tensor>,
+        image_rotary_emb: Option<(&Tensor, &Tensor)>,
     ) -> Result<Tensor> {
         let (b, q_len, _) = hidden_states.dims3()?;
         let enc = encoder_hidden_states.unwrap_or(hidden_states);
@@ -415,22 +377,18 @@ impl LtxAttention {
             None
         };
 
-        // Project
-        let mut q = self.to_q.forward(hidden_states)?; // [B,S,inner_dim]
-        let mut k = self.to_k.forward(enc)?; // [B,K,inner_kv_dim]
-        let v = self.to_v.forward(enc)?; // [B,K,inner_kv_dim]
+        let mut q = self.to_q.forward(hidden_states)?;
+        let mut k = self.to_k.forward(enc)?;
+        let v = self.to_v.forward(enc)?;
 
-        // QK RMSNorm
         q = self.norm_q.forward(&q)?;
         k = self.norm_k.forward(&k)?;
 
-        // RoPE on Q,K if provided
         if let Some((cos, sin)) = image_rotary_emb {
             q = apply_rotary_emb(&q, cos, sin)?;
             k = apply_rotary_emb(&k, cos, sin)?;
         }
 
-        // Reshape to heads: [B, S, heads, head_dim]
         let q = q.reshape((b, q_len, self.heads, self.head_dim))?;
         let k = k.reshape((b, k_len, self.heads, self.head_dim))?;
         let v = v.reshape((b, k_len, self.heads, self.head_dim))?;
@@ -438,12 +396,10 @@ impl LtxAttention {
         let dtype = q.dtype();
         let scale = 1f32 / (self.head_dim as f32).sqrt();
 
-        // Check if we can use Flash Attention
         #[allow(unused_mut)]
         let mut use_flash = false;
         #[cfg(feature = "flash-attn")]
         {
-            // Flash Attention doesn't support masks easily
             if _attn_mask.is_none() && q.device().is_cuda() {
                 use_flash = true;
             }
@@ -452,15 +408,12 @@ impl LtxAttention {
         let out = if use_flash {
             #[cfg(feature = "flash-attn")]
             {
-                // candle_flash_attn expects [B, seq, heads, head_dim] which matches our current shape
                 let q_bf = q.to_dtype(DType::BF16)?;
                 let k_bf = k.to_dtype(DType::BF16)?;
                 let v_bf = v.to_dtype(DType::BF16)?;
 
                 let out = candle_flash_attn::flash_attn(&q_bf, &k_bf, &v_bf, scale, false)?;
 
-                // Result is [B, seq, heads, head_dim].
-                // We need it to be [B, heads, seq, head_dim] to match common post-processing below
                 out.transpose(1, 2)?.to_dtype(dtype)?
             }
             #[cfg(not(feature = "flash-attn"))]
@@ -468,36 +421,30 @@ impl LtxAttention {
                 unreachable!()
             }
         } else {
-            // Manual attention path
-            let q_f32 = q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?; // [B, heads, seq, head_dim]
+            let q_f32 = q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
             let k_f32 = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
             let v_f32 = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
 
             let att = q_f32.matmul(&k_f32.transpose(D::Minus1, D::Minus2)?)?;
             let att = (att * (scale as f64))?;
 
-            // Add mask if present
             let att = match _attn_mask {
                 Some(ref mask) => att.broadcast_add(&mask.to_dtype(DType::F32)?)?,
                 None => att,
             };
 
-            // Softmax - already in F32
             let (b_sz, h_sz, q_l, k_l) = att.dims4()?;
             let att = att.reshape((b_sz * h_sz * q_l, k_l))?;
             let att = nn::ops::softmax(&att, D::Minus1)?;
             let att = att.reshape((b_sz, h_sz, q_l, k_l))?;
 
-            // out = att @ v
             let out_f32 = att.matmul(&v_f32)?;
             out_f32.to_dtype(dtype)?
         };
 
-        // Back to [B, S, heads, head_dim] -> flatten -> [B,S,inner_dim]
         let out = out.transpose(1, 2)?.contiguous()?;
         let out = out.reshape((b, q_len, self.inner_dim))?;
 
-        // Output projection + dropout
         let out = self.to_out.forward(&out)?;
         self.dropout.forward(&out, false)
     }
@@ -537,7 +484,7 @@ pub struct LtxVideoTransformerBlock {
     norm2: RmsNorm,
     attn2: LtxAttention,
     ff: FeedForward,
-    scale_shift_table: Tensor, // [6, dim]
+    scale_shift_table: Tensor,
 }
 
 impl LtxVideoTransformerBlock {
@@ -583,8 +530,6 @@ impl LtxVideoTransformerBlock {
 
         let ff = FeedForward::new(dim, vb.pp("ff"))?;
 
-        // Parameter: torch.randn(6, dim) / dim**0.5
-        // In candle: we store as a trainable tensor; initialization is delegated to checkpoint loading.
         let scale_shift_table = vb.get((6, dim), "scale_shift_table")?;
 
         Ok(Self {
@@ -604,17 +549,15 @@ impl LtxVideoTransformerBlock {
 
     pub fn forward(
         &self,
-        hidden_states: &Tensor,         // [B, S, dim]
-        encoder_hidden_states: &Tensor, // [B, K, dim]
-        temb: &Tensor,                  // [B, T, 6*dim]
+        hidden_states: &Tensor,
+        encoder_hidden_states: &Tensor,
+        temb: &Tensor,
         image_rotary_emb: Option<(&Tensor, &Tensor)>,
         encoder_attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
         let b = hidden_states.dim(0)?;
         let norm_hidden = self.norm1.forward(hidden_states)?;
 
-        // ada_values = scale_shift_table[None,None] + temb.reshape(B, T, 6, dim)
-        // ada_values = scale_shift_table[None,None] + temb.reshape(B, T, 6, dim)
         let (b_temb, temb_last) = temb.dims2()?;
         if b_temb != b {
             candle_core::bail!(
@@ -628,7 +571,7 @@ impl LtxVideoTransformerBlock {
             candle_core::bail!("temb last dim must be divisible by 6, got {temb_last}");
         }
         let dim = temb_last / 6;
-        let t = 1; // temb is [B, 6*dim], so T=1 effectively
+        let t = 1;
         let temb_reshaped = temb.reshape((b, t, 6, dim))?;
 
         let table = self
@@ -636,7 +579,7 @@ impl LtxVideoTransformerBlock {
             .unsqueeze(0)?
             .unsqueeze(0)?
             .broadcast_as((b, t, 6, dim))?;
-        let ada = table.broadcast_add(&temb_reshaped)?; // [B,T,6,dim]
+        let ada = table.broadcast_add(&temb_reshaped)?;
 
         let shift_msa = ada.i((.., .., 0, ..))?;
         let scale_msa = ada.i((.., .., 1, ..))?;
@@ -645,10 +588,6 @@ impl LtxVideoTransformerBlock {
         let scale_mlp = ada.i((.., .., 4, ..))?;
         let gate_mlp = ada.i((.., .., 5, ..))?;
 
-        // norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
-        // Align shapes: norm_hidden is [B,S,dim], while shift/scale are [B,T,dim].
-        // In the Python file, T corresponds to the second dimension after time embedding; typically T==1.
-        // We broadcast T over S when T==1.
         let scale_msa = scale_msa;
         let shift_msa = shift_msa;
         let gate_msa = gate_msa;
@@ -658,8 +597,8 @@ impl LtxVideoTransformerBlock {
 
         let norm_hidden = {
             let one = Tensor::ones_like(&scale_msa)?;
-            let s = one.broadcast_add(&scale_msa)?; // 1+scale
-            // If T==1, expand to [B,S,dim]
+            let s = one.broadcast_add(&scale_msa)?;
+
             let s = if s.dim(1)? == 1 {
                 s.broadcast_as((b, hidden_states.dim(1)?, s.dim(2)?))?
             } else {
@@ -673,7 +612,6 @@ impl LtxVideoTransformerBlock {
             norm_hidden.broadcast_mul(&s)?.broadcast_add(&sh)?
         };
 
-        // Self-attn (encoder_hidden_states=None) with RoPE
         let attn1 = self
             .attn1
             .forward(&norm_hidden, None, None, image_rotary_emb)?;
@@ -684,7 +622,6 @@ impl LtxVideoTransformerBlock {
         };
         let mut hs = hidden_states.broadcast_add(&attn1.broadcast_mul(&gate_msa)?)?;
 
-        // Cross-attn
         let attn2 = self.attn2.forward(
             &hs,
             Some(encoder_hidden_states),
@@ -693,7 +630,6 @@ impl LtxVideoTransformerBlock {
         )?;
         hs = hs.broadcast_add(&attn2)?;
 
-        // MLP
         let norm2 = self.norm2.forward(&hs)?;
         let norm2 = {
             let one = Tensor::ones_like(&scale_mlp)?;
@@ -725,7 +661,7 @@ impl LtxVideoTransformerBlock {
 #[derive(Clone, Debug)]
 pub struct LtxVideoTransformer3DModel {
     proj_in: nn::Linear,
-    scale_shift_table: Tensor, // [2, inner_dim]
+    scale_shift_table: Tensor,
     time_embed: AdaLayerNormSingle,
     caption_projection: PixArtAlphaTextProjection,
     rope: LtxVideoRotaryPosEmbed,
@@ -821,10 +757,10 @@ impl LtxVideoTransformer3DModel {
     #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &self,
-        hidden_states: &Tensor,                  // [B, S, in_channels]
-        encoder_hidden_states: &Tensor,          // [B, K, caption_channels]
-        timestep: &Tensor,                       // int tensor, shape [B] or [B,1]...
-        encoder_attention_mask: Option<&Tensor>, // [B,K] (1 valid, 0 pad) or already bias
+        hidden_states: &Tensor,
+        encoder_hidden_states: &Tensor,
+        timestep: &Tensor,
+        encoder_attention_mask: Option<&Tensor>,
         num_frames: usize,
         height: usize,
         width: usize,
@@ -834,25 +770,22 @@ impl LtxVideoTransformer3DModel {
     ) -> Result<Tensor> {
         let (_b, _s, _c) = hidden_states.dims3()?;
 
-        // Convert inputs to model dtype (BF16) if needed
         let model_dtype = self.proj_in.weight().dtype();
         let hidden_states = hidden_states.to_dtype(model_dtype)?;
         let encoder_hidden_states = encoder_hidden_states.to_dtype(model_dtype)?;
 
         let hidden_states = self.proj_in.forward(&hidden_states)?;
 
-        let timestep = timestep.flatten_all()?.to_dtype(model_dtype)?; // ensure [B] or flat, in BF16
+        let timestep = timestep.flatten_all()?.to_dtype(model_dtype)?;
 
-        // 1. AdaLayerNormSingle (Timesteps -> PixArtEmbed -> Silu -> Linear)
-        let (temb, embedded_timestep) = self.time_embed.forward(&timestep)?; // [B, 6*dim], [B, dim]
+        let (temb, embedded_timestep) = self.time_embed.forward(&timestep)?;
 
         let encoder_hidden_states = self.caption_projection.forward(&encoder_hidden_states)?;
 
-        // convert encoder_attention_mask to a bias
         let encoder_attention_mask = if let Some(mask) = encoder_attention_mask {
             if mask.rank() == 2 {
                 let mask_f = mask.to_dtype(hidden_states.dtype())?;
-                // (1 - mask) * -10000.0
+
                 let bias = (mask_f.affine(-1.0, 1.0)? * (-10000.0))?;
                 Some(bias.unsqueeze(1)?)
             } else {
@@ -871,14 +804,6 @@ impl LtxVideoTransformer3DModel {
             rope_interpolation_scale,
             video_coords,
         )?;
-
-        // Pass embedded_timestep as conditioning? LTX-Video adds it to temb or similar?
-        // Wait, logic in `forward` block of transformer_ltx.py:
-        // temb is passed to blocks. embedded_timestep is not used explicitly in blocks for this model version?
-        // Let's check block forward. Block uses `temb`.
-        // The `AdaLayerNormSingle` returns (temb, embedded_timestep), but `LtxVideoTransformerBlock`
-        // seems to take `temb`.
-        // `LtxVideoTransformerBlock::forward` signature: `temb: &Tensor`.
 
         let mut hidden_states = hidden_states;
         let image_rotary_emb = Some((&cos, &sin));
@@ -903,50 +828,36 @@ impl LtxVideoTransformer3DModel {
             )?;
 
             if let (Some(mask), Some(orig)) = (skip_layer_mask, original_hidden_states) {
-                // mask shape: [num_layers, batch]
-                // FIX: mask=1 means SKIP layer (use original), mask=0 means APPLY layer (keep processed)
                 let m = mask.narrow(0, index, 1)?.flatten_all()?;
                 let b_size = hidden_states.dim(0)?;
                 let m = m.reshape((b_size, 1, 1))?.to_dtype(hidden_states.dtype())?;
                 let one_minus_m = m.affine(-1.0, 1.0)?;
-                // When m=1 (skip): use orig. When m=0 (apply): use hidden_states
+
                 hidden_states = hidden_states
-                    .broadcast_mul(&one_minus_m)? // m=0 -> keep processed hidden_states
-                    .broadcast_add(&orig.broadcast_mul(&m)?)?; // m=1 -> add original (skip)
+                    .broadcast_mul(&one_minus_m)?
+                    .broadcast_add(&orig.broadcast_mul(&m)?)?;
             }
         }
 
-        // Final modulation: scale_shift_table[None,None] + embedded_timestep[:, :, None]
         let b = hidden_states.dim(0)?;
         let inner_dim = hidden_states.dim(2)?;
 
-        // scale_shift_table: [2, inner_dim] -> cast to dtype of embedded_timestep
         let table = self.scale_shift_table.to_dtype(embedded_timestep.dtype())?;
 
-        // table: [1, 1, 2, inner_dim]
         let table = table.unsqueeze(0)?.unsqueeze(0)?;
 
-        // embedded_timestep: [B, T=1, inner_dim] (usually T=1 after pool or similar? AdaLayerNormSingle returns [B, inner_dim]?)
-        // AdaLayerNormSingle returns `emb` which is [B, inner_dim].
-        // We need to check dims.
-        // If embedded_timestep is [B, D].
-        let emb = embedded_timestep.unsqueeze(1)?.unsqueeze(2)?; // [B, 1, 1, D]
+        let emb = embedded_timestep.unsqueeze(1)?.unsqueeze(2)?;
 
-        // broadcast add: table + emb
-        // [1,1,2,D] + [B,1,1,D] -> [B,1,2,D]
         let scale_shift = table.broadcast_add(&emb)?;
 
-        let shift = scale_shift.i((.., .., 0, ..))?; // [B, 1, D]
-        let scale = scale_shift.i((.., .., 1, ..))?; // [B, 1, D]
+        let shift = scale_shift.i((.., .., 0, ..))?;
+        let scale = scale_shift.i((.., .., 1, ..))?;
 
         let mut hidden_states = self.norm_out.forward(&hidden_states)?;
 
-        // (1 + scale) * x + shift
         let one = Tensor::ones_like(&scale)?;
         let ss = one.broadcast_add(&scale)?;
 
-        // Broadcast scale/shift to [B, S, D]
-        // S is dim 1 of hidden_states
         let s_dim = hidden_states.dim(1)?;
         let ss = ss.broadcast_as((b, s_dim, inner_dim))?;
         let sh = shift.broadcast_as((b, s_dim, inner_dim))?;
@@ -955,12 +866,6 @@ impl LtxVideoTransformer3DModel {
 
         let hidden_states = self.proj_out.forward(&hidden_states)?;
 
-        // Residual connection? In Python:
-        // output = self.proj_out(self.norm_out(hidden_states))
-        // return output + residual (if configured? No usually strict functional)
-        // Check if `hidden_states` (input) is added?
-        // LTX models usually treat it as noise prediction (epsilon or v-prediction).
-        // Let's assume just return output.
         Ok(hidden_states)
     }
 }
@@ -1007,11 +912,8 @@ impl VideoTransformer3D for LtxVideoTransformer3DModel {
         video_coords: Option<&Tensor>,
         skip_layer_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
-        // cast scale to f64
         let scale = rope_interpolation_scale.map(|s| (s.0 as f64, s.1 as f64, s.2 as f64));
 
-        // Call inherent forward
-        // Note: inherent forward takes &self, trait takes &mut self (which coerces to &self).
         LtxVideoTransformer3DModel::forward(
             self,
             hidden_states,
@@ -1042,19 +944,14 @@ mod tests {
             ..Default::default()
         };
 
-        // Use zeros/ones for weights to track passes if needed, but here we just check if it runs
         let vb = VarBuilder::zeros(DType::F32, &device);
         let mut model = LtxVideoTransformer3DModel::new(&config, vb.pp("transformer"))?;
 
-        // Initial state: no skips
         assert_eq!(model.skip_block_list.len(), 0);
 
-        // Set skips
         model.set_skip_block_list(vec![1]);
         assert_eq!(model.skip_block_list, vec![1]);
 
-        // In a real test we'd verify the output differs or some side effect,
-        // but for now, we ensure it compiles and the logic is present.
         Ok(())
     }
 
@@ -1085,12 +982,7 @@ mod tests {
             Tensor::zeros((b, 1, config.caption_channels), DType::F32, &device)?;
         let timestep = Tensor::zeros((b,), DType::F32, &device)?;
 
-        // Mask: Layer 0 skipped for batch 0, Layer 1 skipped for batch 1
-        // [num_layers, batch]
-        let mask_data = vec![
-            0.0f32, 1.0f32, // Layer 0: skip batch 0, keep batch 1
-            1.0f32, 0.0f32, // Layer 1: keep batch 0, skip batch 1
-        ];
+        let mask_data = vec![0.0f32, 1.0f32, 1.0f32, 0.0f32];
         let mask = Tensor::from_vec(mask_data, (2, b), &device)?;
 
         let out = model.forward(
@@ -1106,9 +998,7 @@ mod tests {
             Some(&mask),
         )?;
 
-        assert_eq!(out.dims3()?, (b, s, 128)); // 128 is out_channels by default? No, let's check
-        // By default out_channels = in_channels if not specified.
-        // LTXV model has out_channels = 128 by default in config.
+        assert_eq!(out.dims3()?, (b, s, 128));
 
         Ok(())
     }

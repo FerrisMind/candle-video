@@ -1,25 +1,9 @@
-//! Safetensors weight loading with mapping support
-//!
-//! This module provides comprehensive weight loading utilities for loading
-//! model weights from safetensors files, with support for:
-//!
-//! - Single file loading
-//! - Sharded model loading with automatic detection via `model.safetensors.index.json`
-//! - JSON config parsing for VAE/DiT configurations
-//! - Python → Rust name mapping (exact, prefix, suffix)
-//! - Tensor name validation
-
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-// =============================================================================
-// Error Types
-// =============================================================================
-
-/// Errors that can occur during weight loading
 #[derive(Debug, thiserror::Error)]
 pub enum LoaderError {
     #[error("Failed to read file: {path}")]
@@ -56,21 +40,18 @@ pub enum LoaderError {
     Candle(#[from] candle_core::Error),
 }
 
-// =============================================================================
-// Name Mapping Types
-// =============================================================================
-
-/// Types of name mapping transformations
 #[derive(Debug, Clone)]
 enum MappingRule {
-    /// Exact match replacement
-    Exact { from: String, to: String },
-    /// Prefix replacement (strip prefix and optionally add new one)
+    Exact {
+        from: String,
+        to: String,
+    },
+
     Prefix {
         from_prefix: String,
         to_prefix: String,
     },
-    /// Suffix replacement
+
     Suffix {
         from_suffix: String,
         to_suffix: String,
@@ -78,7 +59,6 @@ enum MappingRule {
 }
 
 impl MappingRule {
-    /// Apply this mapping rule to a name, returning the mapped name if applicable
     fn apply(&self, name: &str) -> Option<String> {
         match self {
             MappingRule::Exact { from, to } => {
@@ -113,36 +93,27 @@ impl MappingRule {
     }
 }
 
-// =============================================================================
-// Safetensors Index (model.safetensors.index.json)
-// =============================================================================
-
-/// Represents the parsed contents of model.safetensors.index.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafetensorsIndex {
-    /// Maps tensor names to their shard file names
     pub weight_map: HashMap<String, String>,
-    /// Optional metadata about the model
+
     #[serde(default)]
     pub metadata: Option<IndexMetadata>,
 }
 
-/// Metadata from the index.json file
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexMetadata {
-    /// Format of the weights (usually "safetensors")
     #[serde(default)]
     pub format: Option<String>,
-    /// Total size of all weights in bytes
+
     #[serde(default)]
     pub total_size: Option<u64>,
-    /// Model type if specified
+
     #[serde(default)]
     pub model_type: Option<String>,
 }
 
 impl SafetensorsIndex {
-    /// Load and parse an index.json file
     pub fn load(path: impl AsRef<Path>) -> std::result::Result<Self, LoaderError> {
         let path = path.as_ref();
         let content = std::fs::read_to_string(path).map_err(|e| LoaderError::FileRead {
@@ -156,7 +127,6 @@ impl SafetensorsIndex {
         })
     }
 
-    /// Get the list of unique shard files referenced in the weight map
     pub fn shard_files(&self) -> Vec<String> {
         let files: HashSet<_> = self.weight_map.values().collect();
         let mut result: Vec<_> = files.into_iter().cloned().collect();
@@ -164,40 +134,30 @@ impl SafetensorsIndex {
         result
     }
 
-    /// Get the file name that contains a specific tensor
     pub fn get_file_for_tensor(&self, tensor_name: &str) -> Option<&str> {
         self.weight_map.get(tensor_name).map(|s| s.as_str())
     }
 
-    /// Check if this index is for a sharded model
     pub fn is_sharded(&self) -> bool {
         self.shard_files().len() > 1
     }
 
-    /// Get all tensor names in the index
     pub fn tensor_names(&self) -> Vec<&str> {
         self.weight_map.keys().map(|s| s.as_str()).collect()
     }
 }
 
-// =============================================================================
-// Weight Loader
-// =============================================================================
-
-/// Weight loader with support for sharded safetensors and name mapping
 pub struct WeightLoader {
-    /// Device to load weights onto
     device: Device,
-    /// Data type for weights
+
     dtype: DType,
-    /// Name mapping rules (applied in order)
+
     mapping_rules: Vec<MappingRule>,
-    /// Whether to use strict mode (error on missing tensors)
+
     strict_mode: bool,
 }
 
 impl WeightLoader {
-    /// Create a new weight loader
     pub fn new(device: Device, dtype: DType) -> Self {
         Self {
             device,
@@ -207,19 +167,6 @@ impl WeightLoader {
         }
     }
 
-    /// Add an exact name mapping rule
-    ///
-    /// This is useful when Python model uses different naming conventions
-    /// than the Rust implementation.
-    ///
-    /// # Example
-    /// ```
-    /// use candle_core::{Device, DType};
-    /// use candle_video::loader::WeightLoader;
-    ///
-    /// let loader = WeightLoader::new(Device::Cpu, DType::F32)
-    ///     .add_mapping("model.diffusion_model", "diffusion_model");
-    /// ```
     pub fn add_mapping(mut self, from: impl Into<String>, to: impl Into<String>) -> Self {
         self.mapping_rules.push(MappingRule::Exact {
             from: from.into(),
@@ -228,19 +175,6 @@ impl WeightLoader {
         self
     }
 
-    /// Add a prefix mapping rule
-    ///
-    /// Strips the `from_prefix` and optionally prepends `to_prefix`.
-    ///
-    /// # Example
-    /// ```
-    /// use candle_core::{Device, DType};
-    /// use candle_video::loader::WeightLoader;
-    ///
-    /// // Remove "model." prefix from all tensor names
-    /// let loader = WeightLoader::new(Device::Cpu, DType::F32)
-    ///     .add_prefix_mapping("model.", "");
-    /// ```
     pub fn add_prefix_mapping(
         mut self,
         from_prefix: impl Into<String>,
@@ -253,20 +187,6 @@ impl WeightLoader {
         self
     }
 
-    /// Add a suffix mapping rule
-    ///
-    /// Replaces `from_suffix` with `to_suffix` at the end of tensor names.
-    ///
-    /// # Example
-    /// ```
-    /// use candle_core::{Device, DType};
-    /// use candle_video::loader::WeightLoader;
-    ///
-    /// // Map PyTorch LayerNorm naming to Rust conventions
-    /// let loader = WeightLoader::new(Device::Cpu, DType::F32)
-    ///     .add_suffix_mapping(".gamma", ".weight")
-    ///     .add_suffix_mapping(".beta", ".bias");
-    /// ```
     pub fn add_suffix_mapping(
         mut self,
         from_suffix: impl Into<String>,
@@ -279,30 +199,21 @@ impl WeightLoader {
         self
     }
 
-    /// Set strict mode for tensor loading
-    ///
-    /// In strict mode, loading will fail if any expected tensors are missing.
     pub fn with_strict_mode(mut self, strict: bool) -> Self {
         self.strict_mode = strict;
         self
     }
 
-    /// Check if strict mode is enabled
     pub fn is_strict_mode(&self) -> bool {
         self.strict_mode
     }
 
-    /// Check if a mapping exists for the given name
     pub fn has_mapping(&self, name: &str) -> bool {
         self.mapping_rules
             .iter()
             .any(|rule| rule.apply(name).is_some())
     }
 
-    /// Apply all mapping rules to a tensor name
-    ///
-    /// Rules are applied in order. If a rule matches, its result is used
-    /// as input for subsequent rules.
     pub fn map_name(&self, name: &str) -> String {
         let mut current = name.to_string();
 
@@ -315,42 +226,29 @@ impl WeightLoader {
         current
     }
 
-    /// Load weights from a single safetensors file
     pub fn load_single(&self, path: impl AsRef<Path>) -> Result<VarBuilder<'_>> {
         let path = path.as_ref();
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[path], self.dtype, &self.device)? };
         Ok(vb)
     }
 
-    /// Load weights from multiple sharded safetensors files
     pub fn load_sharded(&self, paths: &[PathBuf]) -> Result<VarBuilder<'_>> {
         let paths: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&paths, self.dtype, &self.device)? };
         Ok(vb)
     }
 
-    /// Load weights from a directory with automatic shard detection
-    ///
-    /// This method will:
-    /// 1. Look for `model.safetensors.index.json` for sharded models
-    /// 2. Fall back to looking for a single `model.safetensors`
-    /// 3. Fall back to scanning for any `.safetensors` files
-    ///
-    /// If `strict_mode` is enabled and an index.json is found, it will
-    /// verify that all referenced shard files exist.
     pub fn load_from_directory(
         &self,
         dir: impl AsRef<Path>,
     ) -> std::result::Result<VarBuilder<'_>, LoaderError> {
         let dir = dir.as_ref();
 
-        // First, check for index.json (sharded model)
         let index_path = dir.join("model.safetensors.index.json");
         if index_path.exists() {
             let index = SafetensorsIndex::load(&index_path)?;
             let shard_files = index.shard_files();
 
-            // Verify all shard files exist
             let mut missing = Vec::new();
             let mut paths = Vec::new();
 
@@ -370,13 +268,11 @@ impl WeightLoader {
             return self.load_sharded(&paths).map_err(LoaderError::from);
         }
 
-        // Check for single model.safetensors
         let single_path = dir.join("model.safetensors");
         if single_path.exists() {
             return self.load_single(&single_path).map_err(LoaderError::from);
         }
 
-        // Fall back to scanning for .safetensors files
         let files = find_sharded_files(dir, "").map_err(|e| LoaderError::FileRead {
             path: dir.display().to_string(),
             source: std::io::Error::other(e.to_string()),
@@ -395,20 +291,14 @@ impl WeightLoader {
         }
     }
 
-    /// Get the data type used by this loader
     pub fn dtype(&self) -> DType {
         self.dtype
     }
 
-    /// Get the device used by this loader
     pub fn device(&self) -> &Device {
         &self.device
     }
 
-    /// Get a tensor by name with optional mapping
-    ///
-    /// Note: This is a placeholder. In practice, you need to know the shape
-    /// to call VarBuilder::get. This method should be used with shape information.
     pub fn get_tensor<S: Into<candle_core::Shape>>(
         &self,
         vb: &VarBuilder,
@@ -419,7 +309,6 @@ impl WeightLoader {
         vb.get(shape, &mapped_name)
     }
 
-    /// Load all tensors from a safetensors file into a HashMap
     pub fn load_all_tensors(&self, path: impl AsRef<Path>) -> Result<HashMap<String, Tensor>> {
         use candle_core::safetensors::load;
         let tensors = load(path, &self.device)?;
@@ -427,13 +316,6 @@ impl WeightLoader {
     }
 }
 
-// =============================================================================
-// Utility Functions
-// =============================================================================
-
-/// Helper to find all sharded safetensors files in a directory
-///
-/// Files are sorted alphabetically to ensure consistent ordering.
 pub fn find_sharded_files(dir: impl AsRef<Path>, prefix: &str) -> Result<Vec<PathBuf>> {
     use std::fs;
     let dir = dir.as_ref();
@@ -454,15 +336,6 @@ pub fn find_sharded_files(dir: impl AsRef<Path>, prefix: &str) -> Result<Vec<Pat
     Ok(files)
 }
 
-/// Load a JSON configuration file and deserialize it
-///
-/// # Example
-/// ```no_run
-/// use candle_video::loader::load_model_config;
-/// use candle_video::config::VaeConfig;
-///
-/// let config: VaeConfig = load_model_config("path/to/config.json").unwrap();
-/// ```
 pub fn load_model_config<T: DeserializeOwned>(
     path: impl AsRef<Path>,
 ) -> std::result::Result<T, LoaderError> {
@@ -478,20 +351,6 @@ pub fn load_model_config<T: DeserializeOwned>(
     })
 }
 
-/// Validate that all expected tensors are present in the loaded weights
-///
-/// Returns a list of missing tensor names.
-///
-/// # Example
-/// ```
-/// use candle_video::loader::validate_tensor_names;
-///
-/// let expected = vec!["weight1".to_string(), "weight2".to_string()];
-/// let actual = vec!["weight1"];
-///
-/// let missing = validate_tensor_names(&expected, &actual);
-/// assert_eq!(missing, vec!["weight2".to_string()]);
-/// ```
 pub fn validate_tensor_names(expected: &[String], actual: &[&str]) -> Vec<String> {
     let actual_set: HashSet<_> = actual.iter().cloned().collect();
 
@@ -502,9 +361,6 @@ pub fn validate_tensor_names(expected: &[String], actual: &[&str]) -> Vec<String
         .collect()
 }
 
-/// List all tensor names in a safetensors file
-///
-/// This is useful for debugging and validation.
 pub fn list_tensor_names(path: impl AsRef<Path>) -> std::result::Result<Vec<String>, LoaderError> {
     let path = path.as_ref();
     let data = std::fs::read(path).map_err(|e| LoaderError::FileRead {
@@ -522,7 +378,6 @@ pub fn list_tensor_names(path: impl AsRef<Path>) -> std::result::Result<Vec<Stri
     Ok(tensors.names().into_iter().map(|s| s.to_string()).collect())
 }
 
-/// Get tensor metadata (dtype, shape) without loading the actual data
 pub fn get_tensor_info(
     path: impl AsRef<Path>,
 ) -> std::result::Result<HashMap<String, TensorInfo>, LoaderError> {
@@ -555,18 +410,12 @@ pub fn get_tensor_info(
     Ok(info)
 }
 
-/// Information about a tensor (without the actual data)
 #[derive(Debug, Clone)]
 pub struct TensorInfo {
-    /// Data type as a string
     pub dtype: String,
-    /// Shape of the tensor
+
     pub shape: Vec<usize>,
 }
-
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -584,7 +433,7 @@ mod tests {
             .add_mapping("model.diffusion_model", "diffusion_model");
 
         assert_eq!(loader.map_name("model.diffusion_model"), "diffusion_model");
-        // Unmapped names should return as-is
+
         assert_eq!(loader.map_name("other.name"), "other.name");
     }
 
@@ -596,7 +445,7 @@ mod tests {
             loader.map_name("model.transformer.weight"),
             "transformer.weight"
         );
-        // Non-matching prefix
+
         assert_eq!(loader.map_name("other.weight"), "other.weight");
     }
 
@@ -614,7 +463,6 @@ mod tests {
             .add_prefix_mapping("model.", "")
             .add_suffix_mapping(".gamma", ".weight");
 
-        // Both rules should apply in sequence
         assert_eq!(
             loader.map_name("model.layer_norm.gamma"),
             "layer_norm.weight"

@@ -1,7 +1,3 @@
-//! Official LTX-Video configurations and presets.
-//! Based on official configs from tp/LTX-Video/configs/
-//! Supports versions 0.9.5+
-
 use crate::models::ltx_video::ltx_transformer::LtxVideoTransformer3DModelConfig;
 use crate::models::ltx_video::scheduler::FlowMatchEulerDiscreteSchedulerConfig;
 use crate::models::ltx_video::vae::AutoencoderKLLtxVideoConfig;
@@ -44,25 +40,18 @@ pub struct LTXVFullConfig {
     pub scheduler: FlowMatchEulerDiscreteSchedulerConfig,
 }
 
-/// Returns the full configuration for a given version string.
-/// Supports 0.9.5+ only.
 pub fn get_config_by_version(version: &str) -> LTXVFullConfig {
     match version {
-        // 0.9.5
         "0.9.5" | "0.9.5-2b" => presets::v0_9_5_2b(),
 
-        // 0.9.6
         "0.9.6-dev" | "0.9.6-2b-dev" => presets::v0_9_6_dev_2b(),
         "0.9.6-distilled" | "0.9.6-2b-distilled" => presets::v0_9_6_distilled_2b(),
 
-        // 0.9.8 2B
         "0.9.8-2b-distilled" | "0.9.8-distilled" => presets::v0_9_8_distilled_2b(),
 
-        // 0.9.8 13B
         "0.9.8-13b-dev" => presets::v0_9_8_dev_13b(),
         "0.9.8-13b-distilled" | "0.9.8-13b" => presets::v0_9_8_distilled_13b(),
 
-        // Default to 0.9.5
         _ => presets::v0_9_5_2b(),
     }
 }
@@ -72,15 +61,6 @@ use crate::models::ltx_video::scheduler::TimeShiftType;
 pub mod presets {
     use super::*;
 
-    /// Common VAE config for 0.9.5+
-    /// Based on OURS_VAE_CONFIG from diffusers_config_mapping.py:
-    /// - dims: 3
-    /// - latent_channels: 128
-    /// - blocks: [res_x(4), compress_all, res_x_y, res_x(3), compress_all, res_x_y, res_x(3), compress_all, res_x(3), res_x(4)]
-    /// - norm_layer: "pixel_norm"
-    /// - patch_size: 4
-    /// - latent_log_var: "uniform"
-    /// - causal_decoder: false
     fn common_vae_config() -> AutoencoderKLLtxVideoConfig {
         AutoencoderKLLtxVideoConfig {
             block_out_channels: vec![128, 256, 512, 1024, 2048],
@@ -92,19 +72,11 @@ pub mod presets {
         }
     }
 
-    /// Common scheduler config for 0.9.5+
-    /// Based on OURS_SCHEDULER_CONFIG:
-    /// - num_train_timesteps: 1000
-    /// - shifting: "SD3"
-    /// - target_shift_terminal: 0.1
     fn common_scheduler_config() -> FlowMatchEulerDiscreteSchedulerConfig {
-        // Official LTX-Video uses SD3 resolution-dependent shifting with target_shift_terminal=0.1
-        // For now we use a fixed shift approximation based on typical latent sizes
-        // TODO: Implement proper SD3 resolution-dependent shifting
         FlowMatchEulerDiscreteSchedulerConfig {
             num_train_timesteps: 1000,
             shift: 1.0,
-            use_dynamic_shifting: false, // LTX uses manual mu
+            use_dynamic_shifting: false,
             base_shift: Some(0.95),
             max_shift: Some(2.05),
             base_image_seq_len: Some(1024),
@@ -119,19 +91,6 @@ pub mod presets {
         }
     }
 
-    /// 2B transformer config (28 layers)
-    /// Based on OURS_TRANSFORMER_CONFIG from diffusers_config_mapping.py:
-    /// - num_layers: 28
-    /// - num_attention_heads: 32
-    /// - attention_head_dim: 64
-    /// - cross_attention_dim: 2048
-    /// - caption_channels: 4096
-    /// - in_channels/out_channels: 128
-    /// - qk_norm: "rms_norm"
-    /// - positional_embedding_type: "rope"
-    /// - positional_embedding_theta: 10000.0
-    /// - positional_embedding_max_pos: [20, 2048, 2048]
-    /// - timestep_scale_multiplier: 1000
     fn transformer_2b_config() -> LtxVideoTransformer3DModelConfig {
         LtxVideoTransformer3DModelConfig {
             num_layers: 28,
@@ -143,11 +102,6 @@ pub mod presets {
         }
     }
 
-    /// 13B transformer config (48 layers)
-    /// Larger model with:
-    /// - num_layers: 48
-    /// - attention_head_dim: 128
-    /// - cross_attention_dim: 4096
     fn transformer_13b_config() -> LtxVideoTransformer3DModelConfig {
         LtxVideoTransformer3DModelConfig {
             num_layers: 48,
@@ -159,7 +113,6 @@ pub mod presets {
         }
     }
 
-    /// ltxv-2b-0.9.5.yaml
     pub fn v0_9_5_2b() -> LTXVFullConfig {
         LTXVFullConfig {
             inference: LTXVInferenceConfig {
@@ -179,7 +132,6 @@ pub mod presets {
         }
     }
 
-    /// ltxv-2b-0.9.6-dev.yaml
     pub fn v0_9_6_dev_2b() -> LTXVFullConfig {
         LTXVFullConfig {
             inference: LTXVInferenceConfig {
@@ -199,7 +151,6 @@ pub mod presets {
         }
     }
 
-    /// ltxv-2b-0.9.6-distilled.yaml
     pub fn v0_9_6_distilled_2b() -> LTXVFullConfig {
         LTXVFullConfig {
             inference: LTXVInferenceConfig {
@@ -219,7 +170,6 @@ pub mod presets {
         }
     }
 
-    /// ltxv-2b-0.9.8-distilled.yaml (first_pass config)
     pub fn v0_9_8_distilled_2b() -> LTXVFullConfig {
         LTXVFullConfig {
             inference: LTXVInferenceConfig {
@@ -239,17 +189,15 @@ pub mod presets {
         }
     }
 
-    /// ltxv-13b-0.9.8-dev.yaml (first_pass config)
     pub fn v0_9_8_dev_13b() -> LTXVFullConfig {
         LTXVFullConfig {
             inference: LTXVInferenceConfig {
-                // Uses dynamic guidance, we use peak value
                 guidance_scale: 8.0,
                 num_inference_steps: 30,
                 stg_scale: 4.0,
                 rescaling_scale: 0.5,
                 stochastic_sampling: false,
-                // First skip_block_list from guidance schedule
+
                 skip_block_list: vec![11, 25, 35, 39],
                 timesteps: None,
                 decode_timestep: None,
@@ -261,7 +209,6 @@ pub mod presets {
         }
     }
 
-    /// ltxv-13b-0.9.8-distilled.yaml (first_pass config)
     pub fn v0_9_8_distilled_13b() -> LTXVFullConfig {
         LTXVFullConfig {
             inference: LTXVInferenceConfig {

@@ -12,5 +12,3 @@ pub use loader::*;
 pub use ltx_transformer::*;
 pub use scheduler::*;
 pub use vae::*;
-// No glob exports for text encoders to avoid T5EncoderConfig conflict
-// Users should access via module path: ltx_video::text_encoder::...

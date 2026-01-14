@@ -2,53 +2,18 @@ use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 
 pub use crate::interfaces::autoencoder::VideoAutoencoder;
 pub use crate::interfaces::conditioning::{Conditioning, TextConditioner};
+
+pub use crate::interfaces::flow_match_scheduler::{
+    Scheduler, SchedulerConfig, TimestepsSpec, calculate_shift, retrieve_timesteps,
+};
 use crate::interfaces::pipeline::{
-    apply_pipeline_io, DiffusionPipeline, PipelineInference, PipelineInput, PipelineOutput,
+    DiffusionPipeline, PipelineInference, PipelineInput, PipelineOutput, apply_pipeline_io,
 };
 use crate::interfaces::processor::{VideoInput, VideoOutput, VideoProcessor};
 pub use crate::interfaces::scheduler::VideoScheduler;
 pub use crate::interfaces::video_types::{VideoLatents, VideoLayout};
 
-#[derive(Debug, Clone)]
-pub struct SchedulerConfig {
-    pub base_image_seq_len: usize,
-    pub max_image_seq_len: usize,
-    pub base_shift: f32,
-    pub max_shift: f32,
-}
-
-impl Default for SchedulerConfig {
-    fn default() -> Self {
-        Self {
-            base_image_seq_len: 256,
-            max_image_seq_len: 4096,
-            base_shift: 0.5,
-            max_shift: 1.15,
-        }
-    }
-}
-
-pub enum TimestepsSpec {
-    Steps(usize),
-    Timesteps(Vec<i64>),
-    Sigmas(Vec<f32>),
-}
-
-pub trait Scheduler: VideoScheduler {
-    fn config(&self) -> &SchedulerConfig;
-    fn order(&self) -> usize;
-
-    /// Должен сохранить внутренний schedule и вернуть timesteps (в torch это scheduler.timesteps).
-    fn set_timesteps(&mut self, spec: TimestepsSpec, device: &Device, mu: f32) -> Result<Vec<i64>>;
-
-    /// x_t -> x_{t-1}
-    fn step(&mut self, noise_pred: &Tensor, timestep: i64, latents: &Tensor) -> Result<Tensor>;
-}
-
 pub trait Tokenizer {
-    /// Должен вернуть:
-    /// - input_ids: [B, L] (обычно i64)
-    /// - attention_mask: [B, L] (0/1)
     fn encode_batch(&self, prompts: &[String], max_length: usize) -> Result<(Tensor, Tensor)>;
 
     fn model_max_length(&self) -> usize;
@@ -57,7 +22,6 @@ pub trait Tokenizer {
 pub trait TextEncoder: TextConditioner {
     fn dtype(&self) -> DType;
 
-    /// Возвращает hidden states: [B, L, D]
     fn forward(&mut self, input_ids: &Tensor) -> Result<Tensor>;
 }
 
@@ -72,7 +36,6 @@ pub struct TransformerConfig {
 pub trait VideoTransformer3D {
     fn config(&self) -> &TransformerConfig;
 
-    /// Аналог transformer(...)[0] в python.
     #[allow(clippy::too_many_arguments)]
     fn forward(
         &mut self,
@@ -103,11 +66,9 @@ pub trait VaeLtxVideo: VideoAutoencoder {
     fn temporal_compression_ratio(&self) -> usize;
     fn config(&self) -> &VaeConfig;
 
-    /// latents_mean/std предполагаются shape [C]
     fn latents_mean(&self) -> &Tensor;
     fn latents_std(&self) -> &Tensor;
 
-    /// Декод: [B, C, F, H, W] -> видео (тензор)
     fn decode(&self, latents: &Tensor, timestep: Option<&Tensor>) -> Result<Tensor>;
 }
 
@@ -159,27 +120,12 @@ impl VideoProcessor for LtxVideoProcessor {
     }
 
     fn postprocess_video(&self, video: Tensor) -> Result<VideoOutput> {
-        // v is in [-1, 1] usually from VAE
-        // Postprocess: (v + 1.0) / 2.0 -> [0, 1]
         let video = video.affine(0.5, 0.5)?;
         let video = video.clamp(0.0f32, 1.0f32)?;
-        // scale to 0-255
+
         let video = video.affine(255.0, 0.0)?;
         Ok(VideoOutput::Tensor(video))
     }
-}
-
-// Copied from diffusers.pipelines.flux.pipeline_flux.calculate_shift
-pub fn calculate_shift(
-    image_seq_len: usize,
-    base_seq_len: usize,
-    max_seq_len: usize,
-    base_shift: f32,
-    max_shift: f32,
-) -> f32 {
-    let m = (max_shift - base_shift) / ((max_seq_len - base_seq_len) as f32);
-    let b = base_shift - m * (base_seq_len as f32);
-    (image_seq_len as f32) * m + b
 }
 
 fn linspace(start: f32, end: f32, steps: usize) -> Vec<f32> {
@@ -195,41 +141,14 @@ fn linspace(start: f32, end: f32, steps: usize) -> Vec<f32> {
         .collect()
 }
 
-pub fn retrieve_timesteps(
-    scheduler: &mut dyn Scheduler,
-    num_inference_steps: Option<usize>,
-    device: &Device,
-    timesteps: Option<Vec<i64>>,
-    sigmas: Option<Vec<f32>>,
-    mu: f32,
-) -> Result<(Vec<i64>, usize)> {
-    if timesteps.is_some() && sigmas.is_some() {
-        candle_core::bail!("Only one of `timesteps` or `sigmas` can be passed.");
-    }
-
-    let schedule = if let Some(ts) = timesteps {
-        Scheduler::set_timesteps(scheduler, TimestepsSpec::Timesteps(ts), device, mu)?
-    } else if let Some(s) = sigmas {
-        Scheduler::set_timesteps(scheduler, TimestepsSpec::Sigmas(s), device, mu)?
-    } else {
-        let steps = num_inference_steps.unwrap_or(50);
-        Scheduler::set_timesteps(scheduler, TimestepsSpec::Steps(steps), device, mu)?
-    };
-
-    let n = schedule.len();
-    Ok((schedule, n))
-}
-
 fn std_over_dims_except0_keepdim(x: &Tensor) -> Result<Tensor> {
-    // torch: x.std(dim=list(range(1, x.ndim)), keepdim=True)
-    // Здесь: flatten [B, ...] -> [B, N], var over dim=1 keepdim => [B,1], затем reshape -> [B,1,1,...]
     let rank = x.rank();
     if rank < 2 {
         candle_core::bail!("std_over_dims_except0_keepdim expects rank >= 2, got {rank}");
     }
     let b = x.dim(0)?;
     let flat = x.flatten_from(1)?;
-    let var = flat.var_keepdim(1)?; // unbiased variance
+    let var = flat.var_keepdim(1)?;
     let std = var.sqrt()?;
     let mut shape = Vec::with_capacity(rank);
     shape.push(b);
@@ -237,20 +156,17 @@ fn std_over_dims_except0_keepdim(x: &Tensor) -> Result<Tensor> {
     std.reshape(shape)
 }
 
-// Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.rescale_noise_cfg
 pub fn rescale_noise_cfg(
     noise_cfg: &Tensor,
     noise_pred_text: &Tensor,
     guidance_rescale: f32,
 ) -> Result<Tensor> {
-    // std_text/std_cfg keepdim across dims 1..N
     let std_text = std_over_dims_except0_keepdim(noise_pred_text)?;
     let std_cfg = std_over_dims_except0_keepdim(noise_cfg)?;
 
     let ratio = std_text.broadcast_div(&std_cfg)?;
     let noise_pred_rescaled = noise_cfg.broadcast_mul(&ratio)?;
 
-    // noise_cfg = guidance_rescale * noise_pred_rescaled + (1-guidance_rescale)*noise_cfg
     let a = noise_pred_rescaled.affine(guidance_rescale as f64, 0.0)?;
     let b = noise_cfg.affine((1.0 - guidance_rescale) as f64, 0.0)?;
     a.broadcast_add(&b)
@@ -271,7 +187,6 @@ pub struct LtxPipeline<'a> {
     pub transformer_spatial_patch_size: usize,
     pub transformer_temporal_patch_size: usize,
 
-    // runtime state (аналог properties в python)
     pub guidance_scale: f32,
     pub guidance_rescale: f32,
     pub stg_scale: f32,
@@ -410,7 +325,6 @@ impl<'a> LtxPipeline<'a> {
         let prompt_embeds = self.text_encoder.forward(&input_ids)?;
         let prompt_embeds = prompt_embeds.to_device(device)?.to_dtype(dtype)?;
 
-        // repeat(1, num_videos_per_prompt, 1) then view => [B*num_videos, L, D]
         let dims = prompt_embeds.dims();
         if dims.len() != 3 {
             candle_core::bail!("text_encoder output must be rank-3 [B,L,D], got {:?}", dims);
@@ -421,7 +335,6 @@ impl<'a> LtxPipeline<'a> {
         let pe = prompt_embeds.repeat((1usize, num_videos_per_prompt, 1usize))?;
         let pe = pe.reshape((batch_size * num_videos_per_prompt, seq_len, hidden))?;
 
-        // return raw [B, L] 0/1 mask
         let am = attention_mask.to_dtype(dtype)?.to_device(device)?;
         Ok((pe, am))
     }
@@ -505,7 +418,6 @@ impl<'a> LtxPipeline<'a> {
         patch_size: usize,
         patch_size_t: usize,
     ) -> Result<Tensor> {
-        // [B,C,F,H,W] -> [B, S, D]
         let dims = latents.dims();
         if dims.len() != 5 {
             candle_core::bail!("pack_latents expects [B,C,F,H,W], got {:?}", dims);
@@ -520,14 +432,13 @@ impl<'a> LtxPipeline<'a> {
         let h2 = h / patch_size;
         let w2 = w / patch_size;
 
-        // [B, C, F2, pt, H2, p, W2, p]
         let x = latents.reshape(vec![b, c, f2, patch_size_t, h2, patch_size, w2, patch_size])?;
-        // permute -> [B, F2, H2, W2, C, pt, p, p]
+
         let x = x.permute(vec![0, 2, 4, 6, 1, 3, 5, 7])?;
-        // flatten last 4 dims => [B, F2, H2, W2, D]
+
         let x = x.flatten_from(4)?;
         let d = x.dim(4)?;
-        // reshape [B, S, D], S=F2*H2*W2
+
         let s = f2 * h2 * w2;
         x.reshape((b, s, d))
     }
@@ -540,7 +451,6 @@ impl<'a> LtxPipeline<'a> {
         patch_size: usize,
         patch_size_t: usize,
     ) -> Result<Tensor> {
-        // [B,S,D] -> [B,C,F,H,W]
         let dims = latents.dims();
         if dims.len() != 3 {
             candle_core::bail!("unpack_latents expects [B,S,D], got {:?}", dims);
@@ -554,7 +464,6 @@ impl<'a> LtxPipeline<'a> {
         }
         let c = d / denom;
 
-        // [B, F2, H2, W2, C, pt, p, p]
         let x = latents.reshape(vec![
             b,
             num_frames,
@@ -565,9 +474,9 @@ impl<'a> LtxPipeline<'a> {
             patch_size,
             patch_size,
         ])?;
-        // [B, C, F2, pt, H2, p, W2, p]
+
         let x = x.permute(vec![0, 4, 1, 5, 2, 6, 3, 7])?.contiguous()?;
-        // merge last two p => W, merge H, merge F
+
         let x = x.reshape((
             b,
             c,
@@ -702,15 +611,6 @@ impl<'a> LtxPipeline<'a> {
             candle_core::bail!("guidance_scale must be >= 0");
         }
 
-        // Set skip blocks from presets (distilled models)
-        // Note: In some versions this list is vec![42] (2B distilled) or others.
-        // We get it from the calling side usually (t2v script or example),
-        // but here we ensure the transformer knows it.
-        // For now, we assume it's provided in the parameters or via a separate setter if needed.
-        // However, the trait-based architecture suggests we should pass it before or during call.
-        // We add it to the call logic if it's not already handled.
-
-        // batch_size
         let batch_size = match (&prompt, &prompt_embeds) {
             (Some(PromptInput::Single(_)), _) => 1usize,
             (Some(PromptInput::Batch(v)), _) => v.len(),
@@ -719,10 +619,6 @@ impl<'a> LtxPipeline<'a> {
         };
         let effective_batch = batch_size * num_videos_per_prompt;
 
-        // Apply skip blocks to transformer
-        // In LTXV, skip_block_list can be used for:
-        // 1. Permanent skipping (Distilled models): applied here if stg_scale is 0.
-        // 2. STG masking (Dev models): applied per-pass if stg_scale > 0.
         if let Some(ref list) = skip_block_list {
             if !self.do_spatio_temporal_guidance() {
                 self.transformer.set_skip_block_list(list.clone());
@@ -731,7 +627,6 @@ impl<'a> LtxPipeline<'a> {
             }
         }
 
-        // text embeddings
         let dtype = self.text_encoder.dtype();
         let prompt_in = prompt
             .clone()
@@ -743,7 +638,9 @@ impl<'a> LtxPipeline<'a> {
             && negative_prompt_attention_mask.is_none()
         {
             match (&prompt_in, negative_prompt.as_ref()) {
-                (PromptInput::Single(p), None) => PipelineInference::encode_prompt(self, p, None, device)?,
+                (PromptInput::Single(p), None) => {
+                    PipelineInference::encode_prompt(self, p, None, device)?
+                }
                 (PromptInput::Single(p), Some(PromptInput::Single(n))) => {
                     PipelineInference::encode_prompt(self, p, Some(n.as_str()), device)?
                 }
@@ -779,7 +676,6 @@ impl<'a> LtxPipeline<'a> {
             )?
         };
 
-        // Store individual embeds for sequential CFG
         let prompt_embeds_cond = p_emb.clone();
         let prompt_mask_cond = p_mask.clone();
         let prompt_embeds_uncond = n_emb.clone();
@@ -790,7 +686,6 @@ impl<'a> LtxPipeline<'a> {
             p_mask = Tensor::cat(&[n_mask, p_mask], 0)?;
         }
 
-        // latents
         let num_channels_latents = self.transformer.config().in_channels;
         let mut latents = if let Some(latents) = latents {
             self.prepare_latents(
@@ -823,14 +718,12 @@ impl<'a> LtxPipeline<'a> {
             )?
         };
 
-        // timesteps/sigmas/mu
         let latent_num_frames = (num_frames - 1) / self.vae_temporal_compression_ratio + 1;
         let latent_height = height / self.vae_spatial_compression_ratio;
         let latent_width = width / self.vae_spatial_compression_ratio;
 
         let video_sequence_length = latent_num_frames * latent_height * latent_width;
 
-        // Check if sigmas were provided before moving
         let has_custom_sigmas = sigmas_provided.is_some();
 
         let sigmas = if sigmas_provided.is_none() && timesteps.is_none() {
@@ -845,7 +738,7 @@ impl<'a> LtxPipeline<'a> {
 
         let scfg = self.scheduler.config().clone();
         let mu = if has_custom_sigmas {
-            0.0 // No additional shift for distilled timesteps
+            0.0
         } else {
             calculate_shift(
                 video_sequence_length,
@@ -882,7 +775,6 @@ impl<'a> LtxPipeline<'a> {
             .len()
             .saturating_sub(num_inference_steps * self.scheduler.order());
 
-        // 5. RoPE coordinates and scaling
         let ts_ratio = self.vae_temporal_compression_ratio as f32;
         let sp_ratio = self.vae_spatial_compression_ratio as f32;
 
@@ -907,7 +799,6 @@ impl<'a> LtxPipeline<'a> {
             latent_width,
         ))?;
 
-        // [3, F, H, W] -> flatten(1) -> [3, seq] -> transpose -> [seq, 3] -> [1, seq, 3]
         let video_coords = Tensor::stack(&[f, h, w], 0)?
             .flatten_from(1)?
             .transpose(0, 1)?
@@ -917,13 +808,11 @@ impl<'a> LtxPipeline<'a> {
         let vh = video_coords.i((.., .., 1))?;
         let vw = video_coords.i((.., .., 2))?;
 
-        // CAUSAL FIX: (L * 8 + 1 - 8).clamp(0) / frame_rate
         let vf = vf
             .affine(ts_ratio as f64, (1.0 - ts_ratio) as f64)?
             .clamp(0.0f32, 1000.0f32)?
             .affine(1.0 / (frame_rate as f64), 0.0)?;
 
-        // SPATIAL SCALE: L * 32
         let vh = vh.affine(sp_ratio as f64, 0.0)?;
         let vw = vw.affine(sp_ratio as f64, 0.0)?;
 
@@ -943,7 +832,6 @@ impl<'a> LtxPipeline<'a> {
         };
         let _video_coords_batch = Tensor::cat(&vec![video_coords.clone(); num_conds], 0)?;
 
-        // denoising loop
         for (i, &t) in ts.iter().enumerate() {
             if self.interrupt {
                 continue;
@@ -953,15 +841,12 @@ impl<'a> LtxPipeline<'a> {
 
             println!("Step {}/{}: t={}", i + 1, ts.len(), t);
 
-            // Guidance Logic (CFG and/or STG)
-            // We use Sequential CFG style to save memory, running passes one by one.
             let noise_pred =
                 if self.do_classifier_free_guidance() || self.do_spatio_temporal_guidance() {
                     let b = latents.dim(0)?;
                     let timestep_t = Tensor::full(t as f32, (b,), device)?;
                     let latents_input = latents.to_dtype(dtype)?;
 
-                    // 1. Unconditional pass (if CFG active)
                     let noise_uncond = if self.do_classifier_free_guidance() {
                         Some(self.transformer.forward(
                             &latents_input,
@@ -979,7 +864,6 @@ impl<'a> LtxPipeline<'a> {
                         None
                     };
 
-                    // 2. Conditional pass (Required for both CFG and STG)
                     let noise_text = self.transformer.forward(
                         &latents_input,
                         &prompt_embeds_cond,
@@ -993,16 +877,15 @@ impl<'a> LtxPipeline<'a> {
                         None,
                     )?;
 
-                    // 3. Perturbed pass (if STG active)
                     let noise_perturbed = if self.do_spatio_temporal_guidance() {
                         let num_layers = self.transformer.config().num_layers;
-                        // FIX: default=0 means apply all layers, 1=skip
+
                         let mut mask_data = vec![0.0f32; num_layers * b];
                         if let Some(ref layers_to_skip) = skip_block_list {
                             for &layer_idx in layers_to_skip {
                                 if layer_idx < num_layers {
                                     for batch_idx in 0..b {
-                                        mask_data[layer_idx * b + batch_idx] = 1.0; // 1 = skip
+                                        mask_data[layer_idx * b + batch_idx] = 1.0;
                                     }
                                 }
                             }
@@ -1025,7 +908,6 @@ impl<'a> LtxPipeline<'a> {
                         None
                     };
 
-                    // Mix results
                     let noise_text = noise_text.to_dtype(DType::F32)?;
                     let mut combined = noise_text.clone();
 
@@ -1050,7 +932,6 @@ impl<'a> LtxPipeline<'a> {
 
                     combined
                 } else {
-                    // No guidance: single forward pass
                     let b = latents.dim(0)?;
                     let timestep_t = Tensor::full(t as f32, (b,), device)?;
                     let latents_input = latents.to_dtype(p_emb.dtype())?;
@@ -1076,7 +957,6 @@ impl<'a> LtxPipeline<'a> {
             if i == ts.len() - 1
                 || ((i + 1) > num_warmup_steps && (i + 1) % self.scheduler.order() == 0)
             {
-                // progress_bar.update() — опущено
             }
         }
 
@@ -1084,7 +964,6 @@ impl<'a> LtxPipeline<'a> {
             return Ok(LtxPipelineOutput { frames: latents });
         }
 
-        // decode branch
         println!("  Decoding latents with VAE...");
         let mut latents = Self::unpack_latents(
             &latents,
@@ -1108,9 +987,6 @@ impl<'a> LtxPipeline<'a> {
         if !self.vae.config().timestep_conditioning {
             timestep_opt = None;
         } else {
-            // В оригинале decode_timestep/scale размножаются до batch_size (prompt batch),
-            // но на практике латенты имеют effective_batch = batch_size*num_videos_per_prompt.
-            // Здесь ожидаем decode_timestep длины 1 либо effective_batch.
             let dt = if decode_timestep.len() == 1 {
                 vec![decode_timestep[0]; effective_batch]
             } else {
@@ -1142,8 +1018,7 @@ impl<'a> LtxPipeline<'a> {
             let noise =
                 Tensor::randn(0f32, 1f32, latents.dims(), device)?.to_dtype(latents.dtype())?;
 
-            // latents = (1 - scale)*latents + scale*noise
-            let one_minus = scale.affine(-1.0, 1.0)?; // 1 - scale
+            let one_minus = scale.affine(-1.0, 1.0)?;
             let a = latents.broadcast_mul(&one_minus)?;
             let b = noise.broadcast_mul(&scale)?;
             latents = a.broadcast_add(&b)?;

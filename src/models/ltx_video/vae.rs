@@ -1,15 +1,3 @@
-// Rust 2024
-// Скомпилируется как crate (lib). Структура: один файл src/lib.rs.
-//
-// Реализовано:
-// - CausalConv3d через сумму Conv2d по временной оси (kt срезов веса)
-// - RMSNorm "channels-first" как permute -> rmsnorm(last-dim) -> permute back
-// - ResnetBlock3d, Down/Up blocks, Encoder3d, Decoder3d
-// - DiagonalGaussianDistribution (sample/mode)
-// - AutoencoderKLLTXVideo: encode/decode/forward + slicing + tiling + temporal tiling (API как в python)
-//
-// Примечание: gradient_checkpointing флаги сохранены как поля, но без checkpoint логики.
-
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 
@@ -17,18 +5,13 @@ use crate::interfaces::autoencoder::{AutoencoderError, VideoAutoencoder};
 use crate::interfaces::autoencoder_mixin::AutoencoderMixin;
 use crate::interfaces::video_types::VideoLatents;
 use crate::models::ltx_video::t2v_pipeline::{VaeConfig, VaeLtxVideo};
+use crate::ops::conv3d::{Conv3d, Conv3dConfig, PaddingMode};
 use candle_core::{DType, IndexOp, Module, Result, Tensor};
-use candle_nn::{
-    Activation, Conv2d, Conv2dConfig, LayerNorm, LayerNormConfig, Linear, RmsNorm, VarBuilder, ops,
-};
+use candle_nn::{Activation, LayerNorm, LayerNormConfig, Linear, RmsNorm, VarBuilder, ops};
 
 use serde::{Deserialize, Serialize};
 
-// ========== DEBUG MODULE ==========
-/// Set to true to enable verbose VAE debugging
 pub const DEBUG_VAE: bool = false;
-
-// ========== END DEBUG MODULE ==========
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -70,7 +53,6 @@ pub struct AutoencoderKLLtxVideoConfig {
 
 impl Default for AutoencoderKLLtxVideoConfig {
     fn default() -> Self {
-        // Values from official LTX-Video 0.9.5 VAE config.json
         Self {
             in_channels: 3,
             out_channels: 3,
@@ -115,7 +97,6 @@ pub struct AutoencoderKLOutput {
     pub latent_dist: DiagonalGaussianDistribution,
 }
 
-/// Аналог diffusers.models.vae.DiagonalGaussianDistribution.
 #[derive(Clone, Debug)]
 pub struct DiagonalGaussianDistribution {
     pub mean: Tensor,
@@ -124,7 +105,6 @@ pub struct DiagonalGaussianDistribution {
 
 impl DiagonalGaussianDistribution {
     pub fn new(moments: &Tensor) -> Result<Self> {
-        // moments: (B, 2*C, T, H, W) -> mean/logvar split по каналу.
         let (_b, ch2, _t, _h, _w) = moments.dims5()?;
         if ch2 % 2 != 0 {
             candle_core::bail!("moments channels must be even, got {}", ch2)
@@ -140,16 +120,14 @@ impl DiagonalGaussianDistribution {
     }
 
     pub fn sample(&self) -> Result<Tensor> {
-        // eps ~ N(0,1), z = mean + exp(0.5*logvar)*eps
         let eps = Tensor::randn(0f32, 1f32, self.mean.shape(), self.mean.device())?
             .to_dtype(self.mean.dtype())?;
         let std = (self.logvar.affine(0.5, 0.)?).exp()?;
-        self.mean.add(&std.mul(&eps)?) // mean + std*eps
+        self.mean.add(&std.mul(&eps)?)
     }
 }
 
 fn rmsnorm_channels_first(norm: &RmsNorm, x: &Tensor) -> Result<Tensor> {
-    // (B,C,T,H,W) -> (B,T,H,W,C) -> norm -> back
     x.permute((0, 2, 3, 4, 1))?
         .apply(norm)?
         .permute((0, 4, 1, 2, 3))
@@ -170,17 +148,13 @@ fn cat_dim(xs: &[Tensor], dim: usize) -> Result<Tensor> {
     Tensor::cat(&refs, dim)
 }
 
-/// Sinusoidal timestep embeddings (like Timesteps in diffusers)
-/// Parameters match PixArtAlphaCombinedTimestepSizeEmbeddings: flip_sin_to_cos=True, downscale_freq_shift=0
 fn get_timestep_embedding(timesteps: &Tensor, embedding_dim: usize) -> Result<Tensor> {
     let half_dim = embedding_dim / 2;
     let device = timesteps.device();
     let dtype = timesteps.dtype();
 
-    // Python: exponent = -math.log(max_period) * torch.arange(0, half_dim) / (half_dim - downscale_freq_shift)
-    // With downscale_freq_shift=0: exponent / half_dim (not half_dim - 1!)
     let max_period = 10000f64;
-    let downscale_freq_shift = 0.0; // PixArtAlphaCombinedTimestepSizeEmbeddings uses 0
+    let downscale_freq_shift = 0.0;
 
     let exponent_coef = -(max_period.ln()) / (half_dim as f64 - downscale_freq_shift);
     let emb = (Tensor::arange(0u32, half_dim as u32, device)?
@@ -188,19 +162,15 @@ fn get_timestep_embedding(timesteps: &Tensor, embedding_dim: usize) -> Result<Te
         .affine(exponent_coef, 0.0))?
     .exp()?;
 
-    // timesteps: (B,) -> (B, 1) * emb -> (B, half_dim)
     let timesteps_f = timesteps.to_dtype(DType::F32)?.unsqueeze(1)?;
     let emb = timesteps_f.broadcast_mul(&emb.unsqueeze(0)?)?;
 
-    // Python: [sin, cos] then flip -> [cos, sin] if flip_sin_to_cos=True
-    // PixArtAlphaCombinedTimestepSizeEmbeddings uses flip_sin_to_cos=True
     let sin_emb = emb.sin()?;
     let cos_emb = emb.cos()?;
-    // flip_sin_to_cos=True means [cos, sin] order
+
     Tensor::cat(&[&cos_emb, &sin_emb], 1)?.to_dtype(dtype)
 }
 
-/// TimestepEmbedder: MLP that embeds timesteps (like TimestepEmbedding in diffusers)
 #[derive(Debug, Clone)]
 pub struct TimestepEmbedder {
     linear_1: Linear,
@@ -215,7 +185,6 @@ impl TimestepEmbedder {
     }
 
     pub fn forward(&self, t: &Tensor) -> Result<Tensor> {
-        // Debug: print weight info
         if DEBUG_VAE && let Ok(w) = self.linear_1.weight().flatten_all()?.to_vec1::<f32>() {
             println!(
                 "[DEBUG] TimestepEmbedder linear_1 weight first 5: {:?}",
@@ -234,7 +203,6 @@ impl TimestepEmbedder {
     }
 }
 
-/// Combined timestep embedder (like PixArtAlphaCombinedTimestepSizeEmbeddings)
 #[derive(Debug, Clone)]
 pub struct CombinedTimestepEmbedder {
     timestep_embedder: TimestepEmbedder,
@@ -248,7 +216,6 @@ impl CombinedTimestepEmbedder {
     }
 
     pub fn forward(&self, timestep: &Tensor, hidden_dtype: DType) -> Result<Tensor> {
-        // timestep -> sinusoidal -> MLP
         let timesteps_proj = get_timestep_embedding(timestep, 256)?;
 
         if DEBUG_VAE && let Ok(vals) = timesteps_proj.flatten_all()?.to_vec1::<f32>() {
@@ -267,213 +234,50 @@ impl CombinedTimestepEmbedder {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Conv3dLikeConfig {
-    pub stride_t: usize,
-    pub stride_h: usize,
-    pub stride_w: usize,
-    pub dil_t: usize,
-    pub dil_h: usize,
-    pub dil_w: usize,
-    pub groups: usize,
-    pub padding_mode_zeros: bool,
-    pub is_causal: bool,
+pub type LtxVideoCausalConv3d = Conv3d;
+
+pub fn create_ltx_causal_conv3d(
+    in_channels: usize,
+    out_channels: usize,
+    kernel: (usize, usize, usize),
+    stride: (usize, usize, usize),
+    dilation: (usize, usize, usize),
+    groups: usize,
+    is_causal: bool,
+    vb: VarBuilder,
+) -> Result<Conv3d> {
+    let (kt, kh, kw) = kernel;
+    let (_st, _sh, _sw) = stride;
+    let (_dt, _dh, _dw) = dilation;
+
+    let ph = kh / 2;
+    let pw = kw / 2;
+
+    let config = if is_causal {
+        Conv3dConfig::causal(kernel)
+            .with_stride(stride)
+            .with_padding((0, ph, pw))
+            .with_dilation(dilation)
+            .with_groups(groups)
+    } else {
+        let pt = (kt - 1) / 2;
+        Conv3dConfig::new(kernel)
+            .with_stride(stride)
+            .with_padding((pt, ph, pw))
+            .with_dilation(dilation)
+            .with_groups(groups)
+            .with_padding_mode(PaddingMode::Replicate)
+    };
+
+    Conv3d::new_with_conv_submodule(in_channels, out_channels, config, vb)
 }
 
-impl Default for Conv3dLikeConfig {
-    fn default() -> Self {
-        Self {
-            stride_t: 1,
-            stride_h: 1,
-            stride_w: 1,
-            dil_t: 1,
-            dil_h: 1,
-            dil_w: 1,
-            groups: 1,
-            padding_mode_zeros: true,
-            is_causal: true,
-        }
-    }
-}
-
-/// Эквивалент LTXVideoCausalConv3d из python, но реализованный через kt Conv2d по времени.
-#[derive(Debug, Clone)]
-pub struct LtxVideoCausalConv3d {
-    kt: usize,
-    pub _kh: usize,
-    pub _kw: usize,
-    cfg: Conv3dLikeConfig,
-    conv2d_slices: Vec<Conv2d>, // длина kt
-    bias: Option<Tensor>,       // (out_channels)
-}
-
-impl LtxVideoCausalConv3d {
-    pub fn new(
-        in_channels: usize,
-        out_channels: usize,
-        kernel: (usize, usize, usize),
-        stride: (usize, usize, usize),
-        dilation: (usize, usize, usize),
-        groups: usize,
-        is_causal: bool,
-        vb: VarBuilder,
-    ) -> Result<Self> {
-        let (kt, kh, kw) = kernel;
-        let (st, sh, sw) = stride;
-        let (dt, dh, dw) = dilation;
-
-        // In diffusers, LtxVideoCausalConv3d has an inner `conv` module
-        let conv_vb = vb.pp("conv");
-        // вес как у conv3d: (out, in/groups, kt, kh, kw)
-        let w = conv_vb.get((out_channels, in_channels / groups, kt, kh, kw), "weight")?;
-
-        // Wait. Python Conv3d default bias=True.
-        // Are there cases where bias is disabled?
-        // LTX uses LayerNorm/RMSNorm. Sometimes Conv bias is removed.
-        // But Diffusers code initialized Conv3d with defaults (bias=True).
-        // Exceptions?
-        // Code snippet 4772 line 66: padding_mode passed. bias NOT passed (so True).
-        // So ALL CausalConv3d layers MUST have bias.
-        // So I should remove .ok().
-        let b = conv_vb.get(out_channels, "bias")?;
-
-        let hpad = kh / 2;
-        let _wpad = kw / 2;
-
-        let mut conv2d_slices = Vec::with_capacity(kt);
-        for ti in 0..kt {
-            let w2 = w.i((.., .., ti, .., ..))?.contiguous()?;
-            let c2cfg = Conv2dConfig {
-                padding: hpad,
-                stride: sh,
-                dilation: dh,
-                groups,
-                ..Default::default()
-            };
-            // bias добавим один раз после суммы.
-            conv2d_slices.push(Conv2d::new(w2, None, c2cfg));
-        }
-
-        Ok(Self {
-            kt,
-            _kh: kh,
-            _kw: kw,
-            cfg: Conv3dLikeConfig {
-                stride_t: st,
-                stride_h: sh,
-                stride_w: sw,
-                dil_t: dt,
-                dil_h: dh,
-                dil_w: dw,
-                groups,
-                padding_mode_zeros: true,
-                is_causal,
-            },
-            conv2d_slices,
-            bias: Some(b),
-        })
-    }
-
-    fn pad_time_replicate(&self, x: &Tensor) -> Result<Tensor> {
-        // x: (B,C,T,H,W)
-        let (_, _, t, _, _) = x.dims5()?;
-        let kt = self.kt;
-
-        if kt <= 1 {
-            return Ok(x.clone());
-        }
-
-        if self.cfg.is_causal {
-            let left = kt - 1;
-            let first = x.i((.., .., 0, .., ..))?.unsqueeze(2)?;
-            let pad_left = first.repeat((1, 1, left, 1, 1))?;
-            cat_dim(&[pad_left, x.clone()], 2)
-        } else {
-            let left = (kt - 1) / 2;
-            let right = (kt - 1) / 2;
-
-            let first = x.i((.., .., 0, .., ..))?.unsqueeze(2)?;
-            let last = x.i((.., .., t - 1, .., ..))?.unsqueeze(2)?;
-
-            let pad_left = if left == 0 {
-                None
-            } else {
-                Some(first.repeat((1, 1, left, 1, 1))?)
-            };
-            let pad_right = if right == 0 {
-                None
-            } else {
-                Some(last.repeat((1, 1, right, 1, 1))?)
-            };
-
-            match (pad_left, pad_right) {
-                (None, None) => Ok(x.clone()),
-                (Some(pl), None) => cat_dim(&[pl, x.clone()], 2),
-                (None, Some(pr)) => cat_dim(&[x.clone(), pr], 2),
-                (Some(pl), Some(pr)) => cat_dim(&[pl, x.clone(), pr], 2),
-            }
-        }
-    }
-
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Реализация свертки по времени: y[t_out] = sum_k Conv2d(x[t_in + k*dil_t])
-        // с temporal padding replicate и temporal stride.
-        let x = self.pad_time_replicate(x)?;
-        let (_b, _c, t_pad, _h, _w) = x.dims5()?;
-
-        let kt = self.kt;
-        let dt = self.cfg.dil_t;
-        let st = self.cfg.stride_t;
-
-        // t_out: сколько можно сдвигов без выхода за границу.
-        let needed = (kt - 1) * dt + 1;
-        if t_pad < needed {
-            candle_core::bail!(
-                "time dim too small after padding: t_pad={}, needed={}",
-                t_pad,
-                needed
-            )
-        }
-        let t_out = (t_pad - needed) / st + 1;
-
-        let mut ys: Vec<Tensor> = Vec::with_capacity(t_out);
-
-        for to in 0..t_out {
-            let base_t = to * st;
-
-            let mut acc: Option<Tensor> = None;
-            for ki in 0..kt {
-                let ti = base_t + ki * dt;
-                let xt = x.i((.., .., ti, .., ..))?; // (B,C,H,W)
-                let yt = xt.apply(&self.conv2d_slices[ki])?; // (B,Out,H',W')
-                acc = Some(match acc {
-                    None => yt,
-                    Some(prev) => prev.add(&yt)?,
-                });
-            }
-
-            let yt = acc.expect("kt>=1 so acc is Some");
-            ys.push(yt.unsqueeze(2)?); // (B,Out,1,H',W')
-        }
-
-        let y = cat_dim(&ys, 2)?; // (B,Out,T_out,H',W')
-
-        if let Some(bias) = &self.bias {
-            let bias = bias.reshape((1, bias.dims1()?, 1, 1, 1))?;
-            y.broadcast_add(&bias)
-        } else {
-            Ok(y)
-        }
-    }
-}
-
-/// Downsample type for LTX-Video 0.9.5 VAE
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DownsampleType {
-    Conv,           // stride (2,2,2) direct conv
-    Spatial,        // stride (1,2,2) pixel unshuffle
-    Temporal,       // stride (2,1,1) pixel unshuffle
-    Spatiotemporal, // stride (2,2,2) pixel unshuffle
+    Conv,
+    Spatial,
+    Temporal,
+    Spatiotemporal,
 }
 
 impl DownsampleType {
@@ -496,12 +300,11 @@ impl DownsampleType {
     }
 }
 
-/// Pixel unshuffle downsampler for LTX-Video 0.9.5
 #[derive(Debug, Clone)]
 pub struct LtxVideoDownsampler3d {
     stride: (usize, usize, usize),
     group_size: usize,
-    conv: LtxVideoCausalConv3d,
+    conv: Conv3d,
 }
 
 impl LtxVideoDownsampler3d {
@@ -516,7 +319,7 @@ impl LtxVideoDownsampler3d {
         let group_size = (in_channels * st * sh * sw) / out_channels;
         let conv_out_channels = out_channels / (st * sh * sw);
 
-        let conv = LtxVideoCausalConv3d::new(
+        let conv = create_ltx_causal_conv3d(
             in_channels,
             conv_out_channels,
             (3, 3, 3),
@@ -538,7 +341,6 @@ impl LtxVideoDownsampler3d {
         let (st, sh, sw) = self.stride;
         let (b, c, _t, _h, _w) = x.dims5()?;
 
-        // Pad temporal dimension: cat(x[:,:,:st-1], x, dim=2)
         let padded = if st > 1 {
             let pad_slice = x.i((.., .., ..(st - 1), .., ..))?;
             Tensor::cat(&[&pad_slice, x], 2)?
@@ -547,19 +349,15 @@ impl LtxVideoDownsampler3d {
         };
         let (_, _, t_pad, h_pad, w_pad) = padded.dims5()?;
 
-        // Compute new dimensions after pixel unshuffle
         let t_new = t_pad / st;
         let h_new = h_pad / sh;
         let w_new = w_pad / sw;
 
-        // === Residual path: pixel unshuffle + mean ===
-        // Shape: (B, C, T, H, W) -> (B, C, T', st, H', sh, W', sw)
         let residual = padded
             .reshape(&[b, c, t_new, st, h_new, sh, w_new, sw])?
-            .permute(vec![0, 1, 3, 5, 7, 2, 4, 6])? // (B, C, st, sh, sw, T', H', W')
+            .permute(vec![0, 1, 3, 5, 7, 2, 4, 6])?
             .reshape((b, c * st * sh * sw, t_new, h_new, w_new))?;
 
-        // Group and average: unflatten(1, (-1, group_size)).mean(dim=2)
         let residual = residual
             .reshape(&[
                 b,
@@ -571,7 +369,6 @@ impl LtxVideoDownsampler3d {
             ])?
             .mean(2)?;
 
-        // === Conv path: same pixel unshuffle ===
         let conv_out = self.conv.forward(&padded)?;
         let (_, c_conv, _, _, _) = conv_out.dims5()?;
 
@@ -587,21 +384,18 @@ impl LtxVideoDownsampler3d {
 #[derive(Debug, Clone)]
 pub struct LtxVideoResnetBlock3d {
     norm1: Option<RmsNorm>,
-    conv1: LtxVideoCausalConv3d,
+    conv1: Conv3d,
     norm2: Option<RmsNorm>,
     _dropout: f64,
-    conv2: LtxVideoCausalConv3d,
+    conv2: Conv3d,
 
-    // shortcut при смене каналов
     norm3: Option<LayerNorm>,
-    conv_shortcut: Option<LtxVideoCausalConv3d>,
+    conv_shortcut: Option<Conv3d>,
 
-    // noise injection
-    per_channel_scale1: Option<Tensor>, // (C,1,1)
+    per_channel_scale1: Option<Tensor>,
     per_channel_scale2: Option<Tensor>,
 
-    // timestep conditioning
-    scale_shift_table: Option<Tensor>, // (4, C)
+    scale_shift_table: Option<Tensor>,
 }
 
 impl LtxVideoResnetBlock3d {
@@ -616,8 +410,6 @@ impl LtxVideoResnetBlock3d {
         timestep_conditioning: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
-        // LTX-Video resnet blocks may not have norm layers - make them optional
-        // Helper to load RmsNorm or fallback to default (ones) if affine is false or loading fails
         let load_norm = |name: &str, size: usize| -> Result<RmsNorm> {
             if elementwise_affine {
                 let norm_res = candle_nn::rms_norm(size, 1e-8, vb.pp(name));
@@ -625,13 +417,13 @@ impl LtxVideoResnetBlock3d {
                     return Ok(norm);
                 }
             }
-            // Fallback: create RmsNorm with ones (representing no affine scaling)
+
             let ones = Tensor::ones((size,), vb.dtype(), vb.device())?;
             Ok(RmsNorm::new(ones, 1e-8))
         };
 
         let norm1 = Some(load_norm("norm1", in_channels)?);
-        let conv1 = LtxVideoCausalConv3d::new(
+        let conv1 = create_ltx_causal_conv3d(
             in_channels,
             out_channels,
             (3, 3, 3),
@@ -643,7 +435,7 @@ impl LtxVideoResnetBlock3d {
         )?;
 
         let norm2 = Some(load_norm("norm2", out_channels)?);
-        let conv2 = LtxVideoCausalConv3d::new(
+        let conv2 = create_ltx_causal_conv3d(
             out_channels,
             out_channels,
             (3, 3, 3),
@@ -661,7 +453,7 @@ impl LtxVideoResnetBlock3d {
                 ..Default::default()
             };
             let norm3 = candle_nn::layer_norm(in_channels, lncfg, vb.pp("norm3")).ok();
-            let conv_shortcut = LtxVideoCausalConv3d::new(
+            let conv_shortcut = create_ltx_causal_conv3d(
                 in_channels,
                 out_channels,
                 (1, 1, 1),
@@ -715,7 +507,7 @@ impl LtxVideoResnetBlock3d {
         &self,
         x: Tensor,
         temb: Option<&Tensor>,
-        stage: usize, // 0: (shift1,scale1), 1: (shift2,scale2)
+        stage: usize,
     ) -> Result<Tensor> {
         let Some(tbl) = &self.scale_shift_table else {
             return Ok(x);
@@ -724,7 +516,6 @@ impl LtxVideoResnetBlock3d {
             return Ok(x);
         };
 
-        // temb: (B, 4*C, 1, 1, 1) -> unflatten dim1 to (B, 4, C, 1, 1, 1)
         let (b, temb_dim, _, _, _) = temb.dims5()?;
         let c = tbl.dims2()?.1;
         if temb_dim != 4 * c {
@@ -734,9 +525,9 @@ impl LtxVideoResnetBlock3d {
             .reshape((b, 4, c, 1, 1, 1))?
             .broadcast_add(&tbl.unsqueeze(0)?.unsqueeze(3)?.unsqueeze(4)?.unsqueeze(5)?)?;
 
-        let shift = temb.i((.., stage * 2, .., .., .., ..))?; // (B,C,1,1,1)
+        let shift = temb.i((.., stage * 2, .., .., .., ..))?;
         let scale = temb.i((.., stage * 2 + 1, .., .., .., ..))?;
-        // x * (1 + scale) + shift
+
         x.broadcast_mul(&scale.affine(1.0, 1.0)?)?
             .broadcast_add(&shift)
     }
@@ -745,12 +536,12 @@ impl LtxVideoResnetBlock3d {
         let Some(scale) = pcs else {
             return Ok(x);
         };
-        // spatialshape = (H,W) как в python-коде.
+
         let (_b, _c, _t, h, w) = x.dims5()?;
         let noise = Tensor::randn(0f32, 1f32, (h, w), x.device())?.to_dtype(x.dtype())?;
-        // (H,W) -> (1,1,1,H,W)
+
         let noise = noise.unsqueeze(0)?.unsqueeze(0)?.unsqueeze(0)?;
-        // scale: (C,1,1) -> (1,C,1,1,1)
+
         let scale = scale.unsqueeze(0)?.unsqueeze(2)?;
         x.add(&(noise.broadcast_mul(&scale)?))
     }
@@ -758,12 +549,10 @@ impl LtxVideoResnetBlock3d {
     pub fn forward(&self, inputs: &Tensor, temb: Option<&Tensor>, _train: bool) -> Result<Tensor> {
         let mut h = inputs.clone();
 
-        // Only apply norm if it exists
         if let Some(ref norm1) = self.norm1 {
             h = rmsnorm_channels_first(norm1, &h)?;
         }
 
-        // DEBUG: Check if scale_shift_table exists
         let has_sst = self.scale_shift_table.is_some();
         let has_temb = temb.is_some();
 
@@ -801,13 +590,7 @@ impl LtxVideoResnetBlock3d {
         }
         h = silu(&h)?;
 
-        // dropout unused in inference
-
         h = self.conv2.forward(&h)?;
-
-        // if let Ok(vals) = h.flatten_all()?.to_vec1::<f32>() {
-        //      println!("[DEBUG] Resnet output conv2 mean: {:.4}", vals.iter().sum::<f32>() / vals.len() as f32);
-        // }
 
         h = self.maybe_inject_noise(h, &self.per_channel_scale2)?;
 
@@ -824,10 +607,9 @@ impl LtxVideoResnetBlock3d {
     }
 }
 
-/// Wrapper for different downsampler types
 #[derive(Debug, Clone)]
 pub enum Downsampler {
-    Conv(LtxVideoCausalConv3d),
+    Conv(Conv3d),
     PixelUnshuffle(LtxVideoDownsampler3d),
 }
 
@@ -877,21 +659,17 @@ impl LtxVideoDownBlock3d {
 
         let downsamplers = if spatiotemporal_scale {
             let ds = match downsample_type {
-                DownsampleType::Conv => {
-                    // Direct stride conv
-                    Downsampler::Conv(LtxVideoCausalConv3d::new(
-                        in_channels,
-                        in_channels,
-                        (3, 3, 3),
-                        (2, 2, 2),
-                        (1, 1, 1),
-                        1,
-                        is_causal,
-                        vb.pp("downsamplers.0").pp("conv"),
-                    )?)
-                }
+                DownsampleType::Conv => Downsampler::Conv(create_ltx_causal_conv3d(
+                    in_channels,
+                    in_channels,
+                    (3, 3, 3),
+                    (2, 2, 2),
+                    (1, 1, 1),
+                    1,
+                    is_causal,
+                    vb.pp("downsamplers.0").pp("conv"),
+                )?),
                 _ => {
-                    // Pixel unshuffle types (spatial/temporal/spatiotemporal)
                     let stride = downsample_type.stride();
                     Downsampler::PixelUnshuffle(LtxVideoDownsampler3d::new(
                         in_channels,
@@ -907,7 +685,6 @@ impl LtxVideoDownBlock3d {
             None
         };
 
-        // conv_out only needed for channel change in some configs
         let conv_out = if in_channels != out_channels && downsample_type == DownsampleType::Conv {
             LtxVideoResnetBlock3d::new(
                 in_channels,
@@ -984,7 +761,6 @@ impl LtxVideoMidBlock3d {
         }
 
         let time_embedder = if timestep_conditioning {
-            // Block channels * 4 for scale_shift_table compatibility
             let emb_dim = in_channels * 4;
             CombinedTimestepEmbedder::new(emb_dim, vb.pp("time_embedder")).ok()
         } else {
@@ -1001,12 +777,11 @@ impl LtxVideoMidBlock3d {
     pub fn forward(&self, x: &Tensor, temb: Option<&Tensor>, train: bool) -> Result<Tensor> {
         let mut h = x.clone();
 
-        // Apply time embedding if present
         let temb_proj = if let (Some(te), Some(t)) = (&self.time_embedder, temb) {
             if DEBUG_VAE && let Ok(vals) = t.flatten_all()?.to_vec1::<f32>() {
                 println!("[DEBUG] mid_block time_embedder input (temb): {:?}", vals);
             }
-            // Python: temb = temb.view(hidden_states.size(0), -1, 1, 1, 1)
+
             let emb = te.forward(t, h.dtype())?;
             if DEBUG_VAE && let Ok(vals) = emb.flatten_all()?.to_vec1::<f32>() {
                 println!(
@@ -1045,7 +820,7 @@ pub struct LtxVideoUpsampler3d {
     residual: bool,
 
     channel_repeats: usize,
-    conv: LtxVideoCausalConv3d,
+    conv: Conv3d,
 }
 
 impl LtxVideoUpsampler3d {
@@ -1060,17 +835,12 @@ impl LtxVideoUpsampler3d {
     ) -> Result<Self> {
         let (st, sh, sw) = stride;
         let stride_product = st * sh * sw;
-        // Conv output needs to be such that after shuffle we get out_channels.
-        // Shuffle reduces channels by stride_product.
-        // So conv_out = out_channels * stride_product.
+
         let conv_out_channels = out_channels * stride_product;
-        // For residual: must match main path channels after shuffle
-        // main_channels = conv_out_channels / stride_product = out_channels
-        // residual_channels = in_channels / stride_product
-        // channel_repeats = main_channels / residual_channels = (out_channels * stride_product / in_channels)
+
         let channel_repeats = conv_out_channels / in_channels;
 
-        let conv = LtxVideoCausalConv3d::new(
+        let conv = create_ltx_causal_conv3d(
             in_channels,
             conv_out_channels,
             (3, 3, 3),
@@ -1091,7 +861,6 @@ impl LtxVideoUpsampler3d {
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Python: permute(0, 1, 5, 2, 6, 3, 7, 4).flatten(6, 7).flatten(4, 5).flatten(2, 3)
         let (b, _c, t, h, w) = x.dims5()?;
         let st = self.stride_t;
         let sh = self.stride_h;
@@ -1105,24 +874,22 @@ impl LtxVideoUpsampler3d {
             let cprime = x.dims5()?.1;
             let c_out = cprime / (st * sh * sw);
 
-            // reshape to [B, C', st, sh, sw, T, H, W]
             let x2 = x.reshape(&[b, c_out, st, sh, sw, t, h, w])?;
-            // permute(0, 1, 5, 2, 6, 3, 7, 4) -> [B, C', T, st, H, sh, W, sw]
+
             let x2 = x2.permute(vec![0, 1, 5, 2, 6, 3, 7, 4])?.contiguous()?;
-            // flatten(6, 7) -> [B, C', T, st, H, sh, W*sw]
+
             let x2 = x2.reshape(&[b, c_out, t, st, h, sh, w * sw])?;
-            // flatten(4, 5) -> [B, C', T, st, H*sh, W*sw]
+
             let x2 = x2.reshape(&[b, c_out, t, st, h * sh, w * sw])?;
-            // flatten(2, 3) -> [B, C', T*st, H*sh, W*sw]
+
             let x2 = x2.reshape(&[b, c_out, t * st, h * sh, w * sw])?;
 
-            // repeat channels if needed
             let x2 = if self.channel_repeats > 1 {
                 x2.repeat((1, self.channel_repeats, 1, 1, 1))?
             } else {
                 x2
             };
-            // slice: [:, :, st-1:]
+
             let x2 = x2.i((.., .., (st - 1).., .., ..))?;
             Some(x2)
         } else {
@@ -1141,26 +908,22 @@ impl LtxVideoUpsampler3d {
             println!("[DEBUG] c_out (C' after shuffle): {}", c_out);
         }
 
-        // reshape to [B, C', st, sh, sw, T, H, W]
         let h1 = h0.reshape(&[b, c_out, st, sh, sw, t2, h2, w2])?;
         if DEBUG_VAE {
             println!("[DEBUG] after reshape: {:?}", h1.dims());
         }
 
-        // permute(0, 1, 5, 2, 6, 3, 7, 4) -> [B, C', T, st, H, sh, W, sw]
         let h1 = h1.permute(vec![0, 1, 5, 2, 6, 3, 7, 4])?.contiguous()?;
         if DEBUG_VAE {
             println!("[DEBUG] after permute: {:?}", h1.dims());
         }
 
-        // flatten(6, 7) -> [B, C', T, st, H, sh, W*sw]
         let h1 = h1.reshape(&[b, c_out, t2, st, h2, sh, w2 * sw])?;
-        // flatten(4, 5) -> [B, C', T, st, H*sh, W*sw]
+
         let h1 = h1.reshape(&[b, c_out, t2, st, h2 * sh, w2 * sw])?;
-        // flatten(2, 3) -> [B, C', T*st, H*sh, W*sw]
+
         let h1 = h1.reshape(&[b, c_out, t2 * st, h2 * sh, w2 * sw])?;
 
-        // slice: [:, :, st-1:]
         let h1 = h1.i((.., .., (st - 1).., .., ..))?;
 
         let h1 = if let Some(r) = residual {
@@ -1196,7 +959,6 @@ impl LtxVideoUpBlock3d {
         up_scale_factor: usize,
         vb: VarBuilder,
     ) -> Result<Self> {
-        // conv_in may not exist in some VAE configs (e.g. official 0.9.5)
         let conv_in = if in_channels != out_channels {
             Some(LtxVideoResnetBlock3d::new(
                 in_channels,
@@ -1224,7 +986,6 @@ impl LtxVideoUpBlock3d {
                 vb.pp("upsamplers.0"),
             )?])
         } else {
-            // Spatial only fallback
             Some(vec![LtxVideoUpsampler3d::new(
                 out_channels * up_scale_factor,
                 out_channels,
@@ -1238,11 +999,6 @@ impl LtxVideoUpBlock3d {
 
         let mut resnets = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
-            // If upsampler exists (which is always true in default config/logic above), it changes channels to out_channels.
-            // If explicit None case handled later, logic changes.
-            // Assuming upsamplers always exist for now (based on diffusers 'if i > 0' and reversed decoder logic starting at block 2).
-            // But wait, what if `spatiotemporal_scale` logic creates None? NO, I removed the `else { None }` block above and added spatial fallback.
-            // So upsampler ALWAYS outputs `out_channels`.
             let in_c = out_channels;
             resnets.push(LtxVideoResnetBlock3d::new(
                 in_c,
@@ -1258,7 +1014,6 @@ impl LtxVideoUpBlock3d {
         }
 
         let time_embedder = if timestep_conditioning {
-            // Block channels * 4 for scale_shift_table compatibility
             let emb_dim = out_channels * 4;
             CombinedTimestepEmbedder::new(emb_dim, vb.pp("time_embedder")).ok()
         } else {
@@ -1277,20 +1032,10 @@ impl LtxVideoUpBlock3d {
     pub fn forward(&self, x: &Tensor, temb: Option<&Tensor>, train: bool) -> Result<Tensor> {
         let mut h = x.clone();
 
-        // Python order:
-        // 1. conv_in with RAW temb (if exists)
-        // 2. time_embedder to get temb_proj
-        // 3. upsamplers
-        // 4. resnets with temb_proj
-
-        // 1. conv_in uses RAW temb (before time_embedder transformation)
-        //    Note: conv_in's internal scale_shift_table expects 4*C dimensional temb
-        //    But the raw temb passed from decoder is just a scalar, so conv_in won't apply scale_shift
         if let Some(ci) = &self.conv_in {
-            h = ci.forward(&h, None, train)?; // conv_in doesn't use temb in 0.9.5
+            h = ci.forward(&h, None, train)?;
         }
 
-        // 2. Apply time_embedder AFTER conv_in (matches Python order)
         let temb_proj = if let (Some(te), Some(t)) = (&self.time_embedder, temb) {
             let emb = te.forward(t, h.dtype())?;
             let batch_size = h.dims5()?.0;
@@ -1300,14 +1045,12 @@ impl LtxVideoUpBlock3d {
             None
         };
 
-        // 3. upsamplers
         if let Some(us) = &self.upsamplers {
             for u in us.iter() {
                 h = u.forward(&h)?;
             }
         }
 
-        // 4. resnets use the transformed temb_proj
         for r in self.resnets.iter() {
             h = r.forward(&h, temb_proj.as_ref(), train)?;
         }
@@ -1319,12 +1062,12 @@ impl LtxVideoUpBlock3d {
 pub struct LtxVideoEncoder3d {
     patch_size: usize,
     patch_size_t: usize,
-    conv_in: LtxVideoCausalConv3d,
+    conv_in: Conv3d,
     down_blocks: Vec<LtxVideoDownBlock3d>,
     mid_block: LtxVideoMidBlock3d,
     norm_out: Option<RmsNorm>,
     conv_act: Activation,
-    conv_out: LtxVideoCausalConv3d,
+    conv_out: Conv3d,
     pub gradient_checkpointing: bool,
 }
 
@@ -1343,7 +1086,7 @@ impl LtxVideoEncoder3d {
         vb: VarBuilder,
     ) -> Result<Self> {
         let in_channels_patched = in_channels * patch_size * patch_size * patch_size_t;
-        let conv_in = LtxVideoCausalConv3d::new(
+        let conv_in = create_ltx_causal_conv3d(
             in_channels_patched,
             block_out_channels[0],
             (3, 3, 3),
@@ -1359,10 +1102,8 @@ impl LtxVideoEncoder3d {
         let mut current = block_out_channels[0];
 
         for i in 0..n {
-            // For pixel unshuffle downsamplers, out_channels is the NEXT block's channels
             let outc = block_out_channels[i + 1];
 
-            // Use downsample_type from config, default to Conv if not provided
             let ds_type = downsample_types
                 .get(i)
                 .copied()
@@ -1402,7 +1143,7 @@ impl LtxVideoEncoder3d {
             Some(RmsNorm::new(ones, 1e-8))
         };
         let conv_act = Activation::Silu;
-        let conv_out = LtxVideoCausalConv3d::new(
+        let conv_out = create_ltx_causal_conv3d(
             current,
             out_channels + 1,
             (3, 3, 3),
@@ -1427,7 +1168,6 @@ impl LtxVideoEncoder3d {
     }
 
     fn patchify(&self, x: &Tensor) -> Result<Tensor> {
-        // (B,C,F,H,W) -> (B, C*pt*p*p, F/pt, H/p, W/p) с тем же порядком, что в python.
         let p = self.patch_size;
         let pt = self.patch_size_t;
         let (b, c, f, h, w) = x.dims5()?;
@@ -1454,18 +1194,15 @@ impl LtxVideoEncoder3d {
         }
         h = self.mid_block.forward(&h, None, train)?;
 
-        // Apply norm_out only if it exists
         if let Some(ref norm) = self.norm_out {
             h = rmsnorm_channels_first(norm, &h)?;
         }
 
         h = h.apply(&self.conv_act)?;
         h = self.conv_out.forward(&h)?;
-        // println!("[DEBUG] conv_out final min/max: {:.4}/{:.4}", h.flatten_all()?.to_vec1::<f32>()?.iter().cloned().fold(f32::INFINITY, f32::min), h.flatten_all()?.to_vec1::<f32>()?.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
 
-        // last channel replication trick (как в python)
         let (_b, ch, _t, _h, _w) = h.dims5()?;
-        let last = h.i((.., (ch - 1), .., .., ..))?.unsqueeze(1)?; // (B,1,T,H,W)
+        let last = h.i((.., (ch - 1), .., .., ..))?.unsqueeze(1)?;
         let rep = last.repeat((1, ch.saturating_sub(2), 1, 1, 1))?;
         cat_dim(&[h, rep], 1)
     }
@@ -1475,13 +1212,13 @@ impl LtxVideoEncoder3d {
 pub struct LtxVideoDecoder3d {
     patch_size: usize,
     patch_size_t: usize,
-    pub conv_in: LtxVideoCausalConv3d,
+    pub conv_in: Conv3d,
     pub mid_block: LtxVideoMidBlock3d,
     pub up_blocks: Vec<LtxVideoUpBlock3d>,
     pub norm_out: Option<RmsNorm>,
     pub conv_act: Activation,
-    pub conv_out: LtxVideoCausalConv3d,
-    // Timestep conditioning
+    pub conv_out: Conv3d,
+
     pub time_embedder: Option<CombinedTimestepEmbedder>,
     pub scale_shift_table: Option<Tensor>,
     pub timestep_scale_multiplier: Option<Tensor>,
@@ -1506,7 +1243,6 @@ impl LtxVideoDecoder3d {
         upsample_factor: &[usize],
         vb: VarBuilder,
     ) -> Result<Self> {
-        // decoder использует reversed списки
         let mut boc = block_out_channels.to_vec();
         boc.reverse();
         let mut sts = spatiotemporal_scaling.to_vec();
@@ -1521,7 +1257,7 @@ impl LtxVideoDecoder3d {
         let mut upf = upsample_factor.to_vec();
         upf.reverse();
 
-        let conv_in = LtxVideoCausalConv3d::new(
+        let conv_in = create_ltx_causal_conv3d(
             in_channels,
             boc[0],
             (3, 3, 3),
@@ -1544,8 +1280,8 @@ impl LtxVideoDecoder3d {
         )?;
 
         let mut up_blocks = Vec::new();
-        let n = boc.len(); // 3
-        let mut current_channels = 1024; // Initial output from conv_in / mid_block (1024)
+        let n = boc.len();
+        let mut current_channels = 1024;
 
         for i in 0..n {
             let output_channel = boc[i] / upf[i];
@@ -1569,11 +1305,6 @@ impl LtxVideoDecoder3d {
             current_channels = output_channel;
         }
 
-        // norm_out has elementwise_affine=False in Python, so no weights in safetensors.
-        // We must create a default LayerNorm (ones weight, zeros bias) if loading fails.
-        // Note: Python uses eps=1e-6. We use resnet_eps (which is 1e-6 in config).
-        // Python hardcodes eps=1e-8 for norm_out and elementwise_affine=False
-        // We use RmsNorm with fallback to ones (no weights in safetensors)
         let norm_out =
             if let Ok(norm) = candle_nn::rms_norm(current_channels, 1e-8, vb.pp("norm_out")) {
                 Some(norm)
@@ -1584,7 +1315,7 @@ impl LtxVideoDecoder3d {
         let conv_act = Activation::Silu;
 
         let conv_out_channels = out_channels * patch_size * patch_size;
-        let conv_out = LtxVideoCausalConv3d::new(
+        let conv_out = create_ltx_causal_conv3d(
             current_channels,
             conv_out_channels,
             (3, 3, 3),
@@ -1595,14 +1326,11 @@ impl LtxVideoDecoder3d {
             vb.pp("conv_out"),
         )?;
 
-        // Timestep conditioning (0.9.5 has timestep_conditioning=true)
-        // Global decoder-level time embedder and scale_shift_table
         let (time_embedder, scale_shift_table, timestep_scale_multiplier) = if timestep_conditioning
         {
-            // time_embedder output is 256 = 2 * 128 (for shift and scale)
-            let emb_dim = current_channels * 2; // 128 * 2 = 256
+            let emb_dim = current_channels * 2;
             let te = CombinedTimestepEmbedder::new(emb_dim, vb.pp("time_embedder")).ok();
-            // scale_shift_table: [2, 128]
+
             let sst = vb.get((2, current_channels), "scale_shift_table").ok();
             let tsm = vb.get((), "timestep_scale_multiplier").ok();
             (te, sst, tsm)
@@ -1627,37 +1355,26 @@ impl LtxVideoDecoder3d {
     }
 
     pub fn unpatchify(&self, x: &Tensor) -> Result<Tensor> {
-        // Python: reshape(batch, -1, p_t, p, p, num_frames, height, width)
-        //         permute(0, 1, 5, 2, 6, 4, 7, 3)
-        //         flatten(6, 7).flatten(4, 5).flatten(2, 3)
         let (b, c, f, h, w) = x.dims5()?;
-        let p = self.patch_size; // 4
-        let pt = self.patch_size_t; // 1
-        let out_c = c / (pt * p * p); // 48 / 16 = 3
+        let p = self.patch_size;
+        let pt = self.patch_size_t;
+        let out_c = c / (pt * p * p);
         let x = x.reshape(&[b, out_c, pt, p, p, f, h, w])?;
 
-        // permute(0, 1, 5, 2, 6, 4, 7, 3) -> [B, C, F, pt, H, p_h, W, p_w]
         let x = x.permute(vec![0, 1, 5, 2, 6, 4, 7, 3])?;
         let x = x.contiguous()?;
 
-        // After permute shape: [B, C, F, pt, H, p, W, p]
-        // Python flattens: flatten(6, 7).flatten(4, 5).flatten(2, 3)
-        // We must do this step-by-step to match Python's memory layout
-
-        // flatten(6, 7): merge dimensions 6 and 7 -> [B, C, F, pt, H, p, W*p]
         let x = x.reshape(&[b, out_c, f, pt, h, p, w * p])?;
 
-        // flatten(4, 5): merge dimensions 4 and 5 -> [B, C, F, pt, H*p, W*p]
         let x = x.reshape(&[b, out_c, f, pt, h * p, w * p])?;
 
-        // flatten(2, 3): merge dimensions 2 and 3 -> [B, C, F*pt, H*p, W*p]
         let x = x.reshape(&[b, out_c, f * pt, h * p, w * p])?;
 
         Ok(x)
     }
 
     pub fn forward(&self, z: &Tensor, temb: Option<&Tensor>, train: bool) -> Result<Tensor> {
-        let model_dtype = self.conv_in.conv2d_slices[0].weight().dtype();
+        let model_dtype = self.conv_in.weight().dtype();
         let z = z.to_dtype(model_dtype)?;
         let temb = match temb {
             Some(t) => Some(t.to_dtype(model_dtype)?),
@@ -1666,9 +1383,6 @@ impl LtxVideoDecoder3d {
 
         let mut h = self.conv_in.forward(&z)?;
 
-        // CRITICAL: Python applies timestep_scale_multiplier at the START of decoder.forward(),
-        // BEFORE passing to mid_block and up_blocks. Each block's internal time_embedder
-        // then receives the SCALED temb value.
         let temb_scaled =
             if let (Some(tsm), Some(t)) = (&self.timestep_scale_multiplier, temb.as_ref()) {
                 let t_flat = t.flatten_all()?;
@@ -1686,34 +1400,27 @@ impl LtxVideoDecoder3d {
             h = ub.forward(&h, temb_for_blocks_ref, train)?;
         }
 
-        // Apply norm_out only if it exists
         if let Some(ref norm) = self.norm_out {
             h = rmsnorm_channels_first(norm, &h)?;
         }
 
-        // Apply global time_embedder + scale_shift_table if present
-        // NOTE: temb_scaled already has timestep_scale_multiplier applied from earlier
         if let (Some(te), Some(sst), Some(temb_s)) =
             (&self.time_embedder, &self.scale_shift_table, &temb_scaled)
         {
             let temb_proj = te.forward(temb_s, h.dtype())?;
 
-            // temb_proj: (B, 256) = (B, 2*128)
-            // reshape to (B, 2, 128) and add scale_shift_table (2, 128)
             let batch_size = h.dims5()?.0;
-            let c = sst.dims2()?.1; // 128
+            let c = sst.dims2()?.1;
             let temb_shaped = temb_proj
                 .reshape((batch_size, 2, c))?
-                .broadcast_add(&sst.unsqueeze(0)?)? // (B, 2, C)
-                .unsqueeze(3)? // (B, 2, C, 1)
-                .unsqueeze(4)? // (B, 2, C, 1, 1)
-                .unsqueeze(5)?; // (B, 2, C, 1, 1, 1)
+                .broadcast_add(&sst.unsqueeze(0)?)?
+                .unsqueeze(3)?
+                .unsqueeze(4)?
+                .unsqueeze(5)?;
 
-            // shift = temb_shaped[:, 0], scale = temb_shaped[:, 1]
             let shift = temb_shaped.i((.., 0, .., .., .., ..))?.squeeze(1)?;
             let scale = temb_shaped.i((.., 1, .., .., .., ..))?.squeeze(1)?;
 
-            // Python: h = h * (1 + scale) + shift
             let h_shape = h.shape();
             let scale_b = scale.broadcast_as(h_shape)?;
             let shift_b = shift.broadcast_as(h_shape)?;
@@ -1733,11 +1440,11 @@ impl LtxVideoDecoder3d {
 pub struct AutoencoderKLLtxVideo {
     pub encoder: LtxVideoEncoder3d,
     pub decoder: LtxVideoDecoder3d,
-    pub quant_conv: Option<LtxVideoCausalConv3d>,
-    pub post_quant_conv: Option<LtxVideoCausalConv3d>,
+    pub quant_conv: Option<Conv3d>,
+    pub post_quant_conv: Option<Conv3d>,
 
-    pub latents_mean: Tensor, // (C,)
-    pub latents_std: Tensor,  // (C,)
+    pub latents_mean: Tensor,
+    pub latents_std: Tensor,
 
     pub scaling_factor: f64,
 
@@ -1786,7 +1493,7 @@ impl AutoencoderKLLtxVideo {
             vb.pp("encoder"),
         )?;
 
-        let quant_conv = LtxVideoCausalConv3d::new(
+        let quant_conv = create_ltx_causal_conv3d(
             config.latent_channels * 2,
             config.latent_channels * 2,
             (1, 1, 1),
@@ -1798,7 +1505,7 @@ impl AutoencoderKLLtxVideo {
         )
         .ok();
 
-        let post_quant_conv = LtxVideoCausalConv3d::new(
+        let post_quant_conv = create_ltx_causal_conv3d(
             config.latent_channels,
             config.latent_channels,
             (1, 1, 1),
@@ -1926,39 +1633,31 @@ impl AutoencoderKLLtxVideo {
         Ok(out)
     }
 
-    /// Blend по ширине W (dim=4): b[..., :blend] = lerp(a[..., -blend:], b[..., :blend], w)
     fn blend_h(&self, a: &Tensor, b: &Tensor, blend_extent: usize) -> Result<Tensor> {
-        // python: for x in range(blend): b[..., x] = a[..., -blend+x]*(1-x/blend) + b[..., x]*(x/blend) [file:1]
         let blend = blend_extent.min(a.dims5()?.4).min(b.dims5()?.4);
         if blend == 0 {
             return Ok(b.clone());
         }
 
-        // w: (blend,) from 0..blend-1 divided by blend
         let w = Tensor::arange(0u32, blend as u32, b.device())?
             .to_dtype(DType::F32)?
             .affine(1.0 / (blend as f64), 0.0)?;
         let w = w.reshape((1, 1, 1, 1, blend))?.to_dtype(b.dtype())?;
         let one_minus = w.neg()?.affine(1.0, 1.0)?;
 
-        // b_head: первые blend столбцов, b_tail: остаток
         let b_head = b.i((.., .., .., .., 0..blend))?;
         let b_tail = b.i((.., .., .., .., blend..))?;
 
-        // a_tail: последние blend столбцов
         let aw = a.dims5()?.4;
         let a_tail = a.i((.., .., .., .., (aw - blend)..aw))?;
 
-        // mixed = a_tail*(1-w) + b_head*w
         let mixed = a_tail
             .broadcast_mul(&one_minus)?
             .add(&b_head.broadcast_mul(&w)?)?;
         Tensor::cat(&[&mixed, &b_tail], 4)
     }
 
-    /// Blend по высоте H (dim=3)
     fn blend_v(&self, a: &Tensor, b: &Tensor, blend_extent: usize) -> Result<Tensor> {
-        // python: for y in range(blend): b[..., y, :] = a[..., -blend+y, :]*(1-y/blend) + b[..., y, :]*(y/blend) [file:1]
         let blend = blend_extent.min(a.dims5()?.3).min(b.dims5()?.3);
         if blend == 0 {
             return Ok(b.clone());
@@ -1982,9 +1681,7 @@ impl AutoencoderKLLtxVideo {
         Tensor::cat(&[&mixed, &b_tail], 3)
     }
 
-    /// Blend по времени T (dim=2)
     fn blend_t(&self, a: &Tensor, b: &Tensor, blend_extent: usize) -> Result<Tensor> {
-        // python: for x in range(blend): b[..., x, :, :] = a[..., -blend+x, :, :]*(1-x/blend) + b[..., x, :, :]*(x/blend) [file:1]
         let blend = blend_extent.min(a.dims5()?.2).min(b.dims5()?.2);
         if blend == 0 {
             return Ok(b.clone());
@@ -2038,11 +1735,7 @@ impl AutoencoderKLLtxVideo {
     }
 
     fn decode_z(&self, z: &Tensor, temb: Option<&Tensor>, train: bool) -> Result<Tensor> {
-        // Python LTX VAE _decode does NOT use post_quant_conv or latents_mean/std
-        // It directly calls decoder(z, temb)
-
-        // Convert inputs to model dtype (BF16) if needed
-        let model_dtype = self.decoder.conv_in.conv2d_slices[0].weight().dtype();
+        let model_dtype = self.decoder.conv_in.weight().dtype();
         let z = z.to_dtype(model_dtype)?;
         let temb_converted = match temb {
             Some(t) => Some(t.to_dtype(model_dtype)?),
@@ -2068,15 +1761,12 @@ impl AutoencoderKLLtxVideo {
         self.decoder.forward(&z, temb_converted.as_ref(), train)
     }
 
-    // ===== public API =====
-
     pub fn encode(
         &self,
         x: &Tensor,
         return_dict: bool,
         train: bool,
     ) -> Result<(Option<AutoencoderKLOutput>, DiagonalGaussianDistribution)> {
-        // python: if useslicing and batch>1: encode each slice then cat [file:1]
         let h = if self.use_slicing && x.dims5()?.0 > 1 {
             let xs = Self::split_batch_5d(x)?;
             let mut encs = Vec::with_capacity(xs.len());
@@ -2108,7 +1798,6 @@ impl AutoencoderKLLtxVideo {
         return_dict: bool,
         train: bool,
     ) -> Result<(Option<DecoderOutput>, Tensor)> {
-        // python: if useslicing and batch>1: decode each slice then cat [file:1]
         let decoded = if self.use_slicing && z.dims5()?.0 > 1 {
             let zs = Self::split_batch_5d(z)?;
             let ts = match temb {
@@ -2138,7 +1827,6 @@ impl AutoencoderKLLtxVideo {
         }
     }
 
-    /// python forward(sample, temb=None, sample_posterior=False, return_dict=True) [file:1]
     pub fn forward(
         &self,
         sample: &Tensor,
@@ -2156,10 +1844,7 @@ impl AutoencoderKLLtxVideo {
         self.decode(&z, temb, return_dict, train)
     }
 
-    // ===== spatial tiling =====
-
     fn tiled_encode(&self, x: &Tensor, train: bool) -> Result<Tensor> {
-        // python tiled_encode: loops in sample-space, blends in latent-space [file:1]
         let (_b, _c, _t, height, width) = x.dims5()?;
 
         let latent_height = height / self.spatial_compression_ratio;
@@ -2174,7 +1859,6 @@ impl AutoencoderKLLtxVideo {
         let blend_h = tile_latent_min_h.saturating_sub(tile_latent_stride_h);
         let blend_w = tile_latent_min_w.saturating_sub(tile_latent_stride_w);
 
-        // rows[i][j] = encoder(tile)
         let mut rows: Vec<Vec<Tensor>> = Vec::new();
         for i in (0..height).step_by(self.tile_sample_stride_height) {
             let mut row: Vec<Tensor> = Vec::new();
@@ -2208,10 +1892,8 @@ impl AutoencoderKLLtxVideo {
                     tile = self.blend_h(left, &tile, blend_w)?;
                 }
 
-                // Store fully blended tile for future neighbors
                 curr_row_blended.push(tile.clone());
 
-                // Keep only the non-overlapping part for concatenation
                 let h_slice = tile_latent_stride_h.min(tile.dim(3)?);
                 let w_slice = tile_latent_stride_w.min(tile.dim(4)?);
                 let sliced_tile = tile.i((.., .., .., 0..h_slice, 0..w_slice))?;
@@ -2226,7 +1908,6 @@ impl AutoencoderKLLtxVideo {
     }
 
     fn tiled_decode(&self, z: &Tensor, temb: Option<&Tensor>, train: bool) -> Result<Tensor> {
-        // python tiled_decode: loops in latent-space, blends/crops in sample-space [file:1]
         let (_b, _c, _t, height, width) = z.dims5()?;
 
         let sample_height = height * self.spatial_compression_ratio;
@@ -2245,7 +1926,6 @@ impl AutoencoderKLLtxVideo {
             .tile_sample_min_width
             .saturating_sub(self.tile_sample_stride_width);
 
-        // rows[i][j] = decoder(tile)
         let mut rows: Vec<Vec<Tensor>> = Vec::new();
         for i in (0..height).step_by(tile_latent_stride_h) {
             let mut row: Vec<Tensor> = Vec::new();
@@ -2276,7 +1956,6 @@ impl AutoencoderKLLtxVideo {
                     tile = self.blend_h(left, &tile, blend_w)?;
                 }
 
-                // Store fully blended tile for future neighbors
                 curr_row_blended.push(tile.clone());
 
                 let h_slice = self.tile_sample_stride_height.min(tile.dim(3)?);
@@ -2292,13 +1971,10 @@ impl AutoencoderKLLtxVideo {
         dec.i((.., .., .., 0..sample_height, 0..sample_width))
     }
 
-    // ===== temporal tiling =====
-
     fn temporal_tiled_encode(&self, x: &Tensor, train: bool) -> Result<Tensor> {
-        // python temporal_tiled_encode (stride in sample frames), blends in latent time [file:1]
         let (_b, _c, num_frames, _h, _w) = x.dims5()?;
 
-        let latent_num_frames = (num_frames - 1) / self.temporal_compression_ratio + 1; // python formula [file:1]
+        let latent_num_frames = (num_frames - 1) / self.temporal_compression_ratio + 1;
 
         let tile_latent_min_t = self.tile_sample_min_num_frames / self.temporal_compression_ratio;
         let tile_latent_stride_t =
@@ -2323,7 +1999,6 @@ impl AutoencoderKLLtxVideo {
                 h
             };
 
-            // python: if i == 0: tile = tile[:, :, 1:] [file:1]
             let tile = if i == 0 {
                 tile.i((.., .., 1.., .., ..))?
             } else {
@@ -2332,22 +2007,14 @@ impl AutoencoderKLLtxVideo {
             row.push(tile);
         }
 
-        // Python logic:
-        // for i, tile in enumerate(row):
-        //     if i > 0:
-        //         tile = self.blend_t(row[i - 1], tile, blend_num_frames)
-        //         result_row.append(tile[:, :, :stride, :, :])  # Take FIRST stride frames
-        //     else:
-        //         result_row.append(tile[:, :, :stride+1, :, :])  # First tile: stride+1 frames
         let mut result_row: Vec<Tensor> = Vec::with_capacity(row.len());
         for (idx, tile) in row.iter().enumerate() {
             let tile = if idx > 0 {
                 let blended = self.blend_t(&row[idx - 1], tile, blend_t)?;
-                // Take FIRST stride frames (not last!)
+
                 let end = tile_latent_stride_t.min(blended.dim(2)?);
                 blended.i((.., .., 0..end, .., ..))?
             } else {
-                // First tile: keep stride + 1 frames
                 let end = (tile_latent_stride_t + 1).min(tile.dim(2)?);
                 tile.i((.., .., 0..end, .., ..))?
             };
@@ -2364,10 +2031,9 @@ impl AutoencoderKLLtxVideo {
         temb: Option<&Tensor>,
         train: bool,
     ) -> Result<Tensor> {
-        // python temporal_tiled_decode: stride in latent time, blends in sample time [file:1]
         let (_b, _c, num_frames, _h, _w) = z.dims5()?;
 
-        let num_sample_frames = (num_frames - 1) * self.temporal_compression_ratio + 1; // python formula [file:1]
+        let num_sample_frames = (num_frames - 1) * self.temporal_compression_ratio + 1;
 
         let tile_latent_min_h = self.tile_sample_min_height / self.spatial_compression_ratio;
         let tile_latent_min_w = self.tile_sample_min_width / self.spatial_compression_ratio;
@@ -2376,7 +2042,6 @@ impl AutoencoderKLLtxVideo {
         let tile_latent_stride_t =
             self.tile_sample_stride_num_frames / self.temporal_compression_ratio;
 
-        // Python: blend_num_frames = tile_sample_min - tile_sample_stride = 16 - 8 = 8
         let blend_t_sample = self
             .tile_sample_min_num_frames
             .saturating_sub(self.tile_sample_stride_num_frames);
@@ -2394,8 +2059,6 @@ impl AutoencoderKLLtxVideo {
                 self.decoder.forward(&tile, temb, train)?
             };
 
-            // Python: if i > 0: decoded = decoded[:, :, :-1, :, :]
-            // Remove last sample frame from all tiles except first
             let decoded = if loop_idx > 0 {
                 let t = decoded.dim(2)?;
                 if t > 1 {
@@ -2410,22 +2073,14 @@ impl AutoencoderKLLtxVideo {
             row.push(decoded);
         }
 
-        // Python logic:
-        // for i, tile in enumerate(row):
-        //     if i > 0:
-        //         tile = self.blend_t(row[i - 1], tile, blend_num_frames)
-        //         tile = tile[:, :, :stride, :, :]  # Take FIRST stride frames
-        //     else:
-        //         tile = tile[:, :, :stride+1, :, :]  # First tile: stride+1 frames
         let mut result_row: Vec<Tensor> = Vec::with_capacity(row.len());
         for (idx, tile) in row.iter().enumerate() {
             let tile = if idx > 0 {
                 let blended = self.blend_t(&row[idx - 1], tile, blend_t_sample)?;
-                // Take FIRST stride frames (not last!)
+
                 let end = self.tile_sample_stride_num_frames.min(blended.dim(2)?);
                 blended.i((.., .., 0..end, .., ..))?
             } else {
-                // First tile: keep stride + 1 frames
                 let end = (self.tile_sample_stride_num_frames + 1).min(tile.dim(2)?);
                 tile.i((.., .., 0..end, .., ..))?
             };
@@ -2439,8 +2094,7 @@ impl AutoencoderKLLtxVideo {
 
 impl VaeLtxVideo for AutoencoderKLLtxVideo {
     fn dtype(&self) -> DType {
-        // Return actual weight dtype (e.g., DType::BF16)
-        self.decoder.conv_in.conv2d_slices[0].weight().dtype()
+        self.decoder.conv_in.weight().dtype()
     }
     fn spatial_compression_ratio(&self) -> usize {
         self.config.spatial_compression_ratio
