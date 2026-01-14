@@ -35,20 +35,29 @@ fn main() -> anyhow::Result<()> {
     let latent_h = 60;
     let latent_w = 60;
 
-    println!("\nTest case: latent shape [1, 16, {}, {}, {}]", latent_frames, latent_h, latent_w);
+    println!(
+        "\nTest case: latent shape [1, 16, {}, {}, {}]",
+        latent_frames, latent_h, latent_w
+    );
 
     // Load reference input or create random
     let latents = if Path::new(REF_FILE).exists() {
         println!("Loading reference latents from {}", REF_FILE);
         let tensors = candle_core::safetensors::load(REF_FILE, &Device::Cpu)?;
-        tensors.get("input_latents")
+        tensors
+            .get("input_latents")
             .ok_or_else(|| anyhow::anyhow!("input_latents not found"))?
             .to_device(&device)?
             .to_dtype(DType::BF16)?
     } else {
         println!("Creating random latents (seed=42)");
-        Tensor::randn(0f32, 1f32, (1, 16, latent_frames, latent_h, latent_w), &device)?
-            .to_dtype(DType::BF16)?
+        Tensor::randn(
+            0f32,
+            1f32,
+            (1, 16, latent_frames, latent_h, latent_w),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?
     };
 
     println!("Latents shape: {:?}", latents.dims());
@@ -70,16 +79,21 @@ fn main() -> anyhow::Result<()> {
     if Path::new(REF_FILE).exists() {
         println!("\n{}", "=".repeat(70));
         println!("Comparing with Python reference...");
-        
+
         let tensors = candle_core::safetensors::load(REF_FILE, &Device::Cpu)?;
-        let ref_output = tensors.get("final_output")
+        let ref_output = tensors
+            .get("final_output")
             .ok_or_else(|| anyhow::anyhow!("final_output not found"))?;
-        
+
         let rust_output = output.to_device(&Device::Cpu)?;
-        
+
         // Check shapes match
         if rust_output.dims() != ref_output.dims() {
-            println!("Shape mismatch: Rust {:?} vs Python {:?}", rust_output.dims(), ref_output.dims());
+            println!(
+                "Shape mismatch: Rust {:?} vs Python {:?}",
+                rust_output.dims(),
+                ref_output.dims()
+            );
         } else {
             // Compute diff
             let rust_f32 = rust_output.to_dtype(DType::F32)?.flatten_all()?;
@@ -87,10 +101,10 @@ fn main() -> anyhow::Result<()> {
             let diff = rust_f32.sub(&ref_f32)?.abs()?;
             let max_diff = diff.max(0)?.to_scalar::<f32>()?;
             let mean_diff = diff.mean_all()?.to_scalar::<f32>()?;
-            
+
             println!("Max diff:  {:.6}", max_diff);
             println!("Mean diff: {:.6}", mean_diff);
-            
+
             if max_diff < 0.1 {
                 println!("✓ Parity check PASSED");
             } else {

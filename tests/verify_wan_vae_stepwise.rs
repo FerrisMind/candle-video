@@ -61,13 +61,18 @@ fn verify_wan_vae_stepwise_decode() {
 
     // Load reference data
     let input_latents = load_reference_tensor("input_latents").expect("input_latents not found");
-    let first_frame_input = load_reference_tensor("first_frame_input").expect("first_frame_input not found");
-    let ref_first_frame_output = load_reference_tensor("first_frame_output").expect("first_frame_output not found");
+    let first_frame_input =
+        load_reference_tensor("first_frame_input").expect("first_frame_input not found");
+    let ref_first_frame_output =
+        load_reference_tensor("first_frame_output").expect("first_frame_output not found");
     let ref_full_decode = load_reference_tensor("full_decode").expect("full_decode not found");
-    
+
     println!("Input latents shape: {:?}", input_latents.dims());
     println!("First frame input shape: {:?}", first_frame_input.dims());
-    println!("Reference first frame output shape: {:?}", ref_first_frame_output.dims());
+    println!(
+        "Reference first frame output shape: {:?}",
+        ref_first_frame_output.dims()
+    );
     println!("Reference full decode shape: {:?}", ref_full_decode.dims());
 
     // Set up device
@@ -89,9 +94,9 @@ fn verify_wan_vae_stepwise_decode() {
     // Run full decode and measure memory
     println!("\n=== Running VAE decode ===");
     println!("Memory before decode: {:.2} MB", get_gpu_memory_mb());
-    
+
     let rust_output = vae.decode(&input_latents).expect("VAE decode failed");
-    
+
     println!("Memory after decode: {:.2} MB", get_gpu_memory_mb());
     println!("Rust output shape: {:?}", rust_output.dims());
 
@@ -117,22 +122,28 @@ fn verify_wan_vae_stepwise_decode() {
 
     // BF16 tolerance
     let tolerance = 0.1;
-    
+
     if max_diff > tolerance {
         println!("\n!!! PARITY FAILED !!!");
         println!("Max diff {} exceeds tolerance {}", max_diff, tolerance);
-        
+
         // Print sample values for debugging
         let rust_flat = rust_output.flatten_all().unwrap();
         let ref_flat = ref_full_decode.flatten_all().unwrap();
-        
+
         println!("\nSample values (first 10):");
         for i in 0..10.min(rust_flat.dims1().unwrap()) {
             let r = rust_flat.get(i).unwrap().to_scalar::<f32>().unwrap();
             let p = ref_flat.get(i).unwrap().to_scalar::<f32>().unwrap();
-            println!("  [{}] Rust: {:.6}, Python: {:.6}, diff: {:.6}", i, r, p, (r - p).abs());
+            println!(
+                "  [{}] Rust: {:.6}, Python: {:.6}, diff: {:.6}",
+                i,
+                r,
+                p,
+                (r - p).abs()
+            );
         }
-        
+
         panic!("VAE decode parity check failed");
     }
 
@@ -148,7 +159,7 @@ fn verify_wan_vae_intermediate_shapes() {
     }
 
     println!("\n=== Python Decoder Intermediate Shapes (Frame 0) ===");
-    
+
     let shape_checks = [
         ("frame0_decoder_conv_in", vec![1, 384, 1, 60, 60]),
         ("frame0_decoder_mid_block", vec![1, 384, 1, 60, 60]),
@@ -171,14 +182,14 @@ fn verify_wan_vae_intermediate_shapes() {
     }
 
     println!("\n=== Python Decoder Intermediate Shapes (Frame 1) ===");
-    
+
     let shape_checks_f1 = [
         ("frame1_decoder_conv_in", vec![1, 384, 1, 60, 60]),
         ("frame1_decoder_mid_block", vec![1, 384, 1, 60, 60]),
-        ("frame1_decoder_up_block_0", vec![1, 192, 2, 120, 120]),  // Time doubles after upsample3d
-        ("frame1_decoder_up_block_1", vec![1, 192, 4, 240, 240]),  // Time doubles again
-        ("frame1_decoder_up_block_2", vec![1, 96, 4, 480, 480]),   // No time upsample
-        ("frame1_decoder_up_block_3", vec![1, 96, 4, 480, 480]),   // No upsample
+        ("frame1_decoder_up_block_0", vec![1, 192, 2, 120, 120]), // Time doubles after upsample3d
+        ("frame1_decoder_up_block_1", vec![1, 192, 4, 240, 240]), // Time doubles again
+        ("frame1_decoder_up_block_2", vec![1, 96, 4, 480, 480]),  // No time upsample
+        ("frame1_decoder_up_block_3", vec![1, 96, 4, 480, 480]),  // No upsample
         ("frame1_decoder_norm_out", vec![1, 96, 4, 480, 480]),
         ("frame1_decoder_conv_out", vec![1, 3, 4, 480, 480]),
     ];

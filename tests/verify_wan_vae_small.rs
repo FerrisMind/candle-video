@@ -49,7 +49,7 @@ fn verify_wan_vae_small_decode() {
     // Load reference data
     let input_latents = load_reference_tensor("input_latents").expect("input_latents not found");
     let ref_full_decode = load_reference_tensor("full_decode").expect("full_decode not found");
-    
+
     println!("Input latents shape: {:?}", input_latents.dims());
     println!("Reference full decode shape: {:?}", ref_full_decode.dims());
 
@@ -96,22 +96,28 @@ fn verify_wan_vae_small_decode() {
 
     // BF16 tolerance
     let tolerance = 0.1;
-    
+
     if max_diff > tolerance {
         println!("\n!!! PARITY FAILED !!!");
         println!("Max diff {} exceeds tolerance {}", max_diff, tolerance);
-        
+
         // Print sample values
         let rust_flat = rust_output.flatten_all().unwrap();
         let ref_flat = ref_full_decode.flatten_all().unwrap();
-        
+
         println!("\nSample values (first 10):");
         for i in 0..10.min(rust_flat.dims1().unwrap()) {
             let r = rust_flat.get(i).unwrap().to_scalar::<f32>().unwrap();
             let p = ref_flat.get(i).unwrap().to_scalar::<f32>().unwrap();
-            println!("  [{}] Rust: {:.6}, Python: {:.6}, diff: {:.6}", i, r, p, (r - p).abs());
+            println!(
+                "  [{}] Rust: {:.6}, Python: {:.6}, diff: {:.6}",
+                i,
+                r,
+                p,
+                (r - p).abs()
+            );
         }
-        
+
         panic!("VAE decode parity check failed");
     }
 
@@ -126,7 +132,7 @@ fn verify_wan_vae_small_shapes() {
     }
 
     println!("\n=== Python Decoder Intermediate Shapes (256x256, Frame 0) ===");
-    
+
     let shape_checks = [
         ("frame0_decoder_conv_in", vec![1, 384, 1, 32, 32]),
         ("frame0_decoder_mid_block", vec![1, 384, 1, 32, 32]),

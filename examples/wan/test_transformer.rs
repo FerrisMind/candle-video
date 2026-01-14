@@ -77,7 +77,10 @@ fn main() -> anyhow::Result<()> {
 
     let encoder_hidden_states =
         Tensor::randn(0f32, 1f32, (1, 512, 4096), &device)?.to_dtype(dtype)?;
-    println!("  encoder_hidden_states: {:?}", encoder_hidden_states.dims());
+    println!(
+        "  encoder_hidden_states: {:?}",
+        encoder_hidden_states.dims()
+    );
 
     // Run forward pass
     println!("\nRunning forward pass...");

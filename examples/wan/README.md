@@ -120,12 +120,25 @@ Wan2.1-T2V-1.3B/
 | 720x1280 | 49 | ~18-20 GB |
 | 720x1280 | 81 | ~24+ GB |
 
+### Memory Optimization Strategies
+
+The example implements several memory optimizations based on the official Wan2.1 implementation:
+
+1. **Sequential model loading**: VAE is loaded only after the transformer is freed, avoiding having both large models in VRAM simultaneously.
+
+2. **Explicit tensor cleanup**: Intermediate tensors are explicitly dropped during the denoising loop to release GPU memory as soon as possible.
+
+3. **GPU synchronization**: `device.synchronize()` calls ensure CUDA operations complete before memory is released.
+
+4. **Text encoder on CPU**: The quantized UMT5 text encoder runs on CPU, freeing GPU memory for the transformer.
+
 ### Memory Optimization Tips
 
 1. **Reduce resolution**: Use 480p instead of 720p
 2. **Fewer frames**: Generate 49 frames instead of 81
-3. **CPU fallback**: Use `--cpu` flag (much slower but works with limited VRAM)
-4. **Quantized text encoder**: GGUF quantization reduces text encoder memory by ~4x
+3. **Disable CFG**: Use `--guidance-scale 1.0` to skip the negative prompt forward pass (halves transformer memory during denoising)
+4. **CPU fallback**: Use `--cpu` flag (much slower but works with limited VRAM)
+5. **Quantized text encoder**: GGUF quantization reduces text encoder memory by ~4x
 
 ## Technical Details
 
@@ -193,7 +206,10 @@ Width and height must be divisible by 16. Use values like 480, 512, 640, 720, 76
 ### Out of Memory (OOM)
 - Reduce resolution: `--width 512 --height 512`
 - Reduce frames: `--num-frames 33`
+- Disable CFG: `--guidance-scale 1.0` (halves memory during denoising)
 - Use CPU: `--cpu` (very slow but works)
+
+Note: The example automatically loads the VAE only after the transformer is freed, following the official Wan2.1 `offload_model` pattern. If you still encounter OOM during the denoising loop, try reducing resolution or disabling CFG.
 
 ### CUDA not available
 The example will automatically fall back to CPU if CUDA is not available. For GPU acceleration, ensure you have:

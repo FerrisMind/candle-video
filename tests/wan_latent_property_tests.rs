@@ -856,10 +856,8 @@ mod tests {
         // We want pixel 0 to have R=-1, G=0, B=1 and pixel 1 to have R=0.5, G=-0.5, B=0
         let values: Vec<f32> = vec![
             // Channel 0 (R): pixel 0 = -1.0, pixel 1 = 0.5
-            -1.0, 0.5,
-            // Channel 1 (G): pixel 0 = 0.0, pixel 1 = -0.5
-            0.0, -0.5,
-            // Channel 2 (B): pixel 0 = 1.0, pixel 1 = 0.0
+            -1.0, 0.5, // Channel 1 (G): pixel 0 = 0.0, pixel 1 = -0.5
+            0.0, -0.5, // Channel 2 (B): pixel 0 = 1.0, pixel 1 = 0.0
             1.0, 0.0,
         ];
         let video = Tensor::from_vec(values, (1, 3, 1, 1, 2), &device)
@@ -877,11 +875,11 @@ mod tests {
         // Pixel 0 (W=0): R=-1->0, G=0->127, B=1->255
         // Pixel 1 (W=1): R=0.5->191, G=-0.5->63, B=0->127
         assert_eq!(frame.len(), 6);
-        assert_eq!(frame[0], 0);   // R of pixel 0: (-1+1)*127.5 = 0
+        assert_eq!(frame[0], 0); // R of pixel 0: (-1+1)*127.5 = 0
         assert_eq!(frame[1], 127); // G of pixel 0: (0+1)*127.5 = 127.5 -> 127
         assert_eq!(frame[2], 255); // B of pixel 0: (1+1)*127.5 = 255
         assert_eq!(frame[3], 191); // R of pixel 1: (0.5+1)*127.5 = 191.25 -> 191
-        assert_eq!(frame[4], 63);  // G of pixel 1: (-0.5+1)*127.5 = 63.75 -> 63
+        assert_eq!(frame[4], 63); // G of pixel 1: (-0.5+1)*127.5 = 63.75 -> 63
         assert_eq!(frame[5], 127); // B of pixel 1: (0+1)*127.5 = 127.5 -> 127
     }
 }

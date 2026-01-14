@@ -10,7 +10,7 @@
 //!     cargo test verify_wan_transformer_parity --release --features flash-attn,cudnn
 
 use candle_core::{DType, Device, Tensor};
-use candle_video::models::wan::{load_transformer, WanTransformer3DConfig};
+use candle_video::models::wan::{WanTransformer3DConfig, load_transformer};
 use std::path::Path;
 
 /// Load reference tensors from safetensors file.
@@ -28,11 +28,7 @@ fn load_reference() -> Option<safetensors::SafeTensors<'static>> {
 }
 
 /// Convert safetensors tensor to candle tensor.
-fn st_to_candle(
-    st: &safetensors::SafeTensors,
-    name: &str,
-    device: &Device,
-) -> Option<Tensor> {
+fn st_to_candle(st: &safetensors::SafeTensors, name: &str, device: &Device) -> Option<Tensor> {
     let view = st.tensor(name).ok()?;
     let shape: Vec<usize> = view.shape().to_vec();
     let data = view.data();
@@ -115,7 +111,10 @@ fn verify_wan_transformer_small() {
     println!("Input shapes:");
     println!("  hidden_states: {:?}", hidden_states.dims());
     println!("  timestep: {:?}", timestep.dims());
-    println!("  encoder_hidden_states: {:?}", encoder_hidden_states.dims());
+    println!(
+        "  encoder_hidden_states: {:?}",
+        encoder_hidden_states.dims()
+    );
 
     // Run forward pass
     let output = transformer
@@ -202,7 +201,10 @@ fn verify_wan_transformer_medium() {
     println!("Input shapes:");
     println!("  hidden_states: {:?}", hidden_states.dims());
     println!("  timestep: {:?}", timestep.dims());
-    println!("  encoder_hidden_states: {:?}", encoder_hidden_states.dims());
+    println!(
+        "  encoder_hidden_states: {:?}",
+        encoder_hidden_states.dims()
+    );
 
     // Run forward pass
     let output = transformer

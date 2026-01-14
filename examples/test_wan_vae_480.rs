@@ -34,14 +34,22 @@ fn main() -> anyhow::Result<()> {
     let latent_w = width / 8; // 60
 
     println!("\nTest case: {} frames × {}×{}", num_frames, height, width);
-    println!("Latent shape: [1, 16, {}, {}, {}]", latent_frames, latent_h, latent_w);
+    println!(
+        "Latent shape: [1, 16, {}, {}, {}]",
+        latent_frames, latent_h, latent_w
+    );
 
     // Create deterministic input
-    let latents = Tensor::randn(0f32, 1f32, (1, 16, latent_frames, latent_h, latent_w), &device)?
-        .to_dtype(DType::BF16)?;
+    let latents = Tensor::randn(
+        0f32,
+        1f32,
+        (1, 16, latent_frames, latent_h, latent_w),
+        &device,
+    )?
+    .to_dtype(DType::BF16)?;
 
     println!("\nRunning VAE decode...");
-    
+
     // Try to decode
     match vae.decode(&latents) {
         Ok(output) => {

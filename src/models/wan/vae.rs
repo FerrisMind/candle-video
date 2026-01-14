@@ -1,8 +1,3 @@
-//! AutoencoderKLWan - 3D VAE for Wan video generation.
-//!
-//! Port of diffusers AutoencoderKLWan to Candle with VarBuilder.
-//! Supports Wan 2.1 (standard) and Wan 2.2 (residual) architectures.
-
 #![allow(clippy::needless_option_as_deref)]
 
 use candle_core::{IndexOp, Result, Tensor};
@@ -10,18 +5,10 @@ use candle_nn::{Conv2d, Conv2dConfig, VarBuilder};
 
 use crate::interfaces::distributions::DiagonalGaussianDistribution;
 use crate::models::wan::config::AutoencoderKLWanConfig;
-
-// =============================================================================
-// Constants
-// =============================================================================
+use crate::ops::conv3d::{Conv3d, Conv3dConfig, PaddingMode};
 
 const CACHE_T: usize = 2;
 
-// =============================================================================
-// Utility Functions
-// =============================================================================
-
-/// Patchify video tensor: [B, C, F, H, W] -> [B, C*ps*ps, F, H/ps, W/ps]
 pub fn patchify(x: &Tensor, patch_size: usize) -> Result<Tensor> {
     if patch_size == 1 {
         return Ok(x.clone());
@@ -40,21 +27,19 @@ pub fn patchify(x: &Tensor, patch_size: usize) -> Result<Tensor> {
     let wp = w / patch_size;
     let ps = patch_size;
 
-    // Step 1: Reshape to [b, c, f, hp, ps, wp*ps] - merge w dimension
     let x = x.reshape(&[b, c, f, hp, ps, wp * ps])?;
-    // Step 2: Reshape to [b, c, f, hp, ps, wp, ps]
+
     let x = x.reshape(&[b, c * f, hp, ps, wp, ps])?;
-    // Step 3: Permute to [b, c*f, ps, ps, hp, wp] = [b, cf, ps, ps, hp, wp]
+
     let x = x.permute([0, 1, 5, 3, 2, 4])?;
-    // Step 4: Reshape to [b, c, f, ps*ps, hp, wp]
+
     let x = x.reshape(&[b, c, f, ps * ps, hp, wp])?;
-    // Step 5: Permute to [b, c, ps*ps, f, hp, wp]
+
     let x = x.permute([0, 1, 3, 2, 4, 5])?;
-    // Step 6: Reshape to [b, c*ps*ps, f, hp, wp]
+
     x.reshape(&[b, c * ps * ps, f, hp, wp])
 }
 
-/// Unpatchify video tensor: [B, C*ps*ps, F, H, W] -> [B, C, F, H*ps, W*ps]
 pub fn unpatchify(x: &Tensor, patch_size: usize) -> Result<Tensor> {
     if patch_size == 1 {
         return Ok(x.clone());
@@ -66,15 +51,14 @@ pub fn unpatchify(x: &Tensor, patch_size: usize) -> Result<Tensor> {
         candle_core::bail!("Invalid channels for unpatchify: {}", c_p);
     }
 
-    // Step 1: Reshape to [b, c, ps*ps, f, hp, wp]
     let x = x.reshape(&[b, channels, ps * ps, f, hp, wp])?;
-    // Step 2: Permute to [b, c, f, ps*ps, hp, wp]
+
     let x = x.permute([0, 1, 3, 2, 4, 5])?;
-    // Step 3: Reshape to [b, c*f, ps, ps, hp, wp]
+
     let x = x.reshape(&[b, channels * f, ps, ps, hp, wp])?;
-    // Step 4: Permute to [b, c*f, hp, ps, wp, ps]
+
     let x = x.permute([0, 1, 4, 2, 5, 3])?;
-    // Step 5: Reshape to [b, c, f, hp*ps, wp*ps]
+
     x.reshape(&[b, channels, f, hp * ps, wp * ps])
 }
 
@@ -86,27 +70,20 @@ fn pad_time_front(x: &Tensor, pad_t: usize) -> Result<Tensor> {
     if pad_t == 0 {
         return Ok(x.clone());
     }
-    // OPTIMIZATION: Use Candle's built-in pad_with_zeros instead of zeros + cat
-    // This is more memory efficient as it avoids creating intermediate tensors
+
     x.pad_with_zeros(2, pad_t, 0)
 }
 
-// Slice 5D tensor along time dimension: x[:, :, start:end, :, :]
 fn slice_time(x: &Tensor, start: usize, len: usize) -> Result<Tensor> {
     x.narrow(2, start, len)
 }
 
-// =============================================================================
-// WanRmsNorm - RMS Normalization
-// =============================================================================
-
-/// RMS normalization for Wan VAE (channel-first, 5D tensors).
 #[derive(Debug, Clone)]
 pub struct WanRmsNorm {
     gamma: Tensor,
     scale: f32,
     #[allow(dead_code)]
-    images: bool, // true for 4D (images), false for 5D (video)
+    images: bool,
 }
 
 impl WanRmsNorm {
@@ -126,13 +103,8 @@ impl WanRmsNorm {
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let dtype = x.dtype();
-        // L2 normalize along channel dimension (dim=1)
-        // Work in native dtype to save memory
-        let norm = x
-            .sqr()?
-            .sum_keepdim(1)?
-            .sqrt()?
-            .clamp(1e-6f64, 1e6f64)?;  // Use f64 for clamp bounds
+
+        let norm = x.sqr()?.sum_keepdim(1)?.sqrt()?.clamp(1e-6f64, 1e6f64)?;
         let y = x.broadcast_div(&norm)?;
         let y = (y * self.scale as f64)?;
         let gamma = self.gamma.to_dtype(dtype)?;
@@ -140,191 +112,33 @@ impl WanRmsNorm {
     }
 }
 
-// =============================================================================
-// WanCausalConv3d - Causal 3D Convolution via Conv2d slices
-// =============================================================================
+pub type WanCausalConv3d = Conv3d;
 
-/// Causal 3D convolution implemented via Conv2d slices.
-#[derive(Debug, Clone)]
-pub struct WanCausalConv3d {
-    conv2d_slices: Vec<Conv2d>,
-    bias: Option<Tensor>,
-    kernel_t: usize,
-    #[allow(dead_code)]
-    kernel_h: usize,
-    #[allow(dead_code)]
-    kernel_w: usize,
-    stride_t: usize,
-    #[allow(dead_code)]
-    stride_h: usize,
-    #[allow(dead_code)]
-    stride_w: usize,
-    pad_h: usize,
-    pad_w: usize,
+pub fn wan_causal_conv3d_new(
+    in_channels: usize,
+    out_channels: usize,
+    kernel_size: (usize, usize, usize),
+    stride: (usize, usize, usize),
+    padding: (usize, usize, usize),
+    vb: VarBuilder,
+) -> Result<Conv3d> {
+    let (kt, kh, kw) = kernel_size;
+    let (st, sh, sw) = stride;
+    let (_pt, ph, pw) = padding;
+
+    let config = Conv3dConfig {
+        kernel: (kt, kh, kw),
+        stride: (st, sh, sw),
+        padding: (0, ph, pw),
+        dilation: (1, 1, 1),
+        groups: 1,
+        is_causal: true,
+        padding_mode: PaddingMode::Replicate,
+    };
+
+    Conv3d::new(in_channels, out_channels, config, vb)
 }
 
-impl WanCausalConv3d {
-    pub fn new(
-        in_channels: usize,
-        out_channels: usize,
-        kernel_size: (usize, usize, usize), // (t, h, w)
-        stride: (usize, usize, usize),
-        padding: (usize, usize, usize),
-        vb: VarBuilder,
-    ) -> Result<Self> {
-        let (kt, kh, kw) = kernel_size;
-        let (st, sh, sw) = stride;
-        let (_pt, ph, pw) = padding;
-
-        // Load 3D weight: (out, in, kt, kh, kw)
-        let w = vb.get((out_channels, in_channels, kt, kh, kw), "weight")?;
-        let bias = vb.get(out_channels, "bias").ok();
-
-        // Create Conv2d for each temporal slice
-        // Note: We handle spatial padding manually in forward() via pad_hw_replicate,
-        // so Conv2d should have padding=0 to avoid double-padding
-        let mut conv2d_slices = Vec::with_capacity(kt);
-        for ti in 0..kt {
-            let w2 = w.i((.., .., ti, .., ..))?.contiguous()?;
-            let c2cfg = Conv2dConfig {
-                padding: 0,  // Padding is handled manually in forward()
-                stride: sh,
-                dilation: 1,
-                groups: 1,
-                ..Default::default()
-            };
-            conv2d_slices.push(Conv2d::new(w2, None, c2cfg));
-        }
-
-        Ok(Self {
-            conv2d_slices,
-            bias,
-            kernel_t: kt,
-            kernel_h: kh,
-            kernel_w: kw,
-            stride_t: st,
-            stride_h: sh,
-            stride_w: sw,
-            pad_h: ph,
-            pad_w: pw,
-        })
-    }
-
-    /// Forward with optional cache for causal inference.
-    /// 
-    /// OPTIMIZATION: Instead of creating Vec<Tensor> and concatenating in a loop,
-    /// we collect output frames and do a single concatenation at the end.
-    pub fn forward(&self, x: &Tensor, cache_x: Option<&Tensor>) -> Result<Tensor> {
-        let kt = self.kernel_t;
-        let mut pad_t_total = 2 * (kt / 2); // Causal padding
-
-        // OPTIMIZATION: Avoid cloning x when possible
-        // Only concatenate with cache if cache is provided AND padding is needed
-        let x_with_cache: std::borrow::Cow<'_, Tensor> = if let Some(cx) = cache_x {
-            let cx = cx.to_device(x.device())?;
-            let t_cached = cx.dims5()?.2;
-            pad_t_total = pad_t_total.saturating_sub(t_cached);
-            let cat = Tensor::cat(&[&cx, x], 2)?;
-            std::borrow::Cow::Owned(cat.contiguous()?)
-        } else {
-            std::borrow::Cow::Borrowed(x)
-        };
-
-        // Pad time (front only for causal) - only if needed
-        let x_padded_t = if pad_t_total > 0 {
-            std::borrow::Cow::Owned(pad_time_front(&x_with_cache, pad_t_total)?)
-        } else {
-            x_with_cache
-        };
-        
-        // Pad spatial - only if needed
-        let x2 = if self.pad_h > 0 || self.pad_w > 0 {
-            pad_hw_replicate(&x_padded_t, self.pad_h, self.pad_w)?
-        } else {
-            x_padded_t.into_owned()
-        };
-
-        let (b, c_in, t_pad, h, w) = x2.dims5()?;
-        let dt = 1; // dilation
-        let needed = (kt - 1) * dt + 1;
-        if t_pad < needed {
-            candle_core::bail!(
-                "time dim too small after padding: t_pad={}, needed={}",
-                t_pad,
-                needed
-            );
-        }
-        let t_out = (t_pad - needed) / self.stride_t + 1;
-
-        // OPTIMIZATION: For kt == 1 (common 1x1x1 conv), avoid loop entirely
-        if kt == 1 {
-            // Simple case: single temporal kernel
-            let x_4d = x2.permute((0, 2, 1, 3, 4))?.reshape((b * t_pad, c_in, h, w))?;
-            let y_4d = x_4d.apply(&self.conv2d_slices[0])?;
-            let (_, c_out, h_out, w_out) = y_4d.dims4()?;
-            let y = y_4d.reshape((b, t_pad, c_out, h_out, w_out))?.permute((0, 2, 1, 3, 4))?;
-            
-            // Apply stride if needed
-            let y = if self.stride_t > 1 {
-                // Stride selection: take every stride_t frame
-                let mut frames = Vec::with_capacity(t_out);
-                for i in 0..t_out {
-                    frames.push(y.narrow(2, i * self.stride_t, 1)?);
-                }
-                let refs: Vec<&Tensor> = frames.iter().collect();
-                Tensor::cat(&refs, 2)?
-            } else {
-                y
-            };
-            
-            if let Some(bias) = &self.bias {
-                let bias = bias.reshape((1, bias.dims1()?, 1, 1, 1))?;
-                return y.broadcast_add(&bias);
-            }
-            return Ok(y);
-        }
-
-        // General case with kt > 1: process output time frames
-        // Pre-allocate vector for output frames
-        let mut ys: Vec<Tensor> = Vec::with_capacity(t_out);
-        
-        for to in 0..t_out {
-            let base_t = to * self.stride_t;
-            // OPTIMIZATION: Accumulate directly instead of Option<Tensor>
-            let xt0 = x2.i((.., .., base_t, .., ..))?;
-            let mut acc = xt0.apply(&self.conv2d_slices[0])?;
-            
-            for ki in 1..kt {
-                let ti = base_t + ki * dt;
-                let xt = x2.i((.., .., ti, .., ..))?;
-                let yt = xt.apply(&self.conv2d_slices[ki])?;
-                acc = acc.add(&yt)?;
-            }
-            ys.push(acc.unsqueeze(2)?);
-        }
-
-        // Single concat at the end
-        let y = if ys.len() == 1 {
-            ys.into_iter().next().unwrap()
-        } else {
-            let refs: Vec<&Tensor> = ys.iter().collect();
-            Tensor::cat(&refs, 2)?
-        };
-
-        if let Some(bias) = &self.bias {
-            let bias = bias.reshape((1, bias.dims1()?, 1, 1, 1))?;
-            y.broadcast_add(&bias)
-        } else {
-            Ok(y)
-        }
-    }
-}
-
-// =============================================================================
-// AvgDown3D / DupUp3D - Downsampling and Upsampling
-// =============================================================================
-
-/// Average pooling 3D downsampler.
 #[derive(Debug, Clone)]
 pub struct AvgDown3D {
     in_channels: usize,
@@ -372,7 +186,6 @@ impl AvgDown3D {
             );
         }
 
-        // Pad time if needed
         let pad_t = (self.factor_t - (t % self.factor_t)) % self.factor_t;
         let x = pad_time_front(x, pad_t)?;
         let (b, c, t2, h2, w2) = x.dims5()?;
@@ -383,28 +196,25 @@ impl AvgDown3D {
         let h_out = h2 / fs;
         let w_out = w2 / fs;
 
-        // Reshape for averaging - split into multiple steps to avoid 8D
-        // Step 1: Reshape to [b, c, t_out, ft, h2, w2]
         let x = x.reshape(&[b, c, t_out, ft, h2, w2])?;
-        // Step 2: Permute to [b, c, ft, t_out, h2, w2]
+
         let x = x.permute([0, 1, 3, 2, 4, 5])?;
-        // Step 3: Reshape to [b, c*ft, t_out, h_out, fs, w2]
+
         let x = x.reshape(&[b, c * ft, t_out, h_out, fs, w2])?;
-        // Step 4: Permute to [b, c*ft, fs, t_out, h_out, w2]
+
         let x = x.permute([0, 1, 4, 2, 3, 5])?;
-        // Step 5: Reshape to [b, c*ft*fs, t_out, h_out, w_out, fs]
+
         let x = x.reshape(&[b, c * ft * fs, t_out, h_out, w_out, fs])?;
-        // Step 6: Permute to [b, c*ft*fs, fs, t_out, h_out, w_out]
+
         let x = x.permute([0, 1, 5, 2, 3, 4])?;
-        // Step 7: Reshape to [b, c*factor, t_out, h_out, w_out]
+
         let x = x.reshape(&[b, c * self.factor, t_out, h_out, w_out])?;
-        // Step 8: Reshape to [b, out_channels, group_size, t_out, h_out, w_out]
+
         let x = x.reshape(&[b, self.out_channels, self.group_size, t_out, h_out, w_out])?;
         x.mean(2)
     }
 }
 
-/// Duplication 3D upsampler.
 #[derive(Debug, Clone)]
 pub struct DupUp3D {
     in_channels: usize,
@@ -440,8 +250,6 @@ impl DupUp3D {
         })
     }
 
-    /// Forward pass matching Python diffusers implementation exactly.
-    /// Uses repeat_interleave + view + permute for memory efficiency.
     pub fn forward(&self, x: &Tensor, first_chunk: bool) -> Result<Tensor> {
         let (b, c, t, h, w) = x.dims5()?;
         if c != self.in_channels {
@@ -455,27 +263,14 @@ impl DupUp3D {
         let ft = self.factor_t;
         let fs = self.factor_s;
 
-        // Step 1: repeat_interleave along channel dimension
-        // Python: x = x.repeat_interleave(self.repeats, dim=1)
         let x = repeat_interleave_dim1(x, self.repeats)?;
-        // Now x has shape [b, in_channels * repeats, t, h, w]
-        // = [b, out_channels * factor, t, h, w]
-        // = [b, out_channels * ft * fs * fs, t, h, w]
 
-        // Step 2: Reshape to [b, out_channels, ft, fs, fs, t, h, w]
-        // Python: x = x.view(b, out_channels, factor_t, factor_s, factor_s, t, h, w)
         let x = x.reshape(&[b, self.out_channels, ft, fs, fs, t, h, w])?;
 
-        // Step 3: Permute to [b, out_channels, t, ft, h, fs, w, fs]
-        // Python: x = x.permute(0, 1, 5, 2, 6, 3, 7, 4).contiguous()
         let x = x.permute([0, 1, 5, 2, 6, 3, 7, 4])?.contiguous()?;
 
-        // Step 4: Reshape to [b, out_channels, t*ft, h*fs, w*fs]
-        // Python: x = x.view(b, out_channels, t*ft, h*fs, w*fs)
         let mut x = x.reshape(&[b, self.out_channels, t * ft, h * fs, w * fs])?;
 
-        // Step 5: Slice if first_chunk
-        // Python: if first_chunk: x = x[:, :, factor_t - 1:, :, :]
         if first_chunk {
             let start = ft - 1;
             let t_total = x.dims5()?.2;
@@ -486,28 +281,26 @@ impl DupUp3D {
     }
 }
 
-/// Repeat interleave along dimension 1 (channel dimension).
-/// This is more memory efficient than creating copies and concatenating.
 fn repeat_interleave_dim1(x: &Tensor, repeats: usize) -> Result<Tensor> {
     if repeats == 1 {
         return Ok(x.clone());
     }
     let (b, c, t, h, w) = x.dims5()?;
-    // Reshape to [b, c, 1, t, h, w]
+
     let x = x.unsqueeze(2)?;
-    // Expand to [b, c, repeats, t, h, w] using broadcast
+
     let x = x.broadcast_as(&[b, c, repeats, t, h, w])?;
-    // Reshape to [b, c * repeats, t, h, w]
+
     x.reshape(&[b, c * repeats, t, h, w])
 }
 
+#[allow(dead_code)]
 fn pad_hw_replicate(x: &Tensor, ph: usize, pw: usize) -> Result<Tensor> {
     if ph == 0 && pw == 0 {
         return Ok(x.clone());
     }
     let (b, c, t, h, w) = x.dims5()?;
-    
-    // Process height padding
+
     let x = if ph > 0 {
         let top = x.narrow(3, 0, 1)?.broadcast_as((b, c, t, ph, w))?;
         let bottom = x.narrow(3, h - 1, 1)?.broadcast_as((b, c, t, ph, w))?;
@@ -515,29 +308,27 @@ fn pad_hw_replicate(x: &Tensor, ph: usize, pw: usize) -> Result<Tensor> {
     } else {
         x.clone()
     };
-    
-    // Process width padding
+
     let x = if pw > 0 {
         let (b_new, c_new, t_new, h_new, _) = x.dims5()?;
-        let left = x.narrow(4, 0, 1)?.broadcast_as((b_new, c_new, t_new, h_new, pw))?;
-        let right = x.narrow(4, w - 1, 1)?.broadcast_as((b_new, c_new, t_new, h_new, pw))?;
+        let left = x
+            .narrow(4, 0, 1)?
+            .broadcast_as((b_new, c_new, t_new, h_new, pw))?;
+        let right = x
+            .narrow(4, w - 1, 1)?
+            .broadcast_as((b_new, c_new, t_new, h_new, pw))?;
         Tensor::cat(&[&left, &x, &right], 4)?
     } else {
         x
     };
-    
+
     Ok(x)
 }
 
-// =============================================================================
-// Feature Cache for Causal Inference
-// =============================================================================
-
-/// Feature cache entry for causal convolution inference.
 #[derive(Clone)]
 pub enum FeatCache {
     Empty,
-    Rep, // Sentinel for first call
+    Rep,
     Tensor(Tensor),
 }
 
@@ -554,7 +345,6 @@ impl FeatCache {
     }
 }
 
-/// Extension trait for feature cache vectors.
 pub trait FeatCacheVecExt {
     fn ensure_len(&mut self, n: usize);
 }
@@ -567,11 +357,12 @@ impl FeatCacheVecExt for Vec<FeatCache> {
     }
 }
 
+#[allow(dead_code)]
 fn build_cache_frames(x: &Tensor, cache_entry: &FeatCache) -> Result<Tensor> {
     let (_, _, t, _, _) = x.dims5()?;
     let take = CACHE_T.min(t);
     let start = t - take;
-    // OPTIMIZATION: .copy() is critical to break view dependency on large input activations
+
     let mut cache_x = slice_time(x, start, take)?.copy()?;
 
     if cache_x.dims5()?.2 < CACHE_T
@@ -595,11 +386,6 @@ fn build_cache_frames(x: &Tensor, cache_entry: &FeatCache) -> Result<Tensor> {
     Ok(cache_x)
 }
 
-// =============================================================================
-// WanResample - Resampling Module
-// =============================================================================
-
-/// Resampling mode for WanResample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResampleMode {
     None,
@@ -609,7 +395,6 @@ pub enum ResampleMode {
     Downsample3d,
 }
 
-/// Resampling module for encoder/decoder.
 #[derive(Debug)]
 pub struct WanResample {
     mode: ResampleMode,
@@ -631,7 +416,6 @@ impl WanResample {
         let (conv2d, time_conv) = match mode {
             ResampleMode::None => (None, None),
             ResampleMode::Upsample2d => {
-                // Conv2d with padding=1, kernel=3
                 let conv = Conv2d::new(
                     vb.pp("resample.1").get((out_dim, dim, 3, 3), "weight")?,
                     Some(vb.pp("resample.1").get(out_dim, "bias")?),
@@ -657,7 +441,7 @@ impl WanResample {
                         ..Default::default()
                     },
                 );
-                let tc = WanCausalConv3d::new(
+                let tc = wan_causal_conv3d_new(
                     dim,
                     dim * 2,
                     (3, 1, 1),
@@ -668,12 +452,11 @@ impl WanResample {
                 (Some(conv), Some(tc))
             }
             ResampleMode::Downsample2d => {
-                // ZeroPad2d(0,1,0,1) + Conv2d stride=2
                 let conv = Conv2d::new(
                     vb.pp("resample.1").get((dim, dim, 3, 3), "weight")?,
                     Some(vb.pp("resample.1").get(dim, "bias")?),
                     Conv2dConfig {
-                        padding: 0, // We'll handle padding manually
+                        padding: 0,
                         stride: 2,
                         dilation: 1,
                         groups: 1,
@@ -694,7 +477,7 @@ impl WanResample {
                         ..Default::default()
                     },
                 );
-                let tc = WanCausalConv3d::new(
+                let tc = wan_causal_conv3d_new(
                     dim,
                     dim,
                     (3, 1, 1),
@@ -723,29 +506,31 @@ impl WanResample {
         let (b, c, t, h, w) = x.dims5()?;
 
         match self.mode {
-            // OPTIMIZATION: Return reference directly, not a clone
             ResampleMode::None => Ok(x.clone()),
 
             ResampleMode::Upsample2d => {
                 let t = x.dims5()?.2;
                 eprintln!("      Resample: Upsample2d start (T={})...", t);
-                // Ensure input is contiguous to avoid hidden copies in reshape
+
                 let x_cont = x.contiguous()?;
-                
+
                 let x_4d = if t == 1 {
                     x_cont.reshape((b, c, h, w))?
                 } else {
-                    x_cont.permute((0, 2, 1, 3, 4))?.contiguous()?.reshape((b * t, c, h, w))?
+                    x_cont
+                        .permute((0, 2, 1, 3, 4))?
+                        .contiguous()?
+                        .reshape((b * t, c, h, w))?
                 };
-                
+
                 let x2 = upsample_nearest_2x(&x_4d)?;
-                // Force synchronize to free temp cuDNN buffers before conv
+
                 x2.device().synchronize()?;
-                
+
                 let x2 = x2.apply(self.conv2d.as_ref().unwrap())?;
-                // Sync after heavy 480x480 conv
+
                 x2.device().synchronize()?;
-                
+
                 let (_, c2, h2, w2) = x2.dims4()?;
 
                 if t == 1 {
@@ -757,32 +542,34 @@ impl WanResample {
 
             ResampleMode::Upsample3d => {
                 eprintln!("      Resample: Upsample3d start...");
-                // Time conv with cache
+
                 let x_tc: Tensor;
-                
+
                 if let Some(cache) = feat_cache {
                     let idx = *feat_idx;
                     cache.ensure_len(idx + 1);
                     if cache[idx].is_empty() {
                         cache[idx] = FeatCache::Rep;
                         *feat_idx += 1;
-                        // First chunk: no time conv, just pass through to 2D upsample
+
                         x_tc = x.clone();
                     } else {
-                        eprintln!("      Resample: Upsample3d build_cache_frames...");
-                        let cache_x = build_cache_frames(x, &cache[idx])?;
-                        let tc = self.time_conv.as_ref().unwrap();
                         eprintln!("      Resample: Upsample3d time_conv forward...");
-                        let x_conv = if matches!(cache[idx], FeatCache::Rep) {
-                            tc.forward(x, None)?
+                        let tc = self.time_conv.as_ref().unwrap();
+
+                        let cache_tensor = if matches!(cache[idx], FeatCache::Rep) {
+                            None
                         } else {
-                            tc.forward(x, cache[idx].as_tensor())?
+                            cache[idx].as_tensor()
                         };
-                        cache[idx] = FeatCache::Tensor(cache_x);
+                        let (x_conv, new_cache) = tc.forward_with_cache(x, cache_tensor)?;
+                        if let Some(nc) = new_cache {
+                            cache[idx] = FeatCache::Tensor(nc);
+                        }
                         *feat_idx += 1;
 
                         eprintln!("      Resample: Upsample3d reshape/stack...");
-                        // Reshape [b, 2*c, t, h, w] -> interleave time
+
                         let x_tc2 = x_conv.reshape((b, 2, c, t, h, w))?;
                         let a = x_tc2.i((.., 0, .., .., .., ..))?;
                         let b2 = x_tc2.i((.., 1, .., .., .., ..))?;
@@ -791,7 +578,7 @@ impl WanResample {
                 } else {
                     eprintln!("      Resample: Upsample3d (no cache) time_conv forward...");
                     let tc = self.time_conv.as_ref().unwrap();
-                    let x_conv = tc.forward(x, None)?;
+                    let x_conv = tc.forward(x)?;
                     let x_tc2 = x_conv.reshape((b, 2, c, t, h, w))?;
                     let a = x_tc2.i((.., 0, .., .., .., ..))?;
                     let b2 = x_tc2.i((.., 1, .., .., .., ..))?;
@@ -799,23 +586,26 @@ impl WanResample {
                 }
 
                 eprintln!("      Resample: Upsample3d upsample_nearest_2x...");
-                // 2D upsample + conv
+
                 let (b2, c2, t2, h2, w2) = x_tc.dims5()?;
                 let x_4d = if t2 == 1 {
                     x_tc.reshape((b2, c2, h2, w2))?
                 } else {
-                    x_tc.permute((0, 2, 1, 3, 4))?.contiguous()?.reshape((b2 * t2, c2, h2, w2))?
+                    x_tc.permute((0, 2, 1, 3, 4))?
+                        .contiguous()?
+                        .reshape((b2 * t2, c2, h2, w2))?
                 };
-                
-                // Clear x_tc early if possible
-                if t2 > 1 { drop(x_tc); } 
+
+                if t2 > 1 {
+                    drop(x_tc);
+                }
 
                 let x2 = upsample_nearest_2x(&x_4d)?;
                 x2.device().synchronize()?;
                 let x2 = x2.apply(self.conv2d.as_ref().unwrap())?;
                 x2.device().synchronize()?;
                 let (_, c3, h3, w3) = x2.dims4()?;
-                
+
                 if t2 == 1 {
                     x2.reshape((b2, c3, 1, h3, w3))
                 } else {
@@ -824,7 +614,6 @@ impl WanResample {
             }
 
             ResampleMode::Downsample2d => {
-                // ZeroPad2d(0,1,0,1) then conv stride=2
                 let x2 = x.permute((0, 2, 1, 3, 4))?.reshape((b * t, c, h, w))?;
                 let x2 = zero_pad_2d(&x2, 0, 1, 0, 1)?;
                 let x2 = x2.apply(self.conv2d.as_ref().unwrap())?;
@@ -833,34 +622,28 @@ impl WanResample {
             }
 
             ResampleMode::Downsample3d => {
-                // OPTIMIZATION: Removed x.clone() - work with reference where possible
                 if let Some(cache) = feat_cache {
                     let idx = *feat_idx;
                     cache.ensure_len(idx + 1);
                     if cache[idx].is_empty() {
-                        // FIX: Store only the LAST FRAME, not the entire tensor!
-                        // This matches Python: feat_cache[idx] = x.clone() but we're smarter
-                        // For first chunk, we need to store last frame for next iteration
                         let x_t = x.dims5()?.2;
                         let cache_x = slice_time(x, x_t - 1, 1)?.copy()?;
                         cache[idx] = FeatCache::Tensor(cache_x);
                         *feat_idx += 1;
-                        // No time_conv on first chunk - just pass through to 2D downsample
                     } else {
                         let prev_tensor = cache[idx].as_tensor().unwrap();
                         let prev_t = prev_tensor.dims5()?.2;
                         let prev_last = slice_time(prev_tensor, prev_t - 1, 1)?;
                         let x_cat = Tensor::cat(&[&prev_last, x], 2)?;
                         let tc = self.time_conv.as_ref().unwrap();
-                        let x_conv = tc.forward(&x_cat, None)?;
-                        
-                        // Store only last frame for next iteration
+
+                        let x_conv = tc.forward(&x_cat)?;
+
                         let x_t = x.dims5()?.2;
                         let cache_x = slice_time(x, x_t - 1, 1)?.copy()?;
                         cache[idx] = FeatCache::Tensor(cache_x);
                         *feat_idx += 1;
 
-                        // 2D downsample on conv result
                         let (b2, c2, t2, h2, w2) = x_conv.dims5()?;
                         let x2 = x_conv
                             .permute((0, 2, 1, 3, 4))?
@@ -872,9 +655,9 @@ impl WanResample {
                     }
                 } else {
                     let tc = self.time_conv.as_ref().unwrap();
-                    let x_conv = tc.forward(x, None)?;
-                    
-                    // 2D downsample
+
+                    let x_conv = tc.forward(x)?;
+
                     let (b2, c2, t2, h2, w2) = x_conv.dims5()?;
                     let x2 = x_conv
                         .permute((0, 2, 1, 3, 4))?
@@ -885,11 +668,8 @@ impl WanResample {
                     return x2.reshape((b2, t2, c3, h3, w3))?.permute((0, 2, 1, 3, 4));
                 }
 
-                // First chunk path continues here (no time_conv)
                 let (b2, c2, t2, h2, w2) = x.dims5()?;
-                let x2 = x
-                    .permute((0, 2, 1, 3, 4))?
-                    .reshape((b2 * t2, c2, h2, w2))?;
+                let x2 = x.permute((0, 2, 1, 3, 4))?.reshape((b2 * t2, c2, h2, w2))?;
                 let x2 = zero_pad_2d(&x2, 0, 1, 0, 1)?;
                 let x2 = x2.apply(self.conv2d.as_ref().unwrap())?;
                 let (_, c3, h3, w3) = x2.dims4()?;
@@ -899,11 +679,9 @@ impl WanResample {
     }
 }
 
-/// Nearest neighbor 2x upsampling using interpolation.
-/// This is more memory efficient than using repeat().
 fn upsample_nearest_2x(x: &Tensor) -> Result<Tensor> {
     let (_b, _c, h, w) = x.dims4()?;
-    // Use candle's upsample_nearest2d which is memory efficient
+
     x.upsample_nearest2d(h * 2, w * 2)
 }
 
@@ -916,24 +694,19 @@ fn zero_pad_2d(x: &Tensor, left: usize, right: usize, top: usize, bottom: usize)
     Ok(out)
 }
 
-// =============================================================================
-// WanResidualBlock - Residual Block
-// =============================================================================
-
-/// Residual block for Wan VAE.
 #[derive(Debug)]
 pub struct WanResidualBlock {
     norm1: WanRmsNorm,
-    conv1: WanCausalConv3d,
+    conv1: Conv3d,
     norm2: WanRmsNorm,
-    conv2: WanCausalConv3d,
-    conv_shortcut: Option<WanCausalConv3d>,
+    conv2: Conv3d,
+    conv_shortcut: Option<Conv3d>,
 }
 
 impl WanResidualBlock {
     pub fn new(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Self> {
         let norm1 = WanRmsNorm::new(in_dim, false, vb.pp("norm1"))?;
-        let conv1 = WanCausalConv3d::new(
+        let conv1 = wan_causal_conv3d_new(
             in_dim,
             out_dim,
             (3, 3, 3),
@@ -942,7 +715,7 @@ impl WanResidualBlock {
             vb.pp("conv1"),
         )?;
         let norm2 = WanRmsNorm::new(out_dim, false, vb.pp("norm2"))?;
-        let conv2 = WanCausalConv3d::new(
+        let conv2 = wan_causal_conv3d_new(
             out_dim,
             out_dim,
             (3, 3, 3),
@@ -952,7 +725,7 @@ impl WanResidualBlock {
         )?;
 
         let conv_shortcut = if in_dim != out_dim {
-            Some(WanCausalConv3d::new(
+            Some(wan_causal_conv3d_new(
                 in_dim,
                 out_dim,
                 (1, 1, 1),
@@ -979,24 +752,20 @@ impl WanResidualBlock {
         mut feat_cache: Option<&mut Vec<FeatCache>>,
         feat_idx: &mut usize,
     ) -> Result<Tensor> {
-        // Shortcut
         let h = if let Some(sc) = &self.conv_shortcut {
-            sc.forward(x, None)?
+            sc.forward(x)?
         } else {
             x.clone()
         };
 
-        // Main path
         let mut y = self.norm1.forward(x)?;
         y = silu(&y)?;
 
-        // Conv1 with cache - reborrow to allow multiple uses
         y = causal_conv_cached(&self.conv1, &y, feat_cache.as_deref_mut(), feat_idx)?;
 
         y = self.norm2.forward(&y)?;
         y = silu(&y)?;
 
-        // Conv2 with cache
         y = causal_conv_cached(&self.conv2, &y, feat_cache, feat_idx)?;
 
         y.add(&h)
@@ -1004,7 +773,7 @@ impl WanResidualBlock {
 }
 
 fn causal_conv_cached(
-    conv: &WanCausalConv3d,
+    conv: &Conv3d,
     x: &Tensor,
     feat_cache: Option<&mut Vec<FeatCache>>,
     feat_idx: &mut usize,
@@ -1012,21 +781,21 @@ fn causal_conv_cached(
     if let Some(cache) = feat_cache {
         let idx = *feat_idx;
         cache.ensure_len(idx + 1);
-        let cache_x = build_cache_frames(x, &cache[idx])?;
-        let out = conv.forward(x, cache[idx].as_tensor())?;
-        cache[idx] = FeatCache::Tensor(cache_x);
+
+        let cache_tensor = cache[idx].as_tensor();
+
+        let (out, new_cache) = conv.forward_with_cache(x, cache_tensor)?;
+
+        if let Some(nc) = new_cache {
+            cache[idx] = FeatCache::Tensor(nc);
+        }
         *feat_idx += 1;
         Ok(out)
     } else {
-        conv.forward(x, None)
+        conv.forward(x)
     }
 }
 
-// =============================================================================
-// WanAttentionBlock - Self-Attention Block
-// =============================================================================
-
-/// Single-head self-attention block for Wan VAE.
 #[derive(Debug)]
 pub struct WanAttentionBlock {
     norm: WanRmsNorm,
@@ -1062,26 +831,22 @@ impl WanAttentionBlock {
         let identity = x.clone();
         let (b, c, t, h, w) = x.dims5()?;
 
-        // Reshape to [b*t, c, h, w]
         let mut y = x.permute((0, 2, 1, 3, 4))?.reshape((b * t, c, h, w))?;
         y = self.norm.forward(&y)?;
 
-        // QKV projection
-        let qkv = y.apply(&self.to_qkv)?; // [b*t, 3c, h, w]
+        let qkv = y.apply(&self.to_qkv)?;
         let hw = h * w;
-        let qkv = qkv.reshape((b * t, 1, 3 * c, hw))?.permute((0, 1, 3, 2))?; // [bt, 1, hw, 3c]
+        let qkv = qkv.reshape((b * t, 1, 3 * c, hw))?.permute((0, 1, 3, 2))?;
 
-        // Split QKV using narrow
         let q = qkv.narrow(3, 0, c)?;
         let k = qkv.narrow(3, c, c)?;
         let v = qkv.narrow(3, 2 * c, c)?;
 
-        // Scaled dot-product attention
         let scale = 1f32 / (c as f32).sqrt();
         let k_t = k.transpose(2, 3)?;
         let scores = (q.matmul(&k_t)? * scale as f64)?;
         let probs = candle_nn::ops::softmax(&scores, 3)?;
-        let y = probs.matmul(&v)?; // [bt, 1, hw, c]
+        let y = probs.matmul(&v)?;
 
         let y = y
             .squeeze(1)?
@@ -1089,18 +854,12 @@ impl WanAttentionBlock {
             .reshape((b * t, c, h, w))?;
         let y = y.apply(&self.proj)?;
 
-        // Reshape back to [b, c, t, h, w]
         let y = y.reshape((b, t, c, h, w))?.permute((0, 2, 1, 3, 4))?;
 
         y.add(&identity)
     }
 }
 
-// =============================================================================
-// WanMidBlock - Middle Block
-// =============================================================================
-
-/// Middle block with residual blocks and attention.
 #[derive(Debug)]
 pub struct WanMidBlock {
     resnets: Vec<WanResidualBlock>,
@@ -1149,11 +908,6 @@ impl WanMidBlock {
     }
 }
 
-// =============================================================================
-// WanUpBlock - Upsampling Block (Wan 2.1)
-// =============================================================================
-
-/// Upsampling block for Wan 2.1 decoder.
 #[derive(Debug)]
 pub struct WanUpBlock {
     resnets: Vec<WanResidualBlock>,
@@ -1184,7 +938,7 @@ impl WanUpBlock {
             Some(WanResample::new(
                 out_dim,
                 mode,
-                None, // Use default out_dim = dim / 2
+                None,
                 vb.pp("upsamplers.0"),
             )?)
         } else {
@@ -1201,13 +955,12 @@ impl WanUpBlock {
         feat_idx: &mut usize,
         _first_chunk: bool,
     ) -> Result<Tensor> {
-        // OPTIMIZATION: Start with shallow clone, not deep clone
         let mut y = x.clone();
 
         for (i, resnet) in self.resnets.iter().enumerate() {
             eprintln!("    up_block resnet {}...", i);
             let next_y = resnet.forward(&y, feat_cache.as_deref_mut(), feat_idx)?;
-            // Free old y explicitly to reuse memory
+
             drop(y);
             y = next_y;
             eprintln!("    up_block resnet {} done, shape {:?}", i, y.dims());
@@ -1225,22 +978,17 @@ impl WanUpBlock {
     }
 }
 
-// =============================================================================
-// WanEncoder3d - 3D Encoder
-// =============================================================================
-
-/// 3D Encoder for Wan VAE.
 #[derive(Debug)]
 pub struct WanEncoder3d {
-    conv_in: WanCausalConv3d,
+    conv_in: Conv3d,
     down_blocks: Vec<WanEncoderBlock>,
     mid_block: WanMidBlock,
     norm_out: WanRmsNorm,
-    conv_out: WanCausalConv3d,
+    conv_out: Conv3d,
 }
 
-/// Encoder block (residual blocks + optional downsample).
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum WanEncoderBlock {
     Residual(WanResidualBlock),
     Attention(WanAttentionBlock),
@@ -1255,14 +1003,12 @@ impl WanEncoder3d {
         let num_res_blocks = cfg.num_res_blocks;
         let temporal_downsample = &cfg.temporal_downsample;
 
-        // Dimensions: [dim, dim*1, dim*2, dim*4, dim*4]
         let mut dims = vec![dim];
         for &m in dim_mult {
             dims.push(dim * m);
         }
 
-        // conv_in
-        let conv_in = WanCausalConv3d::new(
+        let conv_in = wan_causal_conv3d_new(
             cfg.in_channels,
             dims[0],
             (3, 3, 3),
@@ -1271,7 +1017,6 @@ impl WanEncoder3d {
             vb.pp("conv_in"),
         )?;
 
-        // down_blocks
         let mut down_blocks = Vec::new();
         let mut block_idx = 0;
 
@@ -1279,7 +1024,6 @@ impl WanEncoder3d {
             let in_dim = dims[i];
             let out_dim = dims[i + 1];
 
-            // Residual blocks
             let mut current_in = in_dim;
             for _ in 0..num_res_blocks {
                 down_blocks.push(WanEncoderBlock::Residual(WanResidualBlock::new(
@@ -1291,7 +1035,6 @@ impl WanEncoder3d {
                 block_idx += 1;
             }
 
-            // Downsample (except last stage)
             if i != dim_mult.len() - 1 {
                 let mode = if temporal_downsample[i] {
                     ResampleMode::Downsample3d
@@ -1308,15 +1051,13 @@ impl WanEncoder3d {
             }
         }
 
-        // mid_block
         let final_dim = dims[dim_mult.len()];
         let mid_block = WanMidBlock::new(final_dim, 1, vb.pp("mid_block"))?;
 
-        // norm_out + conv_out
         let norm_out = WanRmsNorm::new(final_dim, false, vb.pp("norm_out"))?;
-        let conv_out = WanCausalConv3d::new(
+        let conv_out = wan_causal_conv3d_new(
             final_dim,
-            z_dim * 2, // Output 2*z_dim for mean and logvar
+            z_dim * 2,
             (3, 3, 3),
             (1, 1, 1),
             (1, 1, 1),
@@ -1338,10 +1079,8 @@ impl WanEncoder3d {
         mut feat_cache: Option<&mut Vec<FeatCache>>,
         feat_idx: &mut usize,
     ) -> Result<Tensor> {
-        // conv_in with cache
         let mut y = causal_conv_cached(&self.conv_in, x, feat_cache.as_deref_mut(), feat_idx)?;
 
-        // down_blocks
         for block in &self.down_blocks {
             y = match block {
                 WanEncoderBlock::Residual(r) => {
@@ -1354,12 +1093,10 @@ impl WanEncoder3d {
             };
         }
 
-        // mid_block
         y = self
             .mid_block
             .forward(&y, feat_cache.as_deref_mut(), feat_idx)?;
 
-        // head
         y = self.norm_out.forward(&y)?;
         y = silu(&y)?;
         y = causal_conv_cached(&self.conv_out, &y, feat_cache, feat_idx)?;
@@ -1368,18 +1105,13 @@ impl WanEncoder3d {
     }
 }
 
-// =============================================================================
-// WanDecoder3d - 3D Decoder
-// =============================================================================
-
-/// 3D Decoder for Wan VAE.
 #[derive(Debug)]
 pub struct WanDecoder3d {
-    conv_in: WanCausalConv3d,
+    conv_in: Conv3d,
     mid_block: WanMidBlock,
     up_blocks: Vec<WanUpBlock>,
     norm_out: WanRmsNorm,
-    conv_out: WanCausalConv3d,
+    conv_out: Conv3d,
 }
 
 impl WanDecoder3d {
@@ -1390,14 +1122,12 @@ impl WanDecoder3d {
         let num_res_blocks = cfg.num_res_blocks;
         let temporal_upsample: Vec<bool> = cfg.temporal_downsample.iter().rev().cloned().collect();
 
-        // Dimensions reversed: [dim*4, dim*4, dim*2, dim*1, dim]
         let mut dims = vec![dim * dim_mult[dim_mult.len() - 1]];
         for &m in dim_mult.iter().rev() {
             dims.push(dim * m);
         }
 
-        // conv_in
-        let conv_in = WanCausalConv3d::new(
+        let conv_in = wan_causal_conv3d_new(
             z_dim,
             dims[0],
             (3, 3, 3),
@@ -1406,13 +1136,11 @@ impl WanDecoder3d {
             vb.pp("conv_in"),
         )?;
 
-        // mid_block
         let mid_block = WanMidBlock::new(dims[0], 1, vb.pp("mid_block"))?;
 
-        // up_blocks
         let mut up_blocks = Vec::with_capacity(dim_mult.len());
         for i in 0..dim_mult.len() {
-            let in_dim = if i > 0 { dims[i] / 2 } else { dims[i] }; // Wan 2.1 halves input
+            let in_dim = if i > 0 { dims[i] / 2 } else { dims[i] };
             let out_dim = dims[i + 1];
 
             let up_flag = i != dim_mult.len() - 1;
@@ -1435,10 +1163,9 @@ impl WanDecoder3d {
             )?);
         }
 
-        // norm_out + conv_out
         let final_dim = dims[dim_mult.len()];
         let norm_out = WanRmsNorm::new(final_dim, false, vb.pp("norm_out"))?;
-        let conv_out = WanCausalConv3d::new(
+        let conv_out = wan_causal_conv3d_new(
             final_dim,
             cfg.out_channels,
             (3, 3, 3),
@@ -1464,30 +1191,29 @@ impl WanDecoder3d {
         first_chunk: bool,
     ) -> Result<Tensor> {
         eprintln!("  DEBUG decoder: conv_in...");
-        // conv_in with cache
+
         let mut y = causal_conv_cached(&self.conv_in, x, feat_cache.as_deref_mut(), feat_idx)?;
         eprintln!("  DEBUG decoder: conv_in done, shape {:?}", y.dims());
 
         eprintln!("  DEBUG decoder: mid_block...");
-        // mid_block
+
         y = self
             .mid_block
             .forward(&y, feat_cache.as_deref_mut(), feat_idx)?;
         eprintln!("  DEBUG decoder: mid_block done, shape {:?}", y.dims());
 
-        // up_blocks
         for (i, up_block) in self.up_blocks.iter().enumerate() {
-        eprintln!("  DEBUG decoder: up_block {}...", i);
-        let next_y = up_block.forward(&y, feat_cache.as_deref_mut(), feat_idx, first_chunk)?;
-        drop(y);
-        y = next_y;
-        // Force sync after each heavy block
-        y.device().synchronize()?;
-        eprintln!("  DEBUG decoder: up_block {} done, shape {:?}", i, y.dims());
+            eprintln!("  DEBUG decoder: up_block {}...", i);
+            let next_y = up_block.forward(&y, feat_cache.as_deref_mut(), feat_idx, first_chunk)?;
+            drop(y);
+            y = next_y;
+
+            y.device().synchronize()?;
+            eprintln!("  DEBUG decoder: up_block {} done, shape {:?}", i, y.dims());
         }
 
         eprintln!("  DEBUG decoder: head...");
-        // head
+
         y = self.norm_out.forward(&y)?;
         y = silu(&y)?;
         y = causal_conv_cached(&self.conv_out, &y, feat_cache, feat_idx)?;
@@ -1497,20 +1223,14 @@ impl WanDecoder3d {
     }
 }
 
-// =============================================================================
-// AutoencoderKLWan - Main VAE Model
-// =============================================================================
-
-/// AutoencoderKLWan - 3D VAE for Wan video generation.
 #[derive(Debug)]
 pub struct AutoencoderKLWan {
     pub cfg: AutoencoderKLWanConfig,
     pub encoder: WanEncoder3d,
-    pub quant_conv: WanCausalConv3d,
-    pub post_quant_conv: WanCausalConv3d,
+    pub quant_conv: Conv3d,
+    pub post_quant_conv: Conv3d,
     pub decoder: WanDecoder3d,
 
-    // Tiling settings
     pub use_slicing: bool,
     pub use_tiling: bool,
     pub tile_sample_min_height: usize,
@@ -1518,16 +1238,14 @@ pub struct AutoencoderKLWan {
     pub tile_sample_stride_height: usize,
     pub tile_sample_stride_width: usize,
 
-    // Cache counts (precomputed)
     decoder_conv_num: usize,
     encoder_conv_num: usize,
 }
 
 impl AutoencoderKLWan {
-    /// Create a new AutoencoderKLWan from config and VarBuilder.
     pub fn new(cfg: AutoencoderKLWanConfig, vb: VarBuilder) -> Result<Self> {
         let encoder = WanEncoder3d::new(&cfg, vb.pp("encoder"))?;
-        let quant_conv = WanCausalConv3d::new(
+        let quant_conv = wan_causal_conv3d_new(
             cfg.z_dim * 2,
             cfg.z_dim * 2,
             (1, 1, 1),
@@ -1535,7 +1253,7 @@ impl AutoencoderKLWan {
             (0, 0, 0),
             vb.pp("quant_conv"),
         )?;
-        let post_quant_conv = WanCausalConv3d::new(
+        let post_quant_conv = wan_causal_conv3d_new(
             cfg.z_dim,
             cfg.z_dim,
             (1, 1, 1),
@@ -1545,10 +1263,8 @@ impl AutoencoderKLWan {
         )?;
         let decoder = WanDecoder3d::new(&cfg, vb.pp("decoder"))?;
 
-        // Count convolutions for cache sizing
-        // This is approximate - actual count depends on architecture
-        let encoder_conv_num = 50; // Approximate
-        let decoder_conv_num = 50; // Approximate
+        let encoder_conv_num = 50;
+        let decoder_conv_num = 50;
 
         Ok(Self {
             cfg,
@@ -1567,32 +1283,26 @@ impl AutoencoderKLWan {
         })
     }
 
-    /// Get latent dimension.
     pub fn z_dim(&self) -> usize {
         self.cfg.z_dim
     }
 
-    /// Get latent mean for normalization.
     pub fn latents_mean(&self) -> &[f32] {
         &self.cfg.latents_mean
     }
 
-    /// Get latent std for normalization.
     pub fn latents_std(&self) -> &[f32] {
         &self.cfg.latents_std
     }
 
-    /// Get spatial compression factor.
     pub fn scale_factor_spatial(&self) -> usize {
         self.cfg.scale_factor_spatial
     }
 
-    /// Get temporal compression factor.
     pub fn scale_factor_temporal(&self) -> usize {
         self.cfg.scale_factor_temporal
     }
 
-    /// Enable tiling for large videos.
     pub fn enable_tiling(
         &mut self,
         tile_sample_min_height: Option<usize>,
@@ -1615,25 +1325,20 @@ impl AutoencoderKLWan {
         }
     }
 
-    /// Disable tiling.
     pub fn disable_tiling(&mut self) {
         self.use_tiling = false;
     }
 
-    /// Enable slicing for batch processing.
     pub fn enable_slicing(&mut self) {
         self.use_slicing = true;
     }
 
-    /// Disable slicing.
     pub fn disable_slicing(&mut self) {
         self.use_slicing = false;
     }
 
-    /// Encode video to latent distribution.
     pub fn encode(&self, x: &Tensor) -> Result<DiagonalGaussianDistribution> {
         let h = if self.use_slicing && x.dims5()?.0 > 1 {
-            // Process batch slices
             let b = x.dims5()?.0;
             let mut slices = Vec::with_capacity(b);
             for i in 0..b {
@@ -1651,11 +1356,8 @@ impl AutoencoderKLWan {
     fn encode_impl(&self, x: &Tensor) -> Result<Tensor> {
         let (_, _, num_frames, _height, _width) = x.dims5()?;
 
-        // Initialize cache
         let mut enc_feat_map: Vec<FeatCache> = vec![FeatCache::Empty; self.encoder_conv_num];
 
-        // Process in temporal chunks
-        // OPTIMIZATION: Collect all chunks first, then do a single concat at the end
         let iter = 1 + (num_frames - 1) / 4;
         let mut encoded_chunks: Vec<Tensor> = Vec::with_capacity(iter);
 
@@ -1675,10 +1377,8 @@ impl AutoencoderKLWan {
             encoded_chunks.push(chunk_out);
         }
 
-        // Clear cache
         drop(enc_feat_map);
 
-        // Single concat at the end - O(n) instead of O(n²)
         let out = if encoded_chunks.len() == 1 {
             encoded_chunks.into_iter().next().unwrap()
         } else {
@@ -1686,10 +1386,9 @@ impl AutoencoderKLWan {
             Tensor::cat(&refs, 2)?
         };
 
-        self.quant_conv.forward(&out, None)
+        self.quant_conv.forward(&out)
     }
 
-    /// Decode latent to video.
     pub fn decode(&self, z: &Tensor) -> Result<Tensor> {
         let decoded = if self.use_slicing && z.dims5()?.0 > 1 {
             let b = z.dims5()?.0;
@@ -1709,24 +1408,14 @@ impl AutoencoderKLWan {
     fn decode_impl(&self, z: &Tensor) -> Result<Tensor> {
         let (_, _, num_frames, _height, _width) = z.dims5()?;
 
-        // Initialize cache
         let mut feat_map: Vec<FeatCache> = vec![FeatCache::Empty; self.decoder_conv_num];
 
-        // Post-quant conv - processes all frames at once (1x1x1 conv, low memory)
-        let x = self.post_quant_conv.forward(z, None)?;
+        let x = self.post_quant_conv.forward(z)?;
 
-        // Process frame by frame to save memory (matching Python diffusers exactly)
-        // OPTIMIZATION: Collect all frames first, then do a single concat at the end
-        // This changes O(n²) memory complexity to O(n) by avoiding growing tensors
-        // 
-        // NOTE: Memory usage here is dominated by:
-        // 1. feat_map cache (~50 tensors with 2 frames each at various resolutions)
-        // 2. decoded_frames vector (all decoded outputs before concat)
-        // For 480x480 at 33 frames, this can peak at ~8-10GB on GPU
         let mut decoded_frames: Vec<Tensor> = Vec::with_capacity(num_frames);
-        
+
         eprintln!("DEBUG: Starting decode loop for {} frames", num_frames);
-        
+
         for i in 0..num_frames {
             eprintln!("DEBUG: Decoding frame {}/{}", i + 1, num_frames);
             let mut conv_idx = 0;
@@ -1734,22 +1423,18 @@ impl AutoencoderKLWan {
             let decoded =
                 self.decoder
                     .forward(&frame, Some(&mut feat_map), &mut conv_idx, i == 0)?;
-            
-            // OPTIMIZATION: Ensure decoded is a clean copy to release intermediate VRAM
+
             decoded_frames.push(decoded.copy()?);
             eprintln!("DEBUG: Frame {} complete", i + 1);
-            
-            // Explicitly sync to driver every frame
+
             frame.device().synchronize()?;
         }
 
-        // Clear cache to free memory BEFORE concat
         for entry in feat_map.iter_mut() {
             *entry = FeatCache::Empty;
         }
         drop(feat_map);
 
-        // Single concat at the end - O(n) instead of O(n²)
         let out = if decoded_frames.len() == 1 {
             decoded_frames.into_iter().next().unwrap()
         } else {
@@ -1757,13 +1442,11 @@ impl AutoencoderKLWan {
             Tensor::cat(&refs, 2)?
         };
 
-        // Clamp output to [-1, 1]
         let out = out.clamp(-1.0f64, 1.0f64)?;
 
         Ok(out)
     }
 
-    /// Normalize latents using mean and std.
     pub fn normalize_latents(&self, latents: &Tensor) -> Result<Tensor> {
         let device = latents.device();
         let dtype = latents.dtype();
@@ -1784,7 +1467,6 @@ impl AutoencoderKLWan {
         latents.broadcast_sub(&mean)?.broadcast_div(&std)
     }
 
-    /// Denormalize latents using mean and std.
     pub fn denormalize_latents(&self, latents: &Tensor) -> Result<Tensor> {
         let device = latents.device();
         let dtype = latents.dtype();
@@ -1806,17 +1488,11 @@ impl AutoencoderKLWan {
     }
 }
 
-// =============================================================================
-// Output Types
-// =============================================================================
-
-/// Decoder output.
 #[derive(Debug)]
 pub struct DecoderOutput {
     pub sample: Tensor,
 }
 
-/// Encoder output.
 #[derive(Debug)]
 pub struct EncoderOutput {
     pub latent_dist: DiagonalGaussianDistribution,

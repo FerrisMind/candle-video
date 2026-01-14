@@ -49,7 +49,7 @@ fn verify_wan_vae_decode_parity() {
     // Load reference data
     let input_latents = load_reference_tensor("input_latents").expect("input_latents not found");
     let ref_output = load_reference_tensor("full_decode").expect("full_decode not found");
-    
+
     println!("Input latents shape: {:?}", input_latents.dims());
     println!("Reference output shape: {:?}", ref_output.dims());
 
@@ -96,22 +96,28 @@ fn verify_wan_vae_decode_parity() {
 
     // BF16 tolerance - allow some numerical difference
     let tolerance = 0.1; // BF16 has limited precision
-    
+
     if max_diff > tolerance {
         println!("\n!!! PARITY FAILED !!!");
         println!("Max diff {} exceeds tolerance {}", max_diff, tolerance);
-        
+
         // Print sample values for debugging
         let rust_flat = rust_output.flatten_all().unwrap();
         let ref_flat = ref_output.flatten_all().unwrap();
-        
+
         println!("\nSample values (first 10):");
         for i in 0..10.min(rust_flat.dims1().unwrap()) {
             let r = rust_flat.get(i).unwrap().to_scalar::<f32>().unwrap();
             let p = ref_flat.get(i).unwrap().to_scalar::<f32>().unwrap();
-            println!("  [{}] Rust: {:.6}, Python: {:.6}, diff: {:.6}", i, r, p, (r - p).abs());
+            println!(
+                "  [{}] Rust: {:.6}, Python: {:.6}, diff: {:.6}",
+                i,
+                r,
+                p,
+                (r - p).abs()
+            );
         }
-        
+
         panic!("VAE decode parity check failed");
     }
 
@@ -132,7 +138,8 @@ fn verify_wan_vae_post_quant_conv_parity() {
     }
 
     let input_latents = load_reference_tensor("input_latents").expect("input_latents not found");
-    let ref_post_quant = load_reference_tensor("after_post_quant_conv").expect("after_post_quant_conv not found");
+    let ref_post_quant =
+        load_reference_tensor("after_post_quant_conv").expect("after_post_quant_conv not found");
 
     let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
     println!("Device: {:?}", device);
@@ -147,7 +154,10 @@ fn verify_wan_vae_post_quant_conv_parity() {
         .unwrap();
 
     // Run post_quant_conv only
-    let rust_post_quant = vae.post_quant_conv.forward(&input_latents, None).expect("post_quant_conv failed");
+    let rust_post_quant = vae
+        .post_quant_conv
+        .forward(&input_latents)
+        .expect("post_quant_conv failed");
     let rust_post_quant = rust_post_quant.to_device(&Device::Cpu).unwrap();
 
     let max_diff = compute_max_diff(&rust_post_quant, &ref_post_quant);

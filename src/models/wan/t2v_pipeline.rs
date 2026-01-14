@@ -1,6 +1,4 @@
-// Rust 2024
-// Минимально самодостаточный порт логики из pipeline_wan.py на candle-тензорах.
-// Реальные реализации Tokenizer/TextEncoder/Transformer/VAE/Scheduler подключаются снаружи.
+
 
 use candle_core::{DType, Device, IndexOp, Shape, Tensor};
 use rand::{rngs::StdRng, Rng};
@@ -37,9 +35,9 @@ impl PromptInput {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputType {
-    /// Вернуть латенты (аналог output_type == "latent" в python).
+
     Latent,
-    /// Вернуть тензор видео (аналог "np"/"pt" и т.п. — здесь просто Tensor).
+
     Tensor,
 }
 
@@ -50,11 +48,11 @@ pub struct WanPipelineOutput {
 
 #[derive(Clone, Debug, Default)]
 pub struct AttentionKwargs {
-    // В оригинале это прокидывается в attention processor; здесь оставлено как расширяемое место.
+
 }
 
 pub trait PipelineCallback {
-    /// Вернуть (возможно) заменённые тензоры.
+
     fn on_step_end(
         &mut self,
         step: usize,
@@ -66,12 +64,12 @@ pub trait PipelineCallback {
 }
 
 pub trait WanTokenizer: Send + Sync {
-    /// Возвращает (input_ids, attention_mask), оба размером [batch, max_len].
+
     fn encode(&self, texts: &[String], max_len: usize) -> Result<(Vec<Vec<u32>>, Vec<Vec<u8>>)>;
 }
 
 pub trait WanTextEncoder: Send + Sync {
-    /// Возвращает last_hidden_state размером [batch, seq, hidden].
+
     fn encode(&self, input_ids: &Tensor, attention_mask: &Tensor) -> Result<Tensor>;
     fn dtype(&self) -> DType;
 }
@@ -80,10 +78,7 @@ pub trait WanTransformer3DModel: Send + Sync {
     fn dtype(&self) -> DType;
     fn in_channels(&self) -> usize;
 
-    /// hidden_states: [b, c, t, h, w]
-    /// timestep: [b] или [b, seq_len] при expand_timesteps
-    /// encoder_hidden_states: [b, seq, hidden]
-    fn forward(
+fn forward(
         &self,
         hidden_states: &Tensor,
         timestep: &Tensor,
@@ -100,8 +95,7 @@ pub trait WanVae: Send + Sync {
     fn scale_factor_temporal(&self) -> usize;
     fn scale_factor_spatial(&self) -> usize;
 
-    /// latents: [b, z_dim, t, h, w] -> video tensor
-    fn decode(&self, latents: &Tensor) -> Result<Tensor>;
+fn decode(&self, latents: &Tensor) -> Result<Tensor>;
 }
 
 pub trait FlowMatchScheduler: Send + Sync {
@@ -111,11 +105,9 @@ pub trait FlowMatchScheduler: Send + Sync {
     fn set_timesteps(&mut self, num_inference_steps: usize) -> Result<()>;
     fn timesteps(&self) -> &[f64];
 
-    /// Возвращает latents_{t-1}.
-    fn step(&self, noise_pred: &Tensor, timestep: f64, latents: &Tensor) -> Result<Tensor>;
+fn step(&self, noise_pred: &Tensor, timestep: f64, latents: &Tensor) -> Result<Tensor>;
 }
 
-/// Упрощённый постпроцессор (в оригинале есть разные форматы output_type).
 #[derive(Clone, Debug)]
 pub struct VideoProcessor {
     #[allow(dead_code)]
@@ -134,21 +126,19 @@ impl VideoProcessor {
     }
 }
 
-// ---------- text cleaning (basic_clean/whitespace_clean/prompt_clean) ----------
-
 fn ws_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"\s+").expect("regex must compile"))
 }
 
 fn html_unescape_twice(s: &str) -> String {
-    // В python: html.unescape(html.unescape(text))
+
     let once = html_escape::decode_html_entities(s).to_string();
     html_escape::decode_html_entities(&once).to_string()
 }
 
 pub fn basic_clean(text: &str) -> String {
-    // В оригинале ftfy опционален; здесь no-op по смыслу.
+
     html_unescape_twice(text).trim().to_string()
 }
 
@@ -159,8 +149,6 @@ pub fn whitespace_clean(text: &str) -> String {
 pub fn prompt_clean(text: &str) -> String {
     whitespace_clean(&basic_clean(text))
 }
-
-// ---------- randn_tensor (аналог randn_tensor из diffusers) ----------
 
 fn randn_tensor_f32(
     shape: &[usize],
@@ -191,8 +179,6 @@ fn randn_tensor_f32(
     Ok(t)
 }
 
-// ---------- pipeline ----------
-
 pub struct WanPipeline {
     tokenizer: Box<dyn WanTokenizer>,
     text_encoder: Box<dyn WanTextEncoder>,
@@ -208,8 +194,7 @@ pub struct WanPipeline {
     vae_scale_factor_spatial: usize,
     video_processor: VideoProcessor,
 
-    // runtime fields (как в python properties)
-    guidance_scale: f64,
+guidance_scale: f64,
     guidance_scale_2: Option<f64>,
     num_timesteps: usize,
     current_timestep: Option<f64>,
@@ -274,8 +259,7 @@ impl WanPipeline {
             ));
         }
 
-        // [b, max_len]
-        let mut flat_ids: Vec<u32> = Vec::with_capacity(batch_size * max_sequence_length);
+let mut flat_ids: Vec<u32> = Vec::with_capacity(batch_size * max_sequence_length);
         let mut flat_mask: Vec<u8> = Vec::with_capacity(batch_size * max_sequence_length);
         let mut seq_lens: Vec<usize> = Vec::with_capacity(batch_size);
 
@@ -304,16 +288,14 @@ impl WanPipeline {
             device,
         )?;
 
-        // text_encoder(...) -> last_hidden_state: [b, max_len, hidden]
-        let prompt_embeds = self.text_encoder.encode(&input_ids, &attention_mask)?;
+let prompt_embeds = self.text_encoder.encode(&input_ids, &attention_mask)?;
         let prompt_embeds = prompt_embeds.to_dtype(dtype)?;
 
-        // Обрезаем до seq_lens и дополняем нулями до max_sequence_length (как в python).
-        let mut padded: Vec<Tensor> = Vec::with_capacity(batch_size);
+let mut padded: Vec<Tensor> = Vec::with_capacity(batch_size);
         for (i, &sl) in seq_lens.iter().enumerate() {
-            let u = prompt_embeds.i((i as i64, .., ..))?; // [max_len, hidden]
+            let u = prompt_embeds.i((i as i64, .., ..))?;
             let u = if sl < max_sequence_length {
-                let head = u.narrow(0, 0, sl)?; // [sl, hidden]
+                let head = u.narrow(0, 0, sl)?;
                 let hidden = head.dims()[1];
                 let pad = Tensor::zeros((max_sequence_length - sl, hidden), dtype, device)?;
                 Tensor::cat(&[&head, &pad], 0)?
@@ -322,20 +304,19 @@ impl WanPipeline {
             };
             padded.push(u);
         }
-        let prompt_embeds = Tensor::stack(&padded.iter().collect::<Vec<_>>(), 0)?; // [b, max_len, hidden]
+        let prompt_embeds = Tensor::stack(&padded.iter().collect::<Vec<_>>(), 0)?;
 
-        // Дублируем на num_videos_per_prompt как в torch.repeat/view (простым cat по batch).
-        if num_videos_per_prompt == 1 {
+if num_videos_per_prompt == 1 {
             return Ok(prompt_embeds);
         }
         let mut reps: Vec<Tensor> = Vec::with_capacity(batch_size * num_videos_per_prompt);
         for i in 0..batch_size {
-            let u = prompt_embeds.i((i as i64, .., ..))?; // [max_len, hidden]
+            let u = prompt_embeds.i((i as i64, .., ..))?;
             for _ in 0..num_videos_per_prompt {
-                reps.push(u.unsqueeze(0)?); // [1, max_len, hidden]
+                reps.push(u.unsqueeze(0)?);
             }
         }
-        let out = Tensor::cat(&reps.iter().collect::<Vec<_>>(), 0)?; // [b*num_videos, max_len, hidden]
+        let out = Tensor::cat(&reps.iter().collect::<Vec<_>>(), 0)?;
         Ok(out)
     }
 
@@ -380,7 +361,7 @@ impl WanPipeline {
                 let neg_vec = neg.into_vec();
 
                 if neg_vec.len() == 1 && batch_size > 1 {
-                    // В python: batch_size * [negative_prompt] если строка.
+
                     let rep = vec![neg_vec[0].clone(); batch_size];
                     Some(self.get_t5_prompt_embeds(
                         &rep,
@@ -511,14 +492,12 @@ impl WanPipeline {
         device: &Device,
     ) -> Result<Tensor> {
         if !self.expand_timesteps {
-            // [batch]
+
             let data = vec![t as f32; batch];
             return Ok(Tensor::from_vec(data, (batch,), device)?);
         }
 
-        // В python: (mask[0][0][:, ::2, ::2] * t).flatten() => т.к. mask=ones, это просто вектор t.
-        // seq_len = num_latent_frames * (latent_h/2) * (latent_w/2)
-        let seq_len = num_latent_frames * (latent_h / 2) * (latent_w / 2);
+let seq_len = num_latent_frames * (latent_h / 2) * (latent_w / 2);
         let row = vec![t as f32; seq_len];
         let mut data = Vec::with_capacity(batch * seq_len);
         for _ in 0..batch {
@@ -558,8 +537,7 @@ impl WanPipeline {
             guidance_scale_2,
         )?;
 
-        // num_frames коррекция: (num_frames - 1) % vae_scale_factor_temporal == 0
-        if num_frames % self.vae_scale_factor_temporal != 1 {
+if num_frames % self.vae_scale_factor_temporal != 1 {
             num_frames = (num_frames / self.vae_scale_factor_temporal) * self.vae_scale_factor_temporal + 1;
             num_frames = num_frames.max(1);
         }
@@ -574,8 +552,7 @@ impl WanPipeline {
         self.current_timestep = None;
         self.interrupt = false;
 
-        // batch size
-        let batch_size = if let Some(ref p) = prompt {
+let batch_size = if let Some(ref p) = prompt {
             p.clone().into_vec().len()
         } else if let Some(ref pe) = prompt_embeds {
             pe.dims()[0]
@@ -583,8 +560,7 @@ impl WanPipeline {
             return Err(WanError::InvalidArgument("missing prompt and prompt_embeds".to_string()));
         };
 
-        // encode prompt
-        let text_dtype = self.text_encoder.dtype();
+let text_dtype = self.text_encoder.dtype();
         let prompt_input = prompt.unwrap_or_else(|| PromptInput::Batch(vec![]));
         let (mut prompt_embeds, mut negative_prompt_embeds) = self.encode_prompt(
             prompt_input,
@@ -598,8 +574,7 @@ impl WanPipeline {
             text_dtype,
         )?;
 
-        // transformer dtype selection
-        let transformer_dtype = self
+let transformer_dtype = self
             .transformer
             .as_deref()
             .or(self.transformer_2.as_deref())
@@ -611,13 +586,11 @@ impl WanPipeline {
             negative_prompt_embeds = Some(ne.to_dtype(transformer_dtype)?);
         }
 
-        // timesteps
-        self.scheduler.set_timesteps(num_inference_steps)?;
+self.scheduler.set_timesteps(num_inference_steps)?;
         let timesteps = self.scheduler.timesteps().to_vec();
         self.num_timesteps = timesteps.len();
 
-        // latents
-        let num_channels_latents = self
+let num_channels_latents = self
             .transformer
             .as_deref()
             .or(self.transformer_2.as_deref())
@@ -640,11 +613,9 @@ impl WanPipeline {
         let latent_w = width / self.vae_scale_factor_spatial;
         let num_latent_frames = (num_frames - 1) / self.vae_scale_factor_temporal + 1;
 
-        // boundary
-        let boundary_timestep = self.boundary_ratio.map(|r| r * (self.scheduler.num_train_timesteps() as f64));
+let boundary_timestep = self.boundary_ratio.map(|r| r * (self.scheduler.num_train_timesteps() as f64));
 
-        // denoising loop
-        for (i, t) in timesteps.iter().copied().enumerate() {
+for (i, t) in timesteps.iter().copied().enumerate() {
             if self.interrupt {
                 continue;
             }
@@ -662,16 +633,14 @@ impl WanPipeline {
                 device,
             )?;
 
-            // cond
-            let mut noise_pred = current_model.forward(
+let mut noise_pred = current_model.forward(
                 &latent_model_input,
                 &timestep_t,
                 &prompt_embeds,
                 self.attention_kwargs.as_ref(),
             )?;
 
-            // uncond + CFG
-            if self.do_classifier_free_guidance() {
+if self.do_classifier_free_guidance() {
                 let neg = negative_prompt_embeds
                     .as_ref()
                     .ok_or_else(|| WanError::InvalidArgument("negative_prompt_embeds required for CFG".to_string()))?;
@@ -682,15 +651,12 @@ impl WanPipeline {
                     self.attention_kwargs.as_ref(),
                 )?;
 
-                // noise_pred = uncond + scale * (cond - uncond)
-                noise_pred = (&noise_uncond + ((&noise_pred - &noise_uncond)? * current_guidance_scale)?)?;
+noise_pred = (&noise_uncond + ((&noise_pred - &noise_uncond)? * current_guidance_scale)?)?;
             }
 
-            // scheduler step
-            latents = self.scheduler.step(&noise_pred, t, &latents)?;
+latents = self.scheduler.step(&noise_pred, t, &latents)?;
 
-            // callback
-            if let Some(cb) = callback {
+if let Some(cb) = callback {
                 let (l, pe, ne) = cb.on_step_end(
                     i,
                     t,
@@ -706,14 +672,12 @@ impl WanPipeline {
 
         self.current_timestep = None;
 
-        // decode / output
-        let out = if output_type == OutputType::Latent {
+let out = if output_type == OutputType::Latent {
             latents
         } else {
             let latents = latents.to_dtype(self.vae.dtype())?;
 
-            // В python: latents = latents / (1/std) + mean == latents * std + mean
-            let z = self.vae.z_dim();
+let z = self.vae.z_dim();
             let mean = Tensor::from_vec(
                 self.vae.latents_mean().to_vec(),
                 (1, z, 1, 1, 1),

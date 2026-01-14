@@ -692,6 +692,11 @@ pub struct DenoisingResult {
 /// 3. Use the scheduler to update latents
 /// 4. Print progress every 10 steps
 ///
+/// Memory optimization strategy (based on official Wan2.1 implementation):
+/// - Explicit tensor drops to release GPU memory ASAP
+/// - Synchronize after each forward pass to ensure memory is freed
+/// - Compute CFG incrementally to avoid holding both predictions
+///
 /// # Arguments
 /// * `transformer` - The Wan transformer model
 /// * `scheduler` - The flow match scheduler
@@ -702,12 +707,6 @@ pub struct DenoisingResult {
 ///
 /// # Returns
 /// DenoisingResult containing the final denoised latents
-///
-/// # Requirements
-/// - Forward pass through transformer
-/// - Apply CFG when guidance_scale > 1.0
-/// - Scheduler step to update latents
-/// - Print progress every 10 steps
 pub fn run_denoising_loop(
     transformer: &candle_video::models::wan::WanTransformer3DModel,
     scheduler: &mut FlowMatchEulerDiscreteScheduler,
@@ -724,43 +723,32 @@ pub fn run_denoising_loop(
     println!("\nRunning denoising loop ({} steps)...", num_steps);
 
     for (i, &t) in timesteps.iter().enumerate() {
-        // Convert latents to transformer dtype
-        let latent_input = latents
-            .to_dtype(transformer_dtype)
-            .map_err(WanExampleError::Candle)?;
-
         // Create timestep tensor (must match transformer dtype)
         let timestep = Tensor::from_vec(vec![t as f32], (1,), device)
             .map_err(WanExampleError::Candle)?
             .to_dtype(transformer_dtype)
             .map_err(WanExampleError::Candle)?;
 
-        // Conditional forward pass (positive prompt)
-        let noise_pred_cond = transformer
-            .forward(
-                &latent_input,
-                &timestep,
-                &encoded_prompts.prompt_embeds,
-                None, // No image conditioning for T2V
-                false,
-            )
+        // Convert latents to transformer dtype
+        let latent_input = latents
+            .to_dtype(transformer_dtype)
             .map_err(WanExampleError::Candle)?;
 
-        // Extract tensor from Result<Transformer2DModelOutput, Tensor>
-        let noise_pred_cond = match noise_pred_cond {
-            Ok(output) => output.sample,
-            Err(tensor) => tensor,
-        };
-
-        // Apply CFG: noise_pred = uncond + scale * (cond - uncond)
+        // Compute noise prediction with CFG
+        // Memory optimization: compute unconditional first, then conditional,
+        // and apply CFG formula incrementally to minimize peak memory
         let noise_pred = if do_cfg {
-            let neg_embeds = encoded_prompts.negative_prompt_embeds.as_ref().ok_or_else(|| {
-                WanExampleError::ModelLoading(
-                    "Negative prompt embeddings required for CFG".to_string(),
-                )
-            })?;
+            let neg_embeds = encoded_prompts
+                .negative_prompt_embeds
+                .as_ref()
+                .ok_or_else(|| {
+                    WanExampleError::ModelLoading(
+                        "Negative prompt embeddings required for CFG".to_string(),
+                    )
+                })?;
 
-            // Unconditional forward pass (negative prompt)
+            // Step 1: Unconditional forward pass (negative prompt)
+            // We compute this first and keep it as the base for CFG
             let noise_pred_uncond = transformer
                 .forward(&latent_input, &timestep, neg_embeds, None, false)
                 .map_err(WanExampleError::Candle)?;
@@ -770,24 +758,94 @@ pub fn run_denoising_loop(
                 Err(tensor) => tensor,
             };
 
-            // CFG formula: uncond + scale * (cond - uncond)
+            // Sync GPU to release intermediate tensors from uncond pass
+            if let Device::Cuda(_) = device {
+                device.synchronize().map_err(WanExampleError::Candle)?;
+            }
+
+            // Step 2: Conditional forward pass (positive prompt)
+            let noise_pred_cond = transformer
+                .forward(
+                    &latent_input,
+                    &timestep,
+                    &encoded_prompts.prompt_embeds,
+                    None,
+                    false,
+                )
+                .map_err(WanExampleError::Candle)?;
+
+            let noise_pred_cond = match noise_pred_cond {
+                Ok(output) => output.sample,
+                Err(tensor) => tensor,
+            };
+
+            // Sync GPU to release intermediate tensors from cond pass
+            if let Device::Cuda(_) = device {
+                device.synchronize().map_err(WanExampleError::Candle)?;
+            }
+
+            // Step 3: Apply CFG formula: uncond + scale * (cond - uncond)
+            // Compute difference first
             let diff = noise_pred_cond
                 .sub(&noise_pred_uncond)
                 .map_err(WanExampleError::Candle)?;
+
+            // Drop cond tensor explicitly - we only need diff now
+            drop(noise_pred_cond);
+
+            // Scale the difference
             let scaled = diff
                 .affine(guidance_scale as f64, 0.0)
                 .map_err(WanExampleError::Candle)?;
-            noise_pred_uncond
+
+            // Drop diff tensor explicitly
+            drop(diff);
+
+            // Add to uncond to get final prediction
+            let result = noise_pred_uncond
                 .add(&scaled)
-                .map_err(WanExampleError::Candle)?
+                .map_err(WanExampleError::Candle)?;
+
+            // Drop intermediate tensors
+            drop(scaled);
+            drop(noise_pred_uncond);
+
+            result
         } else {
-            noise_pred_cond
+            // No CFG - single forward pass
+            let noise_pred = transformer
+                .forward(
+                    &latent_input,
+                    &timestep,
+                    &encoded_prompts.prompt_embeds,
+                    None,
+                    false,
+                )
+                .map_err(WanExampleError::Candle)?;
+
+            match noise_pred {
+                Ok(output) => output.sample,
+                Err(tensor) => tensor,
+            }
         };
+
+        // Drop latent_input - we're done with it
+        drop(latent_input);
+        drop(timestep);
 
         // Scheduler step to update latents
         let step_output = SchedulerMixin::step(scheduler, &noise_pred, t, &latents)
             .map_err(|e| WanExampleError::ModelLoading(format!("Scheduler step failed: {}", e)))?;
-        latents = step_output.prev_sample;
+
+        // Drop old latents and noise_pred before assigning new latents
+        drop(noise_pred);
+        let old_latents = std::mem::replace(&mut latents, step_output.prev_sample);
+        drop(old_latents);
+
+        // Sync GPU at end of step to ensure all memory is released
+        if let Device::Cuda(_) = device {
+            device.synchronize().map_err(WanExampleError::Candle)?;
+        }
 
         // Print progress every 10 steps
         if i % 10 == 0 || i == num_steps - 1 {
@@ -1130,7 +1188,11 @@ pub fn save_frames_as_png(frames: &VideoFrames, output_dir: &str) -> Result<(), 
         }
     }
 
-    println!("  ✓ Saved {} frames to {}/", frames.frames.len(), output_dir);
+    println!(
+        "  ✓ Saved {} frames to {}/",
+        frames.frames.len(),
+        output_dir
+    );
     Ok(())
 }
 
@@ -1184,8 +1246,12 @@ pub fn save_frames_as_gif(
         .frames
         .par_iter()
         .map(|frame| {
-            let mut gif_frame =
-                gif::Frame::from_rgb_speed(frame.width as u16, frame.height as u16, &frame.data, 30);
+            let mut gif_frame = gif::Frame::from_rgb_speed(
+                frame.width as u16,
+                frame.height as u16,
+                &frame.data,
+                30,
+            );
             // ~25 FPS (delay is in centiseconds, so 4 = 40ms = 25fps)
             gif_frame.delay = 4;
             gif_frame
@@ -1313,17 +1379,16 @@ fn main() -> anyhow::Result<()> {
         println!("\nLoading models...");
         let loader = WanModelLoader::new(device.clone(), dtype);
 
-        // Load transformer
+        // Load transformer first (largest model, ~2.6GB for 1.3B variant)
         let transformer = loader.load_transformer(&paths)?;
         println!("  ✓ Transformer loaded");
 
-        // Load VAE
-        let vae = loader.load_vae(&paths)?;
-        println!("  ✓ VAE loaded");
+        // Note: VAE will be loaded AFTER denoising to save VRAM
+        // This follows the official Wan2.1 offload_model pattern
 
-        // Load text encoder
+        // Load text encoder (runs on CPU, so no GPU memory impact)
         let mut text_encoder = loader.load_text_encoder(&paths)?;
-        println!("  ✓ Text encoder loaded");
+        println!("  ✓ Text encoder loaded (CPU)");
 
         // Load tokenizer and create adapter
         // Note: TokenizerAdapter uses CPU device because the quantized text encoder runs on CPU
@@ -1360,6 +1425,11 @@ fn main() -> anyhow::Result<()> {
                 args.guidance_scale
             );
         }
+
+        // Free text encoder - we're done with it
+        // (It's on CPU so this doesn't affect GPU memory, but good practice)
+        drop(text_encoder);
+        drop(tokenizer_adapter);
 
         // Prepare latents
         println!("\nPreparing latents...");
@@ -1403,23 +1473,27 @@ fn main() -> anyhow::Result<()> {
 
         // Free transformer memory before VAE decode
         // This is critical for fitting both transformer and VAE in VRAM
-        println!("\nFreeing transformer memory...");
+        // Following official Wan2.1 offload_model pattern
+        println!("\nFreeing transformer memory before VAE decode...");
         drop(transformer);
         drop(encoded);
         drop(scheduler);
-        
+
         // Force CUDA to release memory
         if let Device::Cuda(_) = &device {
             // Synchronize to ensure all operations are complete
             device.synchronize()?;
         }
 
+        // Now load VAE (after transformer is freed)
+        // This is the key memory optimization from official Wan2.1
+        println!("\nLoading VAE for decoding...");
+        let vae = loader.load_vae(&paths)?;
+        println!("  ✓ VAE loaded");
+
         // Decode latents with VAE
         let decode_result = decode_latents(&vae, &denoising_result.latents, dtype)?;
-        println!(
-            "  ✓ Video tensor shape: {:?}",
-            decode_result.video.dims()
-        );
+        println!("  ✓ Video tensor shape: {:?}", decode_result.video.dims());
 
         // Save output
         save_video_output(
