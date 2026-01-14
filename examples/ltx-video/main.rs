@@ -241,9 +241,17 @@ fn main() -> anyhow::Result<()> {
     let dtype = DType::BF16;
 
     // 1. Locate weights
+<<<<<<< Updated upstream
     let (transformer_file, vae_file, t5_file, tokenizer_file) =
         if let Some(local_path) = &args.local_weights {
             let base = PathBuf::from(local_path);
+=======
+    let mut unified_weights = args.unified_weights.clone();
+    let (transformer_file, vae_file, t5_file, tokenizer_file) = if let Some(local_path) =
+        &args.local_weights
+    {
+        let base = PathBuf::from(local_path);
+>>>>>>> Stashed changes
 
             let transformer = if args.unified_weights.is_some() {
                 // When using unified weights, transformer is embedded in the single file
@@ -360,6 +368,55 @@ fn main() -> anyhow::Result<()> {
 
             (transformer, vae, t5, tokenizer)
         };
+<<<<<<< Updated upstream
+=======
+        let tokenizer = {
+            let path1 = base.join("tokenizer").join("tokenizer.json");
+            let path2 = base.join("text_encoder").join("tokenizer.json");
+            let path3 = base.join("text_encoder_8bit").join("tokenizer.json");
+            let path4 = base.join("text_encoder_gguf").join("tokenizer.json");
+            if path1.exists() {
+                path1
+            } else if path2.exists() {
+                path2
+            } else if path3.exists() {
+                path3
+            } else if path4.exists() {
+                path4
+            } else {
+                println!("    Tokenizer not found locally, downloading from HF...");
+                let _ = std::io::stdout().flush();
+                // Standard T5 tokenizer from google repository is usually safer
+                Api::new()?
+                    .repo(Repo::new(
+                        "google-t5/t5-v1_1-xxl".to_string(),
+                        RepoType::Model,
+                    ))
+                    .get("tokenizer.json")?
+            }
+        };
+
+        (transformer, vae, t5, tokenizer)
+    } else {
+        println!("\nDownloading models from HuggingFace: oxide-lab/LTX-Video-0.9.8-2B-distilled");
+        let api = Api::new()?;
+        let repo = api.repo(Repo::with_revision(
+            "oxide-lab/LTX-Video-0.9.8-2B-distilled".into(),
+            RepoType::Model,
+            "main".into(),
+        ));
+
+        // This repo uses a single unified safetensors file for VAE + Transformer
+        let unified_path = repo.get("ltxv-2b-0.9.8-distilled.safetensors")?;
+        unified_weights = Some(unified_path.to_string_lossy().to_string());
+
+        let t5 = repo.get("text_encoder_gguf/t5-v1_1-xxl-encoder-Q5_K_M.gguf")?;
+        let tokenizer = repo.get("text_encoder_gguf/tokenizer.json")?;
+
+        // Return the unified path for both; the unified_weights flag will trigger correct loading
+        (unified_path.clone(), unified_path, t5, tokenizer)
+    };
+>>>>>>> Stashed changes
 
     if args.local_weights.is_some() {
         println!(
@@ -451,7 +508,7 @@ fn main() -> anyhow::Result<()> {
     println!("Loading models...");
 
     // Check if using unified weights (official LTX-Video format)
-    let (vae, transformer) = if let Some(ref unified_path) = args.unified_weights {
+    let (vae, transformer) = if let Some(ref unified_path) = unified_weights {
         use candle_video::models::ltx_video::weight_format::KeyRemapper;
 
         println!("  Loading from unified weights: {}", unified_path);
