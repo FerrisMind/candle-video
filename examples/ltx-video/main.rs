@@ -38,10 +38,10 @@ struct Args {
     #[arg(long, default_value_t = 97)]
     num_frames: usize,
 
-    #[arg(long, default_value = "0.9.5")]
+    #[arg(long, default_value = "0.9.8-2b-distilled")]
     ltxv_version: String,
 
-    #[arg(long, default_value = "Lightricks/LTX-Video")]
+    #[arg(long, default_value = "oxide-lab/LTX-Video-0.9.8-2B-distilled")]
     model_id: String,
 
     #[arg(long)]
@@ -325,26 +325,48 @@ fn main() -> anyhow::Result<()> {
 
             (transformer, vae, t5, tokenizer)
         } else {
-            println!("\nDownloading models from HuggingFace: oxide-lab/LTX-Video-0.9.5");
+            println!("\nDownloading models from HuggingFace: {}", args.model_id);
             let api = Api::new()?;
             let repo = api.repo(Repo::with_revision(
-                "oxide-lab/LTX-Video-0.9.5".into(),
+                args.model_id.clone().into(),
                 RepoType::Model,
                 "main".into(),
             ));
 
-            let transformer = repo.get("transformer/diffusion_pytorch_model.safetensors")?;
-            let _ = repo.get("transformer/config.json")?;
-
-            let vae = repo.get("vae/diffusion_pytorch_model.safetensors")?;
-            let _ = repo.get("vae/config.json")?;
+            // Determine if we should use unified weights based on version or repository
+            let is_098 = args.ltxv_version.contains("0.9.8");
+            
+            let (transformer, vae) = if is_098 {
+                println!("  Fetching unified weight file (official format)...");
+                let unified = repo.get("ltxv-2b-0.9.8-distilled.safetensors")?;
+                // Return same path for both, the loading logic will handle it if unified_weights is set
+                // Actually, we'll force unified_weights logic later if we are in this branch
+                (unified.clone(), unified)
+            } else {
+                let transformer = repo.get("transformer/diffusion_pytorch_model.safetensors")?;
+                let _ = repo.get("transformer/config.json")?;
+                let vae = repo.get("vae/diffusion_pytorch_model.safetensors")?;
+                let _ = repo.get("vae/config.json")?;
+                (transformer, vae)
+            };
 
             let t5 = repo.get("text_encoder_gguf/t5-v1_1-xxl-encoder-Q5_K_M.gguf")?;
-
             let tokenizer = repo.get("text_encoder_gguf/tokenizer.json")?;
 
             (transformer, vae, t5, tokenizer)
         };
+
+    // If we've downloaded a 0.9.8 model and don't have local paths or explicit unified weights,
+    // we should treat the transformer/vae paths (which are the same) as unified weights.
+    // We'll update args.unified_weights to reflect this.
+    // NOTE: This is a hack because args is immutable here, but we'll adapt the loading logic.
+    let effective_unified_weights = args.unified_weights.clone().or_else(|| {
+        if args.ltxv_version.contains("0.9.8") && args.local_weights.is_none() {
+            Some(transformer_file.to_string_lossy().to_string())
+        } else {
+            None
+        }
+    });
 
     if args.local_weights.is_some() {
         println!(
@@ -436,7 +458,7 @@ fn main() -> anyhow::Result<()> {
     println!("Loading models...");
 
     // Check if using unified weights (official LTX-Video format)
-    let (vae, transformer) = if let Some(ref unified_path) = args.unified_weights {
+    let (vae, transformer) = if let Some(ref unified_path) = effective_unified_weights {
         use candle_video::models::ltx_video::weight_format::KeyRemapper;
 
         println!("  Loading from unified weights: {}", unified_path);
