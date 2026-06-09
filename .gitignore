@@ -166,3 +166,4 @@ README.HF.md
 # Agent / Workflows (local only)
 # =============================================================================
 /.agent/
+/.worktrees/

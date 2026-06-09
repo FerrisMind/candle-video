@@ -12,32 +12,33 @@ name = "candle_video"
 path = "src/lib.rs"
 
 [dependencies]
-candle-core = { version = "0.9.2", features = ["cuda", "cudnn"] }
-candle-nn = "0.9.2"
-candle-transformers = "0.9.2"
-candle-flash-attn = { version = "0.9.2", optional = true }
-safetensors = "0.7"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-anyhow = "1.0"
-tokenizers = "0.22"
-thiserror = "2.0"
-hf-hub = "0.4"
-clap = { version = "4.0", features = ["derive"] }
-image = "0.25"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-glob = "0.3"
-statrs = "0.18"
-gif = "0.14"
-rayon = "1.0"
-rand = "0.8"
-regex = "1.0"
+candle-core = "0.10.2"
+candle-nn = "0.10.2"
+candle-transformers = "0.10.2"
+candle-flash-attn = { version = "0.10.2", optional = true }
+safetensors = "0.8.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+anyhow = "1.0.102"
+tokenizers = "0.23.1"
+thiserror = "2.0.18"
+hf-hub = "0.4.3"
+clap = { version = "4.6.1", features = ["derive"] }
+image = "0.25.10"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+glob = "0.3.3"
+statrs = "0.18.0"
+gif = "0.14.2"
+rayon = "1.12.0"
+rand = "0.10.1"
+regex = "1.12.3"
 
 
 
 [features]
 default = []
+legacy_tests = []
 # GPU Acceleration
 flash-attn = ["dep:candle-flash-attn"]
 cuda = ["candle-core/cuda"]
@@ -53,10 +54,10 @@ nccl = ["candle-core/nccl"]
 gpu = ["flash-attn", "cudnn", "cuda"]
 
 [dev-dependencies]
-criterion = { version = "0.8", features = ["html_reports"] }
-tempfile = "3.0"
-bytemuck = "1.0"
-proptest = "1.5"
+criterion = { version = "0.8.2", features = ["html_reports"] }
+tempfile = "3.27.0"
+bytemuck = "1.25.0"
+proptest = "1.11.0"
 
 # =============================================================================
 # Benchmarks
@@ -123,7 +124,6 @@ path = "examples/verify_vae_tiling.rs"
 [[example]]
 name = "verify-scheduler-step"
 path = "examples/verify_scheduler_step.rs"
-required-features = ["flash-attn", "cudnn"]
 
 [[example]]
 name = "verify-rng"
