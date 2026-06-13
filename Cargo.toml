@@ -50,8 +50,8 @@ mkl = ["candle-core/mkl"]
 accelerate = ["candle-core/accelerate"]
 # NCCL for multi-GPU support
 nccl = ["candle-core/nccl"]
-# All GPU optimizations (for maximum performance)
-gpu = ["flash-attn", "cudnn", "cuda"]
+# GPU optimizations (for maximum performance)
+gpu = ["flash-attn", "cuda"]
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
@@ -74,6 +74,10 @@ harness = false
 [[example]]
 name = "ltx-video"
 path = "examples/ltx-video/main.rs"
+
+[[example]]
+name = "video-generate"
+path = "examples/video-generate/main.rs"
 
 # Verification examples
 [[example]]

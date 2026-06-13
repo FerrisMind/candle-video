@@ -458,10 +458,11 @@ pub fn find_sharded_files(dir: impl AsRef<Path>, prefix: &str) -> Result<Vec<Pat
 ///
 /// # Example
 /// ```no_run
-/// use candle_video::loader::load_model_config;
-/// use candle_video::config::VaeConfig;
+/// use candle_video::models::ltx_video::loader::load_model_config;
+/// use candle_video::models::ltx_video::vae::AutoencoderKLLtxVideoConfig;
 ///
-/// let config: VaeConfig = load_model_config("path/to/config.json").unwrap();
+/// let config: AutoencoderKLLtxVideoConfig =
+///     load_model_config("path/to/config.json").unwrap();
 /// ```
 pub fn load_model_config<T: DeserializeOwned>(
     path: impl AsRef<Path>,

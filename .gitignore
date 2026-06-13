@@ -40,6 +40,7 @@ MANIFEST
 # Virtual environments
 venv/
 .venv/
+.venv-*/
 ENV/
 env/
 .env/
@@ -60,6 +61,9 @@ out/
 
 # Cursor
 .cursor/
+
+# Codegraph (local index, per-machine)
+.codegraph/
 
 # Vim
 *.swp
