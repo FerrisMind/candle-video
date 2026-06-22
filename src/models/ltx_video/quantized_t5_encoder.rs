@@ -27,6 +27,14 @@ pub struct T5EncoderConfig {
     pub relative_attention_num_buckets: usize,
     pub relative_attention_max_distance: usize,
     pub layer_norm_epsilon: f64,
+    /// T5 shares layer-0 bias; UMT5 has per-layer bias and recomputes each block.
+    pub relative_bias_mode: RelativeBiasMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelativeBiasMode {
+    T5FirstLayerOnly,
+    Umt5EveryLayer,
 }
 
 impl T5EncoderConfig {
@@ -42,6 +50,16 @@ impl T5EncoderConfig {
             relative_attention_num_buckets: 32,
             relative_attention_max_distance: 128,
             layer_norm_epsilon: 1e-6,
+            relative_bias_mode: RelativeBiasMode::T5FirstLayerOnly,
+        }
+    }
+
+    /// UMT5-XXL encoder (Wan 2.1 T2V 1.3B GGUF).
+    pub fn umt5_xxl() -> Self {
+        Self {
+            vocab_size: 256_384,
+            relative_bias_mode: RelativeBiasMode::Umt5EveryLayer,
+            ..Self::t5_xxl()
         }
     }
 }
@@ -143,14 +161,17 @@ impl T5Attention {
             &format!("{}.attn_o.weight", prefix),
         )?);
 
-        // Relative position bias only in first layer - shape (32, 64) = (num_buckets, num_heads)
-        let relative_attention_bias = if block_idx == 0 {
-            Some(vb.get(
+        // Relative position bias: T5 layer 0 only; UMT5 every layer.
+        let relative_attention_bias = match config.relative_bias_mode {
+            RelativeBiasMode::T5FirstLayerOnly if block_idx == 0 => Some(vb.get(
                 (config.relative_attention_num_buckets, config.num_heads),
                 &format!("{}.attn_rel_b.weight", prefix),
-            )?)
-        } else {
-            None
+            )?),
+            RelativeBiasMode::Umt5EveryLayer => Some(vb.get(
+                (config.relative_attention_num_buckets, config.num_heads),
+                &format!("{}.attn_rel_b.weight", prefix),
+            )?),
+            _ => None,
         };
 
         Ok(Self {
@@ -649,7 +670,10 @@ impl QuantizedT5EncoderModel {
                 i,
             )?;
             hidden_states = new_hidden;
-            position_bias = new_bias;
+            position_bias = match self.config.relative_bias_mode {
+                RelativeBiasMode::T5FirstLayerOnly => new_bias,
+                RelativeBiasMode::Umt5EveryLayer => None,
+            };
         }
 
         // Final layer norm

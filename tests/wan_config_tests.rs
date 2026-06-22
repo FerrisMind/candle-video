@@ -1,18 +1,31 @@
 //! Wan Diffusers config and weight discovery tests.
 
 use candle_video::models::wan::{
-    WanVariant, discover_safetensors, load_wan_config, validate_model_index, WanComponentPaths,
-    WanWeightInventory,
+    WanComponentPaths, WanVariant, WanWeightInventory, discover_safetensors, load_wan_config,
+    validate_model_index,
 };
 use std::path::PathBuf;
 
 fn wan_fixture_root() -> Option<PathBuf> {
     let candidates = [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../Wan2.1-T2V-1.3B-Diffusers"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models/Wan2.1-T2V-1.3B-Diffusers"),
+        PathBuf::from("/home/mod479711/Downloads/models/Wan2.1-T2V-1.3B-Diffusers"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../Wan2.1-T2V-1.3B-Diffusers"),
         PathBuf::from("/home/mod479711/Downloads/Wan2.1-T2V-1.3B-Diffusers"),
     ];
-    candidates.into_iter().find(|p| p.join("model_index.json").exists())
+    candidates
+        .into_iter()
+        .find(|p| p.join("model_index.json").exists())
+}
+
+fn wan_consolidated_root() -> Option<PathBuf> {
+    let candidates = [
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models/Wan2.1-T2V-1.3B"),
+        PathBuf::from("/home/mod479711/Downloads/models/Wan2.1-T2V-1.3B"),
+    ];
+    candidates
+        .into_iter()
+        .find(|p| p.join("text_encoder_gguf").exists())
 }
 
 #[test]
@@ -64,10 +77,30 @@ fn wan_weight_inventory_discovery() {
 }
 
 #[test]
+fn wan_consolidated_layout_discovery() {
+    let root = match wan_consolidated_root() {
+        Some(r) => r,
+        None => {
+            eprintln!("Skipping wan_consolidated_layout_discovery: bundle not found");
+            return;
+        }
+    };
+
+    use candle_video::models::wan::{WanLayout, WanWeightInventory, detect_wan_layout};
+    let layout = detect_wan_layout(&root).expect("detect layout");
+    assert!(matches!(layout, WanLayout::Consolidated(_)));
+
+    let inventory = WanWeightInventory::discover(&root).expect("discover");
+    assert!(inventory.has_all_components());
+    assert!(inventory.text_encoder_gguf.is_some());
+}
+
+#[test]
 fn engine_capabilities_wan21() {
     use candle_video::ModelCapabilities;
     let caps = ModelCapabilities::wan21_t2v_13b();
     assert_eq!(caps.model_id, "wan:2.1-t2v-1.3b");
     assert!(caps.supports_negative_prompt);
+    assert!(caps.supports_quantized_text_encoder);
     assert!(!caps.supports_two_stage_denoising);
 }

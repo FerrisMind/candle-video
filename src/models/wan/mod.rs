@@ -7,21 +7,29 @@ pub mod loader;
 pub mod pipeline;
 pub mod prompt_clean;
 pub mod prompt_encode;
+pub mod quantized_umt5_encoder;
 pub mod scheduler;
 pub mod text_encoder;
 pub mod tokenizer;
-pub mod umt5;
 pub mod transformer;
+pub mod umt5;
 pub mod vae;
+pub mod weight_format;
 
+pub use configs::validate_model_index;
 pub use configs::*;
-pub use loader::*;
-pub use pipeline::{WanGenerateRequest, WanPipeline, WanPipelineOutput, WanDenoiseStack, latent_shape_from_config};
+pub use loader::{
+    WanComponentPaths, WanConsolidatedPaths, WanLayout, WanWeightInventory, detect_wan_layout,
+    discover_safetensors, load_wan_config,
+};
+pub use pipeline::{
+    WanDenoiseStack, WanGenerateRequest, WanPipeline, WanPipelineOutput, latent_shape_from_config,
+};
 pub use prompt_clean::*;
 pub use prompt_encode::encode_prompt;
 pub use scheduler::UniPcMultistepScheduler;
 pub use text_encoder::{Umt5EncoderConfig, Umt5TextEncoder};
-pub use tokenizer::{WanTokenizer, WAN_DEFAULT_MAX_SEQ_LEN};
+pub use tokenizer::{WAN_DEFAULT_MAX_SEQ_LEN, WanTokenizer};
 pub use transformer::{
     WanConditionEmbedder, WanPatchEmbedding, WanRotaryPosEmbed, WanTransformer3DModel,
     WanTransformerBlock,
