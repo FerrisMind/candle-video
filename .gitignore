@@ -108,6 +108,8 @@ prebuilt/*/output
 # Debug data
 *.npy
 *.npz
+perf.data
+perf.data.*
 
 # Generated images/videos
 *.png
