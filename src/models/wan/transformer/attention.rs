@@ -1,10 +1,10 @@
 //! Wan attention (`WanAttention` + `WanAttnProcessor`).
 
 use candle_core::{D, DType, Result, Tensor};
-use candle_nn::{linear_b, Dropout, Module, VarBuilder};
+use candle_nn::{Dropout, Module, VarBuilder, linear_b};
 
 use super::attn_rms_norm::AttnRmsNorm;
-use super::rope::apply_wan_rotary_emb;
+use super::rope::{WanRotaryEmb, apply_wan_rotary_emb};
 
 #[derive(Debug)]
 pub struct WanAttention {
@@ -23,7 +23,13 @@ pub struct WanAttention {
 }
 
 impl WanAttention {
-    pub fn new_self_attn(dim: usize, heads: usize, head_dim: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
+    pub fn new_self_attn(
+        dim: usize,
+        heads: usize,
+        head_dim: usize,
+        eps: f64,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let inner_dim = head_dim * heads;
         Ok(Self {
             heads,
@@ -41,7 +47,13 @@ impl WanAttention {
         })
     }
 
-    pub fn new_cross_attn(dim: usize, heads: usize, head_dim: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
+    pub fn new_cross_attn(
+        dim: usize,
+        heads: usize,
+        head_dim: usize,
+        eps: f64,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let inner_dim = head_dim * heads;
         let cross_head_dim = head_dim;
         let kv_inner_dim = cross_head_dim * heads;
@@ -65,7 +77,7 @@ impl WanAttention {
         &self,
         hidden_states: &Tensor,
         encoder_hidden_states: Option<&Tensor>,
-        rotary_emb: Option<(&Tensor, &Tensor)>,
+        rotary_emb: Option<&WanRotaryEmb>,
     ) -> Result<Tensor> {
         let (b, q_len, _) = hidden_states.dims3()?;
         let enc = encoder_hidden_states.unwrap_or(hidden_states);
@@ -82,13 +94,13 @@ impl WanAttention {
         let k = k.reshape((b, k_len, self.heads, self.head_dim))?;
         let v = v.reshape((b, k_len, self.heads, self.head_dim))?;
 
-        let (q, k) = if let Some((cos, sin)) = rotary_emb {
+        let (q, k) = if let Some(rope) = rotary_emb {
             if self.is_cross_attention {
                 (q, k)
             } else {
                 (
-                    apply_wan_rotary_emb(&q, cos, sin)?,
-                    apply_wan_rotary_emb(&k, cos, sin)?,
+                    apply_wan_rotary_emb(&q, rope)?,
+                    apply_wan_rotary_emb(&k, rope)?,
                 )
             }
         } else {
@@ -97,6 +109,8 @@ impl WanAttention {
 
         let dtype = q.dtype();
         let scale = 1f32 / (self.head_dim as f32).sqrt();
+
+        crate::engine::require_flash_attn_for_cuda(q.device(), "WanAttention", q_len.max(k_len))?;
 
         #[allow(unused_mut)]
         let mut use_flash = false;
@@ -116,11 +130,10 @@ impl WanAttention {
                 } else {
                     dtype
                 };
-                let q_fa = q.to_dtype(flash_dtype)?;
-                let k_fa = k.to_dtype(flash_dtype)?;
-                let v_fa = v.to_dtype(flash_dtype)?;
-                let out =
-                    candle_flash_attn::flash_attn(&q_fa, &k_fa, &v_fa, scale, false)?;
+                let q_fa = q.contiguous()?.to_dtype(flash_dtype)?;
+                let k_fa = k.contiguous()?.to_dtype(flash_dtype)?;
+                let v_fa = v.contiguous()?.to_dtype(flash_dtype)?;
+                let out = candle_flash_attn::flash_attn(&q_fa, &k_fa, &v_fa, scale, false)?;
                 out.reshape((b, q_len, self.inner_dim))?.to_dtype(dtype)?
             }
             #[cfg(not(feature = "flash-attn"))]

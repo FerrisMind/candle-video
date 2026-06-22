@@ -8,6 +8,7 @@ use crate::models::wan::configs::WanTransformerConfig;
 use super::attention::WanAttention;
 use super::feed_forward::WanFeedForward;
 use super::fp32_layer_norm::Fp32LayerNorm;
+use super::rope::WanRotaryEmb;
 
 #[derive(Debug)]
 pub struct WanTransformerBlock {
@@ -60,9 +61,36 @@ impl WanTransformerBlock {
         hidden_states: &Tensor,
         encoder_hidden_states: &Tensor,
         timestep_proj: &Tensor,
-        rotary_emb: (&Tensor, &Tensor),
+        rotary_emb: &WanRotaryEmb,
     ) -> Result<Tensor> {
         let dim = hidden_states.dim(2)?;
+        if hidden_states.device().is_cuda() {
+            return self.forward_cuda(
+                hidden_states,
+                encoder_hidden_states,
+                timestep_proj,
+                rotary_emb,
+                dim,
+            );
+        }
+        self.forward_f32(
+            hidden_states,
+            encoder_hidden_states,
+            timestep_proj,
+            rotary_emb,
+            dim,
+        )
+    }
+
+    /// CPU parity path — keeps activations in F32 between FP32LayerNorm and gated residuals.
+    fn forward_f32(
+        &self,
+        hidden_states: &Tensor,
+        encoder_hidden_states: &Tensor,
+        timestep_proj: &Tensor,
+        rotary_emb: &WanRotaryEmb,
+        dim: usize,
+    ) -> Result<Tensor> {
         let table = self.scale_shift_table.to_dtype(DType::F32)?;
         let temb = timestep_proj.to_dtype(DType::F32)?;
         let combined = table.broadcast_add(&temb)?;
@@ -80,19 +108,22 @@ impl WanTransformerBlock {
         let norm_hidden = norm_hidden.broadcast_add(&shift_msa)?;
         let norm_hidden = norm_hidden.to_dtype(hidden_states.dtype())?;
 
-        let attn_out = self
-            .attn1
-            .forward(&norm_hidden, None, Some(rotary_emb))?;
-        let mut hidden_states = (hs_f32 + attn_out.to_dtype(DType::F32)?.broadcast_mul(&gate_msa)?)?
-            .to_dtype(hidden_states.dtype())?;
+        let attn_out = self.attn1.forward(&norm_hidden, None, Some(rotary_emb))?;
+        let mut hidden_states = (hs_f32
+            + attn_out.to_dtype(DType::F32)?.broadcast_mul(&gate_msa)?)?
+        .to_dtype(hidden_states.dtype())?;
 
-        let norm_hidden = if self.cross_attn_norm {
-            self.norm2.forward(&hidden_states.to_dtype(DType::F32)?)?
-                .to_dtype(hidden_states.dtype())?
+        let attn_out = if self.cross_attn_norm {
+            let norm_hidden = self
+                .norm2
+                .forward(&hidden_states.to_dtype(DType::F32)?)?
+                .to_dtype(hidden_states.dtype())?;
+            self.attn2
+                .forward(&norm_hidden, Some(encoder_hidden_states), None)?
         } else {
-            hidden_states.clone()
+            self.attn2
+                .forward(&hidden_states, Some(encoder_hidden_states), None)?
         };
-        let attn_out = self.attn2.forward(&norm_hidden, Some(encoder_hidden_states), None)?;
         hidden_states = (hidden_states.to_dtype(DType::F32)? + attn_out.to_dtype(DType::F32)?)?
             .to_dtype(hidden_states.dtype())?;
 
@@ -101,9 +132,60 @@ impl WanTransformerBlock {
         let ones = Tensor::ones_like(&norm_hidden)?;
         let norm_hidden = norm_hidden.broadcast_mul(&(c_scale_msa.broadcast_add(&ones)?))?;
         let norm_hidden = norm_hidden.broadcast_add(&c_shift_msa)?;
-        let ff_out = self.ffn.forward(&norm_hidden.to_dtype(hidden_states.dtype())?)?;
+        let ff_out = self
+            .ffn
+            .forward(&norm_hidden.to_dtype(hidden_states.dtype())?)?;
         hidden_states = (hs_f32 + ff_out.to_dtype(DType::F32)?.broadcast_mul(&c_gate_msa)?)?
             .to_dtype(hidden_states.dtype())?;
+
+        let _ = dim;
+        Ok(hidden_states)
+    }
+
+    /// CUDA inference path — residuals/scale/gate in model dtype; FP32LayerNorm still normates in F32 internally.
+    fn forward_cuda(
+        &self,
+        hidden_states: &Tensor,
+        encoder_hidden_states: &Tensor,
+        timestep_proj: &Tensor,
+        rotary_emb: &WanRotaryEmb,
+        dim: usize,
+    ) -> Result<Tensor> {
+        let dtype = hidden_states.dtype();
+        let table = self.scale_shift_table.to_dtype(dtype)?;
+        let temb = timestep_proj.to_dtype(dtype)?;
+        let combined = table.broadcast_add(&temb)?;
+        let shift_msa = combined.narrow(1, 0, 1)?.squeeze(1)?;
+        let scale_msa = combined.narrow(1, 1, 1)?.squeeze(1)?;
+        let gate_msa = combined.narrow(1, 2, 1)?.squeeze(1)?;
+        let c_shift_msa = combined.narrow(1, 3, 1)?.squeeze(1)?;
+        let c_scale_msa = combined.narrow(1, 4, 1)?.squeeze(1)?;
+        let c_gate_msa = combined.narrow(1, 5, 1)?.squeeze(1)?;
+
+        let mut norm_hidden = self.norm1.forward(hidden_states)?;
+        let ones = Tensor::ones_like(&norm_hidden)?;
+        norm_hidden = norm_hidden.broadcast_mul(&(scale_msa.broadcast_add(&ones)?))?;
+        norm_hidden = norm_hidden.broadcast_add(&shift_msa)?;
+
+        let attn_out = self.attn1.forward(&norm_hidden, None, Some(rotary_emb))?;
+        let mut hidden_states = (hidden_states + &attn_out.broadcast_mul(&gate_msa)?)?;
+
+        let attn_out = if self.cross_attn_norm {
+            let norm_hidden = self.norm2.forward(&hidden_states)?;
+            self.attn2
+                .forward(&norm_hidden, Some(encoder_hidden_states), None)?
+        } else {
+            self.attn2
+                .forward(&hidden_states, Some(encoder_hidden_states), None)?
+        };
+        hidden_states = (&hidden_states + &attn_out)?;
+
+        norm_hidden = self.norm3.forward(&hidden_states)?;
+        let ones = Tensor::ones_like(&norm_hidden)?;
+        norm_hidden = norm_hidden.broadcast_mul(&(c_scale_msa.broadcast_add(&ones)?))?;
+        norm_hidden = norm_hidden.broadcast_add(&c_shift_msa)?;
+        let ff_out = self.ffn.forward(&norm_hidden)?;
+        hidden_states = (&hidden_states + &ff_out.broadcast_mul(&c_gate_msa)?)?;
 
         let _ = dim;
         Ok(hidden_states)

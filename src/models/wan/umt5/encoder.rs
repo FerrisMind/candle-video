@@ -62,7 +62,7 @@
 //! Took 303.766583ms
 //! ```
 
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::{Activation, VarBuilder};
 use candle_transformers::models::t5::Config;
 use candle_transformers::models::with_tracing::Embedding;

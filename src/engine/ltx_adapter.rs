@@ -4,8 +4,8 @@ use candle_core::{Device, Result};
 
 use crate::models::ltx_video::configs::LTXVInferenceConfig;
 use crate::models::ltx_video::t2v_pipeline::{
-    LtxPipeline, OutputType, PromptInput, Scheduler, TextEncoder, Tokenizer, VaeLtxVideo,
-    VaeConfig, VideoProcessor, VideoTransformer3D,
+    LtxPipeline, OutputType, PromptInput, Scheduler, TextEncoder, Tokenizer, VaeConfig,
+    VaeLtxVideo, VideoProcessor, VideoTransformer3D,
 };
 
 use super::model::ModelCapabilities;
@@ -65,16 +65,13 @@ impl VideoPipeline for LtxPipelineAdapter<'_> {
     fn generate(&mut self, req: GenerateRequest, device: &Device) -> Result<VideoOutput> {
         self.validate(&req)?;
 
-        let negative = req
-            .negative_prompt
-            .map(PromptInput::Single)
-            .or_else(|| {
-                if self.pipeline.do_classifier_free_guidance() {
-                    Some(PromptInput::Single(String::new()))
-                } else {
-                    None
-                }
-            });
+        let negative = req.negative_prompt.map(PromptInput::Single).or_else(|| {
+            if self.pipeline.do_classifier_free_guidance() {
+                Some(PromptInput::Single(String::new()))
+            } else {
+                None
+            }
+        });
 
         let decode_timestep = self
             .inference

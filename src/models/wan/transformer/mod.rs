@@ -10,8 +10,8 @@ mod model;
 mod patch_embedding;
 mod rope;
 
+pub use block::WanTransformerBlock;
 pub use embeddings::{WanConditionEmbedder, sinusoidal_timestep_embedding};
 pub use model::WanTransformer3DModel;
 pub use patch_embedding::WanPatchEmbedding;
-pub use block::WanTransformerBlock;
-pub use rope::{apply_wan_rotary_emb, WanRotaryPosEmbed};
+pub use rope::{WanRotaryEmb, WanRotaryPosEmbed, apply_wan_rotary_emb};

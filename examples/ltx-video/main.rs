@@ -335,7 +335,7 @@ fn main() -> anyhow::Result<()> {
 
             // Determine if we should use unified weights based on version or repository
             let is_098 = args.ltxv_version.contains("0.9.8");
-            
+
             let (transformer, vae) = if is_098 {
                 println!("  Fetching unified weight file (official format)...");
                 let unified = repo.get("ltxv-2b-0.9.8-distilled.safetensors")?;

@@ -27,6 +27,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 image = "0.25.10"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-tracy = { version = "0.11.4", optional = true }
 glob = "0.3.3"
 statrs = "0.18.0"
 gif = "0.14.2"
@@ -39,6 +40,9 @@ regex = "1.12.3"
 [features]
 default = []
 legacy_tests = []
+# Profiling instrumentation (tracing spans; no runtime cost when disabled)
+profiling = ["tracing/max_level_trace"]
+tracy = ["profiling", "dep:tracing-tracy"]
 # GPU Acceleration
 flash-attn = ["dep:candle-flash-attn"]
 cuda = ["candle-core/cuda"]
@@ -51,7 +55,10 @@ accelerate = ["candle-core/accelerate"]
 # NCCL for multi-GPU support
 nccl = ["candle-core/nccl"]
 # GPU optimizations (for maximum performance)
-gpu = ["flash-attn", "cuda"]
+gpu = ["flash-attn", "cuda", "cudnn"]
+
+[profile.release]
+debug = "line-tables-only"
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
@@ -67,6 +74,10 @@ proptest = "1.11.0"
 name = "ltx_video_benchmarks"
 harness = false
 
+[[bench]]
+name = "wan_benchmarks"
+harness = false
+
 # =============================================================================
 # Examples
 # =============================================================================
@@ -78,6 +89,10 @@ path = "examples/ltx-video/main.rs"
 [[example]]
 name = "video-generate"
 path = "examples/video-generate/main.rs"
+
+[[example]]
+name = "wan-profile"
+path = "examples/wan-profile/main.rs"
 
 # Verification examples
 [[example]]

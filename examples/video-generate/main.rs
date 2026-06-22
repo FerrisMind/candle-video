@@ -4,16 +4,19 @@
 
 use std::path::{Path, PathBuf};
 
-use candle_core::{DType, Device};
-use candle_video::{
-    GenerateRequest, VideoPipeline, WanPipeline, WanPipelineAdapter,
-};
+use candle_video::profiling::init_tracing;
 use candle_video::utils::latents_fixture::load_latents_json;
-use candle_video::utils::video_export::{export_video_output, PixelRange};
+use candle_video::utils::video_export::{PixelRange, export_video_output};
+use candle_video::{
+    GenerateRequest, MemoryOptions, VideoPipeline, WanDevicePlan, WanPipeline, WanPipelineAdapter,
+};
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "video-generate", about = "Generate video with candle-video backends")]
+#[command(
+    name = "video-generate",
+    about = "Generate video with candle-video backends"
+)]
 struct Args {
     #[arg(long, default_value = "wan:2.1-t2v-1.3b")]
     model: String,
@@ -63,12 +66,22 @@ struct Args {
     #[arg(long)]
     cpu: bool,
 
-    /// Run transformer in F16 on CUDA (saves VRAM; needed for 480p on 12 GB GPUs).
+    /// Force F32 transformer weights (default on CUDA is F16).
     #[arg(long)]
-    transformer_f16: bool,
+    transformer_f32: bool,
+
+    #[arg(long)]
+    vae_tiling: bool,
+
+    #[arg(long)]
+    vae_slicing: bool,
+
+    #[arg(long)]
+    cpu_offload: bool,
 }
 
 fn main() -> anyhow::Result<()> {
+    init_tracing();
     let args = Args::parse();
 
     match args.model.as_str() {
@@ -79,57 +92,63 @@ fn main() -> anyhow::Result<()> {
         other => anyhow::bail!("unsupported model {other}"),
     }
 
-    if !args.weights.join("model_index.json").exists() {
+    if !args.weights.join("model_index.json").exists()
+        && !args.weights.join("text_encoder_gguf").exists()
+    {
         anyhow::bail!(
-            "weights path must be a Diffusers Wan folder with model_index.json: {}",
+            "weights path must be a Diffusers Wan folder (model_index.json) or consolidated bundle (text_encoder_gguf/): {}",
             args.weights.display()
         );
     }
 
-    let device = if args.cpu {
-        Device::Cpu
-    } else {
-        Device::new_cuda(0)?
-    };
-    let text_encoder_device = if args.cpu {
-        Device::Cpu
-    } else {
-        println!("Text encoder on CPU (UMT5-XXL does not fit in VRAM alongside transformer on 12 GB GPUs).");
-        Device::Cpu
-    };
+    #[cfg(all(feature = "cuda", not(feature = "flash-attn")))]
     if !args.cpu {
-        println!("VAE decode on CPU (frees VRAM for transformer denoise).");
+        eprintln!(
+            "WARNING: built with `cuda` but without `flash-attn`. Wan will OOM on 12 GB GPUs. \
+             Rebuild: cargo build --release --example video-generate --features flash-attn,cuda"
+        );
+    }
+
+    let memory = MemoryOptions {
+        vae_tiling: args.vae_tiling,
+        vae_slicing: args.vae_slicing,
+        cpu_offload: args.cpu_offload,
+    };
+
+    let plan = WanDevicePlan::for_wan(
+        args.cpu,
+        if args.transformer_f32 {
+            Some(false)
+        } else {
+            None
+        },
+        &memory,
+    )?;
+
+    if !args.cpu {
+        println!(
+            "Device plan: compute={:?} text_encoder={:?} vae={:?} transformer={:?}",
+            plan.compute, plan.text_encoder, plan.vae, plan.transformer_dtype
+        );
     }
 
     println!("Loading Wan pipeline from {} …", args.weights.display());
-    let transformer_dtype = if args.cpu {
-        DType::F32
-    } else if args.transformer_f16 {
-        println!("Transformer in F16.");
-        DType::F16
-    } else {
-        DType::F32
-    };
-    let vae_device = if args.cpu {
-        Device::Cpu
-    } else {
-        // Keep VAE off GPU during denoise to save VRAM on 12 GB cards.
-        Device::Cpu
-    };
     let pipeline = WanPipeline::load_with_devices(
         &args.weights,
-        &device,
-        &text_encoder_device,
-        &vae_device,
-        transformer_dtype,
-        DType::F32,
+        &plan.compute,
+        &plan.text_encoder,
+        &plan.vae,
+        plan.transformer_dtype,
+        plan.vae_dtype,
+        plan.sequential_gpu,
+        plan.vae_tiling,
     )?;
     let mut adapter = WanPipelineAdapter::new(pipeline);
 
     let initial_latents = match &args.latents_json {
         Some(path) => {
             println!("Loading initial latents from {} …", path.display());
-            Some(load_latents_json(path, &device)?)
+            Some(load_latents_json(path, &plan.compute)?)
         }
         None => None,
     };
@@ -150,7 +169,7 @@ fn main() -> anyhow::Result<()> {
         seed: args.seed,
         frame_rate: 16,
         task: candle_video::VideoTask::TextToVideo,
-        memory: Default::default(),
+        memory,
         output: Default::default(),
         initial_latents,
         prompt_embeds: None,
@@ -163,7 +182,7 @@ fn main() -> anyhow::Result<()> {
         "Generating {}x{} video, {} frames, {} steps …",
         req.width, req.height, req.frames, req.steps
     );
-    let out = adapter.generate(req, &device)?;
+    let out = adapter.generate(req, &plan.compute)?;
     let dims = out.frames.dims();
     println!("Output tensor shape: {dims:?}");
 

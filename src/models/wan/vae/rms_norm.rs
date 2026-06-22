@@ -33,7 +33,11 @@ impl WanRmsNorm {
 
 impl Module for WanRmsNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let norm_dim = if self.channel_first { 1 } else { x.dims().len() - 1 };
+        let norm_dim = if self.channel_first {
+            1
+        } else {
+            x.dims().len() - 1
+        };
         let x32 = x.to_dtype(DType::F32)?;
         // Diffusers: F.normalize(x, dim=1) — L2 norm over channels, not RMS mean.
         let sq = x32.sqr()?;
@@ -49,6 +53,7 @@ impl Module for WanRmsNorm {
             r if r >= 2 => self.gamma.unsqueeze(0)?,
             _ => candle_core::bail!("invalid gamma rank {}", self.gamma.rank()),
         };
+        let gamma = gamma.to_dtype(DType::F32)?;
         out = out.broadcast_mul(&gamma)?;
         out.to_dtype(x.dtype())
     }

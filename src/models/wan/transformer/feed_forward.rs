@@ -1,7 +1,9 @@
 //! Wan transformer FFN (`FeedForward` with `gelu-approximate`).
 
 use candle_core::{DType, Result, Tensor};
-use candle_nn::{linear_b, Module, VarBuilder};
+use candle_nn::{Module, VarBuilder, linear_b};
+
+use crate::engine::wan_inference_compute_dtype;
 
 #[derive(Debug)]
 pub struct WanFeedForward {
@@ -20,7 +22,8 @@ impl WanFeedForward {
 
 pub(super) fn gelu_approx_tanh(xs: &Tensor) -> Result<Tensor> {
     let dtype = xs.dtype();
-    let x = xs.to_dtype(DType::F32)?;
+    let compute = wan_inference_compute_dtype(xs.device(), dtype);
+    let x = xs.to_dtype(compute)?;
     let x3 = x.powf(3.0)?;
     let inner = x.broadcast_add(&x3.affine(0.044715, 0.0)?)?;
     let inner = inner.affine((2.0 / std::f64::consts::PI).sqrt(), 0.0)?;

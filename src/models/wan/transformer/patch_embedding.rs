@@ -41,9 +41,7 @@ impl WanPatchEmbedding {
         if h % p_h != 0 || w % p_w != 0 {
             candle_core::bail!("spatial dims {h}x{w} not divisible by patch {p_h}x{p_w}");
         }
-        let xs = xs
-            .permute((0, 2, 1, 3, 4))?
-            .reshape((b * f, c, h, w))?;
+        let xs = xs.permute((0, 2, 1, 3, 4))?.reshape((b * f, c, h, w))?;
         let xs = self.conv2d.forward(&xs)?;
         let (_bf, out_c, hh, ww) = xs.dims4()?;
         let xs = xs.permute((0, 2, 3, 1))?;

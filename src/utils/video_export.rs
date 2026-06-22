@@ -32,9 +32,7 @@ pub fn tensor_to_rgb_frames(
             let frame = frame.permute((1, 2, 0))?;
             let frame = match pixel_range {
                 PixelRange::ZeroTo255 => frame.clamp(0.0, 255.0)?,
-                PixelRange::NegOneToOne => {
-                    frame.affine(127.5, 127.5)?.clamp(0.0, 255.0)?
-                }
+                PixelRange::NegOneToOne => frame.affine(127.5, 127.5)?.clamp(0.0, 255.0)?,
             };
             let frame = frame.to_dtype(DType::U8)?;
             frame_data.push(frame.flatten_all()?.to_vec1()?);
@@ -92,7 +90,9 @@ pub fn save_gif(
         .collect();
 
     for frame in gif_frames {
-        encoder.write_frame(&frame).map_err(candle_core::Error::wrap)?;
+        encoder
+            .write_frame(&frame)
+            .map_err(candle_core::Error::wrap)?;
     }
     Ok(())
 }

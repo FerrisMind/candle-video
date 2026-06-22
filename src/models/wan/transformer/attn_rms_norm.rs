@@ -3,6 +3,8 @@
 use candle_core::{D, DType, Result, Tensor};
 use candle_nn::{Module, VarBuilder};
 
+use crate::engine::wan_inference_compute_dtype;
+
 #[derive(Debug)]
 pub struct AttnRmsNorm {
     weight: Tensor,
@@ -19,15 +21,13 @@ impl AttnRmsNorm {
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let dtype = xs.dtype();
-        let xs_f32 = xs.to_dtype(DType::F32)?;
-        let dim = xs_f32.dim(D::Minus1)? as f64;
-        let ms = xs_f32
-            .sqr()?
-            .sum_keepdim(D::Minus1)?
-            .affine(1.0 / dim, 0.0)?;
+        let compute = wan_inference_compute_dtype(xs.device(), dtype);
+        let xs_c = xs.to_dtype(compute)?;
+        let dim = xs_c.dim(D::Minus1)? as f64;
+        let ms = xs_c.sqr()?.sum_keepdim(D::Minus1)?.affine(1.0 / dim, 0.0)?;
         let denom = ms.affine(1.0, self.eps)?.sqrt()?;
-        let ys = xs_f32.broadcast_div(&denom)?;
-        let w = self.weight.to_dtype(DType::F32)?;
+        let ys = xs_c.broadcast_div(&denom)?;
+        let w = self.weight.to_dtype(compute)?;
         let rank = ys.rank();
         let mut shape = vec![1usize; rank];
         shape[rank - 1] = w.dims1()?;

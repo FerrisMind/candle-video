@@ -1,7 +1,7 @@
 //! Timestep and text condition embeddings for Wan transformer.
 
 use candle_core::{D, DType, Result, Tensor};
-use candle_nn::{linear_b, Module, VarBuilder};
+use candle_nn::{Module, VarBuilder, linear_b};
 
 use super::feed_forward::gelu_approx_tanh;
 

@@ -148,9 +148,7 @@ impl WanCausalConv3d {
         let dt = self.dil_t;
         let needed = (kt - 1) * dt + 1;
         if t_pad < needed {
-            candle_core::bail!(
-                "time dim too small after padding: t_pad={t_pad}, needed={needed}"
-            );
+            candle_core::bail!("time dim too small after padding: t_pad={t_pad}, needed={needed}");
         }
         let t_out = (t_pad - needed) / st + 1;
         let mut ys = Vec::with_capacity(t_out);

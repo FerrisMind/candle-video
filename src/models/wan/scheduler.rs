@@ -4,8 +4,8 @@ use std::path::Path;
 
 use candle_core::{Result, Tensor};
 
-use crate::models::ltx_video::loader::{load_model_config, LoaderError};
 use super::configs::WanSchedulerConfig;
+use crate::models::ltx_video::loader::{LoaderError, load_model_config};
 
 #[derive(Debug, Clone)]
 pub struct UniPcStepOutput {
@@ -33,7 +33,9 @@ impl UniPcMultistepScheduler {
             candle_core::bail!("UniPcMultistepScheduler MVP requires use_flow_sigmas=true");
         }
         if config.prediction_type != "flow_prediction" {
-            candle_core::bail!("UniPcMultistepScheduler MVP requires prediction_type=flow_prediction");
+            candle_core::bail!(
+                "UniPcMultistepScheduler MVP requires prediction_type=flow_prediction"
+            );
         }
         let order = config.solver_order;
         Ok(Self {
@@ -88,10 +90,7 @@ impl UniPcMultistepScheduler {
             sigmas[0] -= 1e-6;
         }
 
-        let timesteps: Vec<i64> = sigmas
-            .iter()
-            .map(|s| (s * train) as i64)
-            .collect();
+        let timesteps: Vec<i64> = sigmas.iter().map(|s| (s * train) as i64).collect();
 
         let sigma_last = match self.config.final_sigmas_type.as_str() {
             "zero" => 0.0,
@@ -170,7 +169,11 @@ impl UniPcMultistepScheduler {
         order: usize,
     ) -> Result<Tensor> {
         let idx = self.step_index.expect("step_index");
-        let m0 = self.model_outputs.last().and_then(|t| t.as_ref()).expect("m0");
+        let m0 = self
+            .model_outputs
+            .last()
+            .and_then(|t| t.as_ref())
+            .expect("m0");
         let x = sample;
 
         let sigma_t = self.sigmas[idx + 1];
@@ -241,7 +244,11 @@ impl UniPcMultistepScheduler {
         order: usize,
     ) -> Result<Tensor> {
         let idx = self.step_index.expect("step_index");
-        let m0 = self.model_outputs.last().and_then(|t| t.as_ref()).expect("m0");
+        let m0 = self
+            .model_outputs
+            .last()
+            .and_then(|t| t.as_ref())
+            .expect("m0");
         let x = last_sample;
         let model_t = this_model_output;
 
@@ -299,7 +306,8 @@ impl UniPcMultistepScheduler {
                     .broadcast_mul(&h_phi_1_t.reshape(shape.as_slice())?)?,
             )?;
 
-        let correction = corr_res.add(&d1_t.broadcast_mul(&rho_last_t.reshape(shape.as_slice())?)?)?;
+        let correction =
+            corr_res.add(&d1_t.broadcast_mul(&rho_last_t.reshape(shape.as_slice())?)?)?;
         x_t_.sub(
             &correction
                 .broadcast_mul(&alpha_t_t.reshape(shape.as_slice())?)?

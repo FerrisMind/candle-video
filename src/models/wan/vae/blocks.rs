@@ -74,7 +74,6 @@ impl WanResidualBlock {
 
         x.add(&h)
     }
-
 }
 
 #[derive(Debug)]
@@ -109,10 +108,7 @@ impl WanAttentionBlock {
         let v = qkv.narrow(3, 2 * c, c)?;
         let scale = (c as f64).powf(-0.5);
         let k_t = k.transpose(2, 3)?.contiguous()?;
-        let attn = candle_nn::ops::softmax(
-            &q.contiguous()?.matmul(&k_t)?.affine(scale, 0.0)?,
-            3,
-        )?;
+        let attn = candle_nn::ops::softmax(&q.contiguous()?.matmul(&k_t)?.affine(scale, 0.0)?, 3)?;
         // `(bt, 1, hw, c)` -> `(bt, c, h, w)`
         let x = attn
             .matmul(&v.contiguous()?)?

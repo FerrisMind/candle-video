@@ -106,7 +106,7 @@ impl ModelCapabilities {
             },
             supports_negative_prompt: true,
             supports_lora: false,
-            supports_quantized_text_encoder: false,
+            supports_quantized_text_encoder: true,
             supports_two_stage_denoising: false,
         }
     }

@@ -31,11 +31,10 @@ impl WanTokenizer {
         } else {
             dir.join("spiece.model")
         };
-        let inner = HfTokenizer::from_file(&path)
-            .map_err(|e| LoaderError::FileRead {
-                path: path.display().to_string(),
-                source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
-            })?;
+        let inner = HfTokenizer::from_file(&path).map_err(|e| LoaderError::FileRead {
+            path: path.display().to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
+        })?;
         Ok(Self {
             inner,
             device: Device::Cpu,
@@ -86,8 +85,7 @@ impl WanTokenizer {
         }
 
         let batch = prompts.len();
-        let ids_t =
-            Tensor::new(all_ids, &self.device)?.reshape((batch, max_length))?;
+        let ids_t = Tensor::new(all_ids, &self.device)?.reshape((batch, max_length))?;
         let mask_t = Tensor::new(all_mask, &self.device)?
             .to_dtype(DType::F32)?
             .reshape((batch, max_length))?;
