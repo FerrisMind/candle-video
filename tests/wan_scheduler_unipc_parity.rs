@@ -1,24 +1,21 @@
 //! Wan UniPC flow-sigma scheduler parity vs Diffusers.
 
+mod wan_fixtures;
+
 use std::path::PathBuf;
 
 use candle_core::{DType, Device, Tensor};
 use candle_video::models::wan::UniPcMultistepScheduler;
 
+use wan_fixtures::wan_scheduler_config;
+
 fn scheduler_config_path() -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../Wan2.1-T2V-1.3B-Diffusers/scheduler/scheduler_config.json"),
-        PathBuf::from(
-            "/home/mod479711/Downloads/Wan2.1-T2V-1.3B-Diffusers/scheduler/scheduler_config.json",
-        ),
-    ];
-    candidates.into_iter().find(|p| p.exists())
+    wan_scheduler_config()
 }
 
 fn fixture_path() -> Option<PathBuf> {
-    let p =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wan/scheduler_unipc_flow.json");
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wan/scheduler_unipc_flow.json");
     p.exists().then_some(p)
 }
 
@@ -41,7 +38,9 @@ fn scheduler_sigmas_timesteps_match_reference_if_fixture_present() {
     let fixture_path = match fixture_path() {
         Some(p) => p,
         None => {
-            eprintln!("Skipping scheduler parity: run scripts/wan/reference/dump_scheduler_unipc.py");
+            eprintln!(
+                "Skipping scheduler parity: run scripts/wan/reference/dump_scheduler_unipc.py"
+            );
             return;
         }
     };
@@ -76,7 +75,12 @@ fn scheduler_sigmas_timesteps_match_reference_if_fixture_present() {
     for (i, (&a, &b)) in sched.sigmas().iter().zip(ref_sigmas.iter()).enumerate() {
         assert!((a - b).abs() < 1e-5, "sigma[{i}] rust={a} ref={b}");
     }
-    for (i, (&a, &b)) in sched.timesteps().iter().zip(ref_timesteps.iter()).enumerate() {
+    for (i, (&a, &b)) in sched
+        .timesteps()
+        .iter()
+        .zip(ref_timesteps.iter())
+        .enumerate()
+    {
         assert_eq!(a, b, "timestep[{i}] mismatch");
     }
 }

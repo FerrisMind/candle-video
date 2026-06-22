@@ -1,15 +1,18 @@
 //! Patch embedding conv parity vs PyTorch reference row.
 
+mod wan_fixtures;
+
 use std::path::PathBuf;
 
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_video::models::ltx_video::loader::WeightLoader;
-use candle_video::models::wan::loader::discover_safetensors;
 use candle_video::models::wan::WanPatchEmbedding;
+use candle_video::models::wan::loader::discover_safetensors;
+
+use wan_fixtures::wan_transformer_dir;
 
 fn transformer_dir() -> Option<PathBuf> {
-    let p = PathBuf::from("/home/mod479711/Downloads/Wan2.1-T2V-1.3B-Diffusers/transformer");
-    p.join("config.json").exists().then_some(p)
+    wan_transformer_dir().filter(|p| p.join("config.json").exists())
 }
 
 #[test]
@@ -68,5 +71,10 @@ fn patch_embedding_row_matches_fixture_reference() {
         .zip(ref_row.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0f32, f32::max);
-    assert!(diff < 1e-4, "patch row max diff {diff}, rust={:?} ref={:?}", &row[..4], &ref_row[..4]);
+    assert!(
+        diff < 1e-4,
+        "patch row max diff {diff}, rust={:?} ref={:?}",
+        &row[..4],
+        &ref_row[..4]
+    );
 }

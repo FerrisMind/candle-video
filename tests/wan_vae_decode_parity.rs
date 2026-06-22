@@ -1,20 +1,17 @@
 //! Wan 2.1 VAE decode parity tests.
 
+mod wan_fixtures;
+
 use std::path::PathBuf;
 
-use candle_core::{Device, DType, Tensor};
+use candle_core::{DType, Device, Tensor};
 use candle_video::models::wan::vae::denormalize_latents_vec;
 use candle_video::models::wan::{AutoencoderKLWan, WanVaeConfig};
 
+use wan_fixtures::wan_vae_dir;
+
 fn wan_vae_fixture_dir() -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../Wan2.1-T2V-1.3B-Diffusers/vae"),
-        PathBuf::from("/home/mod479711/Downloads/Wan2.1-T2V-1.3B-Diffusers/vae"),
-    ];
-    candidates
-        .into_iter()
-        .find(|p| p.join("diffusion_pytorch_model.safetensors").exists())
+    wan_vae_dir().filter(|p| p.join("diffusion_pytorch_model.safetensors").exists())
 }
 
 #[test]

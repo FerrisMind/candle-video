@@ -1,9 +1,13 @@
 //! Wan tokenizer parity against a Hugging Face reference fixture.
 
+mod wan_fixtures;
+
 use candle_core::Device;
-use candle_video::models::wan::{WanTokenizer, WAN_DEFAULT_MAX_SEQ_LEN};
+use candle_video::models::wan::{WAN_DEFAULT_MAX_SEQ_LEN, WanTokenizer};
 use serde::Deserialize;
 use std::path::PathBuf;
+
+use wan_fixtures::wan_diffusers_root;
 
 #[derive(Debug, Deserialize)]
 struct TokenizerFixture {
@@ -16,18 +20,15 @@ struct TokenizerFixture {
 }
 
 fn fixture_path() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wan/tokenizer_cat_snow.json");
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wan/tokenizer_cat_snow.json");
     p.exists().then_some(p)
 }
 
 fn wan_tokenizer_dir() -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../Wan2.1-T2V-1.3B-Diffusers/tokenizer"),
-        PathBuf::from("/home/mod479711/Downloads/Wan2.1-T2V-1.3B-Diffusers/tokenizer"),
-    ];
-    candidates
-        .into_iter()
-        .find(|p| p.join("tokenizer.json").exists())
+    wan_diffusers_root()
+        .map(|r| r.join("tokenizer"))
+        .filter(|p| p.join("tokenizer.json").exists())
 }
 
 #[test]
@@ -55,10 +56,7 @@ fn wan_tokenizer_matches_hf_fixture() {
         .with_device(Device::Cpu);
 
     let (ids, mask) = tokenizer
-        .encode_prompts(
-            std::slice::from_ref(&fixture.prompt),
-            fixture.max_length,
-        )
+        .encode_prompts(std::slice::from_ref(&fixture.prompt), fixture.max_length)
         .expect("encode");
 
     let ids_vec: Vec<u32> = ids.to_vec2::<u32>().unwrap().pop().unwrap();

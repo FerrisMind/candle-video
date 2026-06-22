@@ -1,19 +1,21 @@
 //! Decode Diffusers final latents through Rust VAE and compare to reference stats.
 
+mod wan_fixtures;
+
 use std::path::PathBuf;
 
 use candle_core::{DType, Device, Tensor};
 use candle_video::models::wan::AutoencoderKLWan;
 
+use wan_fixtures::wan_vae_dir;
+
 fn vae_dir() -> Option<PathBuf> {
-    let p = PathBuf::from("/home/mod479711/Downloads/Wan2.1-T2V-1.3B-Diffusers/vae");
-    p.join("diffusion_pytorch_model.safetensors")
-        .exists()
-        .then_some(p)
+    wan_vae_dir().filter(|p| p.join("diffusion_pytorch_model.safetensors").exists())
 }
 
 fn fixture_path() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wan/final_latents_ref.json");
+    let p =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wan/final_latents_ref.json");
     p.exists().then_some(p)
 }
 

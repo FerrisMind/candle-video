@@ -1,16 +1,19 @@
 //! UMT5 embedding layer parity (before transformer blocks).
 
+mod wan_fixtures;
+
 use std::path::PathBuf;
 
 use candle_core::{DType, Device, Tensor};
-use candle_video::models::wan::loader::discover_safetensors;
+use candle_transformers::models::t5::T5EncoderModel;
 use candle_video::models::ltx_video::loader::WeightLoader;
 use candle_video::models::wan::Umt5EncoderConfig;
-use candle_transformers::models::t5::T5EncoderModel;
+use candle_video::models::wan::loader::discover_safetensors;
+
+use wan_fixtures::wan_diffusers_root;
 
 fn weights_root() -> Option<PathBuf> {
-    let p = PathBuf::from("/home/mod479711/Downloads/Wan2.1-T2V-1.3B-Diffusers");
-    p.join("model_index.json").exists().then_some(p)
+    wan_diffusers_root()
 }
 
 #[test]
@@ -53,13 +56,10 @@ fn umt5_embed_tokens_match_hf_if_weights_present() {
     let mut model = T5EncoderModel::load(vb, &t5_cfg).expect("load");
 
     // ids for "A cat walking in the snow"
-    let ids = Tensor::new(
-        &[320u32, 6283, 53049, 301, 312, 45540, 1],
-        &device,
-    )
-    .expect("ids")
-    .reshape((1, 7))
-    .expect("shape");
+    let ids = Tensor::new(&[320u32, 6283, 53049, 301, 312, 45540, 1], &device)
+        .expect("ids")
+        .reshape((1, 7))
+        .expect("shape");
 
     // Access shared embedding via forward on ids - compare first token embed indirectly
     let hidden = model.forward(&ids).expect("forward");

@@ -1,25 +1,25 @@
 //! Full WanTransformer3DModel forward parity (tiny latent).
 
+mod wan_fixtures;
+
 use std::path::PathBuf;
 
 use candle_core::{DType, Device, Tensor};
 use candle_video::models::wan::WanTransformer3DModel;
 
+use wan_fixtures::wan_transformer_dir;
+
 fn transformer_fixture_dir() -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../Wan2.1-T2V-1.3B-Diffusers/transformer"),
-        PathBuf::from("/home/mod479711/Downloads/Wan2.1-T2V-1.3B-Diffusers/transformer"),
-    ];
-    candidates.into_iter().find(|p| {
-        p.join("diffusion_pytorch_model.safetensors.index.json").exists()
+    wan_transformer_dir().filter(|p| {
+        p.join("diffusion_pytorch_model.safetensors.index.json")
+            .exists()
             || p.join("diffusion_pytorch_model.safetensors").exists()
     })
 }
 
 fn fixture_json() -> Option<PathBuf> {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wan/transformer_forward_tiny.json");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wan/transformer_forward_tiny.json");
     path.exists().then_some(path)
 }
 
@@ -92,8 +92,11 @@ fn transformer_forward_matches_reference_if_fixture_present() {
         &device,
     )
     .expect("timestep");
-    let encoder_hidden_states =
-        load_tensor(&to_f32("encoder_hidden_states"), &shape("encoder_hidden_states"), &device);
+    let encoder_hidden_states = load_tensor(
+        &to_f32("encoder_hidden_states"),
+        &shape("encoder_hidden_states"),
+        &device,
+    );
     let expected = load_tensor(&to_f32("output"), &shape("output"), &device);
 
     let out = model

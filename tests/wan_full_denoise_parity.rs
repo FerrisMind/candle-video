@@ -1,13 +1,17 @@
 //! Full 30-step denoise + VAE parity vs Diffusers reference fixture.
 
+mod wan_fixtures;
+
 use std::path::PathBuf;
 
 use candle_core::{DType, Device, Tensor};
 use candle_video::models::wan::WanPipeline;
 
+use wan_fixtures::wan_diffusers_root;
+
 fn fixture_path() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wan/full_denoise_ref.json");
+    let p =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wan/full_denoise_ref.json");
     p.exists().then_some(p)
 }
 
@@ -16,8 +20,7 @@ fn step0_path() -> PathBuf {
 }
 
 fn weights_root() -> Option<PathBuf> {
-    let p = PathBuf::from("/home/mod479711/Downloads/Wan2.1-T2V-1.3B-Diffusers");
-    p.join("model_index.json").exists().then_some(p)
+    wan_diffusers_root()
 }
 
 fn load_f32(data: &[serde_json::Value], shape: &[usize], device: &Device) -> Tensor {
@@ -62,7 +65,11 @@ fn full_denoise_output_matches_diffusers_if_fixtures_present() {
         .iter()
         .map(|v| v.as_u64().unwrap() as usize)
         .collect();
-    let initial = load_f32(step0["latents_init"].as_array().unwrap(), &lat_shape, &device);
+    let initial = load_f32(
+        step0["latents_init"].as_array().unwrap(),
+        &lat_shape,
+        &device,
+    );
 
     let p_shape: Vec<usize> = step0["prompt_embeds_shape"]
         .as_array()
@@ -70,7 +77,11 @@ fn full_denoise_output_matches_diffusers_if_fixtures_present() {
         .iter()
         .map(|v| v.as_u64().unwrap() as usize)
         .collect();
-    let prompt_embeds = load_f32(step0["prompt_embeds"].as_array().unwrap(), &p_shape, &device);
+    let prompt_embeds = load_f32(
+        step0["prompt_embeds"].as_array().unwrap(),
+        &p_shape,
+        &device,
+    );
     let neg_shape: Vec<usize> = step0["neg_embeds_shape"]
         .as_array()
         .unwrap()

@@ -1,20 +1,22 @@
 //! Step-0 denoise parity vs Diffusers dump (`scripts/wan/compare_step0.py`).
 
+mod wan_fixtures;
+
 use std::path::PathBuf;
 
 use candle_core::{DType, Device, Tensor};
-use candle_video::models::wan::{
-    UniPcMultistepScheduler, WanPipeline, WanTransformer3DModel,
-};
+use candle_video::models::wan::{UniPcMultistepScheduler, WanPipeline, WanTransformer3DModel};
+
+use wan_fixtures::{wan_scheduler_config, wan_transformer_dir};
 
 fn fixture_path() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wan/step0_reference.json");
+    let p =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wan/step0_reference.json");
     p.exists().then_some(p)
 }
 
 fn transformer_dir() -> Option<PathBuf> {
-    let p = PathBuf::from("/home/mod479711/Downloads/Wan2.1-T2V-1.3B-Diffusers/transformer");
-    p.join("config.json").exists().then_some(p)
+    wan_transformer_dir()
 }
 
 fn load_f32(data: &[serde_json::Value], shape: &[usize], device: &Device) -> Tensor {
@@ -48,7 +50,11 @@ fn step0_noise_pred_matches_diffusers_if_fixture_present() {
         .iter()
         .map(|v| v.as_u64().unwrap() as usize)
         .collect();
-    let latents = load_f32(fixture["latents_init"].as_array().unwrap(), &lat_shape, &device);
+    let latents = load_f32(
+        fixture["latents_init"].as_array().unwrap(),
+        &lat_shape,
+        &device,
+    );
 
     let p_shape: Vec<usize> = fixture["prompt_embeds_shape"]
         .as_array()
@@ -56,15 +62,22 @@ fn step0_noise_pred_matches_diffusers_if_fixture_present() {
         .iter()
         .map(|v| v.as_u64().unwrap() as usize)
         .collect();
-    let prompt_embeds =
-        load_f32(fixture["prompt_embeds"].as_array().unwrap(), &p_shape, &device);
+    let prompt_embeds = load_f32(
+        fixture["prompt_embeds"].as_array().unwrap(),
+        &p_shape,
+        &device,
+    );
     let neg_shape: Vec<usize> = fixture["neg_embeds_shape"]
         .as_array()
         .unwrap()
         .iter()
         .map(|v| v.as_u64().unwrap() as usize)
         .collect();
-    let neg_embeds = load_f32(fixture["neg_embeds"].as_array().unwrap(), &neg_shape, &device);
+    let neg_embeds = load_f32(
+        fixture["neg_embeds"].as_array().unwrap(),
+        &neg_shape,
+        &device,
+    );
 
     let t = fixture["timestep"].as_i64().unwrap();
     let timestep = Tensor::full(t, 1, &device).expect("timestep");
@@ -104,9 +117,10 @@ fn step0_noise_pred_matches_diffusers_if_fixture_present() {
         "noise_pred diverges from Diffusers at step 0: max diff {max_diff}"
     );
 
-    let sched_path = PathBuf::from(
-        "/home/mod479711/Downloads/Wan2.1-T2V-1.3B-Diffusers/scheduler/scheduler_config.json",
-    );
+    let sched_path = match wan_scheduler_config() {
+        Some(p) => p,
+        None => return,
+    };
     let mut sched = UniPcMultistepScheduler::from_config_path(&sched_path).expect("sched");
     sched.set_timesteps(10).expect("set");
     sched.set_begin_index(0);

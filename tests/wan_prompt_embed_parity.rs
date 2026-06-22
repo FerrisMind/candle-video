@@ -1,17 +1,21 @@
 //! Prompt embedding parity vs Diffusers reference.
 
+mod wan_fixtures;
+
 use std::path::PathBuf;
 
 use candle_core::{DType, Device};
-use candle_video::models::wan::{encode_prompt, Umt5TextEncoder, WanTokenizer};
+use candle_video::models::wan::{Umt5TextEncoder, WanTokenizer, encode_prompt};
+
+use wan_fixtures::wan_diffusers_root;
 
 fn weights_root() -> Option<PathBuf> {
-    let p = PathBuf::from("/home/mod479711/Downloads/Wan2.1-T2V-1.3B-Diffusers");
-    p.join("model_index.json").exists().then_some(p)
+    wan_diffusers_root()
 }
 
 fn ref_path() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wan/prompt_embeds_ref.json");
+    let p =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wan/prompt_embeds_ref.json");
     p.exists().then_some(p)
 }
 
@@ -67,7 +71,13 @@ fn prompt_embeds_match_diffusers_if_fixture_present() {
     eprintln!("rust first8: {:?}", &got[..8]);
     eprintln!("ref  first8: {:?}", &ref64[..8]);
 
-    let neg_got: Vec<f32> = n.as_ref().unwrap().flatten_all().unwrap().to_vec1().unwrap();
+    let neg_got: Vec<f32> = n
+        .as_ref()
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1()
+        .unwrap();
     let ref_neg: Vec<f32> = fixture["neg_first64"]
         .as_array()
         .unwrap()

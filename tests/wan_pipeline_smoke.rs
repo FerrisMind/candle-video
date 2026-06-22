@@ -1,20 +1,18 @@
 //! Optional end-to-end Wan pipeline smoke tests (requires local Diffusers weights).
 
+mod wan_fixtures;
+
 use std::path::PathBuf;
 
 use candle_core::{DType, Device, Tensor};
 use candle_video::models::wan::{
-    latent_shape_from_config, load_wan_config, WanDenoiseStack, WanGenerateRequest, WanPipeline,
+    WanDenoiseStack, WanGenerateRequest, WanPipeline, latent_shape_from_config, load_wan_config,
 };
 
+use wan_fixtures::wan_diffusers_root;
+
 fn wan_model_root() -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../Wan2.1-T2V-1.3B-Diffusers"),
-        PathBuf::from("/home/mod479711/Downloads/Wan2.1-T2V-1.3B-Diffusers"),
-    ];
-    candidates
-        .into_iter()
-        .find(|p| p.join("model_index.json").exists())
+    wan_diffusers_root()
 }
 
 fn transformer_fixture_embeds() -> Option<Tensor> {
@@ -23,8 +21,7 @@ fn transformer_fixture_embeds() -> Option<Tensor> {
     if !fixture.exists() {
         return None;
     }
-    let fixture: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&fixture).ok()?).ok()?;
+    let fixture: serde_json::Value = serde_json::from_slice(&std::fs::read(&fixture).ok()?).ok()?;
     let shape: Vec<usize> = fixture["shapes"]["encoder_hidden_states"]
         .as_array()?
         .iter()
@@ -74,21 +71,11 @@ fn denoise_decode_smoke_with_fixture_embeds_if_weights_present() {
     };
 
     let device = Device::Cpu;
-    let mut stack = WanDenoiseStack::load(&root, &device, DType::F32, DType::F32)
-        .expect("load denoise stack");
+    let mut stack =
+        WanDenoiseStack::load(&root, &device, DType::F32, DType::F32).expect("load denoise stack");
 
     let out = stack
-        .denoise_and_decode(
-            32,
-            32,
-            1,
-            2,
-            1.0,
-            Some(42),
-            None,
-            prompt_embeds,
-            None,
-        )
+        .denoise_and_decode(32, 32, 1, 2, 1.0, Some(42), None, prompt_embeds, None)
         .expect("denoise+decode");
 
     let dims = out.frames.dims();
@@ -110,8 +97,8 @@ fn wan_pipeline_full_smoke_if_weights_present() {
     };
 
     let device = Device::Cpu;
-    let mut pipeline = WanPipeline::load(&root, &device, DType::F32, DType::F32)
-        .expect("load wan pipeline");
+    let mut pipeline =
+        WanPipeline::load(&root, &device, DType::F32, DType::F32).expect("load wan pipeline");
 
     let req = WanGenerateRequest {
         prompt: Some("a cat".to_string()),

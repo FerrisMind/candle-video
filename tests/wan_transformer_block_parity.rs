@@ -1,5 +1,7 @@
 //! Wan transformer block 0 parity vs Diffusers reference dump.
 
+mod wan_fixtures;
+
 use std::path::PathBuf;
 
 use candle_core::{DType, Device, Tensor};
@@ -7,20 +9,19 @@ use candle_video::models::ltx_video::loader::WeightLoader;
 use candle_video::models::wan::loader::discover_safetensors;
 use candle_video::models::wan::{WanRotaryPosEmbed, WanTransformerBlock, WanTransformerConfig};
 
+use wan_fixtures::wan_transformer_dir;
+
 fn transformer_fixture_dir() -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../Wan2.1-T2V-1.3B-Diffusers/transformer"),
-        PathBuf::from("/home/mod479711/Downloads/Wan2.1-T2V-1.3B-Diffusers/transformer"),
-    ];
-    candidates.into_iter().find(|p| {
-        p.join("diffusion_pytorch_model.safetensors.index.json").exists()
+    wan_transformer_dir().filter(|p| {
+        p.join("diffusion_pytorch_model.safetensors.index.json")
+            .exists()
             || p.join("diffusion_pytorch_model.safetensors").exists()
     })
 }
 
 fn fixture_json() -> Option<PathBuf> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wan/transformer_block0.json");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wan/transformer_block0.json");
     path.exists().then_some(path)
 }
 
@@ -39,10 +40,9 @@ fn load_transformer_block0_from_local_fixture_if_present() {
     };
 
     let device = Device::Cpu;
-    let cfg: WanTransformerConfig = serde_json::from_slice(
-        &std::fs::read(dir.join("config.json")).expect("config"),
-    )
-    .expect("parse config");
+    let cfg: WanTransformerConfig =
+        serde_json::from_slice(&std::fs::read(dir.join("config.json")).expect("config"))
+            .expect("parse config");
 
     let shards = discover_safetensors(&dir).expect("shards");
     let loader = WeightLoader::new(device.clone(), DType::F32);
@@ -78,10 +78,9 @@ fn transformer_block0_forward_matches_reference_if_fixture_present() {
         serde_json::from_slice(&std::fs::read(&fixture_path).expect("read fixture")).expect("json");
 
     let device = Device::Cpu;
-    let cfg: WanTransformerConfig = serde_json::from_slice(
-        &std::fs::read(dir.join("config.json")).expect("config"),
-    )
-    .expect("parse config");
+    let cfg: WanTransformerConfig =
+        serde_json::from_slice(&std::fs::read(dir.join("config.json")).expect("config"))
+            .expect("parse config");
 
     let shards = discover_safetensors(&dir).expect("shards");
     let loader = WeightLoader::new(device.clone(), DType::F32);
