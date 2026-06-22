@@ -7,6 +7,8 @@ use candle_core::{D, DType, Result, Tensor};
 use crate::engine::wan_inference_compute_dtype;
 use crate::models::wan::configs::WanTransformerConfig;
 
+type RopeCache = Option<((usize, usize, usize), WanRotaryEmb)>;
+
 /// Cached RoPE tables for one latent grid (cos/sin + stride-selected halves for apply).
 #[derive(Debug, Clone)]
 pub struct WanRotaryEmb {
@@ -44,7 +46,7 @@ pub struct WanRotaryPosEmbed {
     w_dim: usize,
     head_dim: usize,
     /// ponytail: RoPE grid is resolution-stable across denoise steps — cache avoids 6× broadcast materialize per forward.
-    cached: RefCell<Option<((usize, usize, usize), WanRotaryEmb)>>,
+    cached: RefCell<RopeCache>,
 }
 
 impl WanRotaryPosEmbed {
@@ -95,10 +97,10 @@ impl WanRotaryPosEmbed {
         let (_b, _c, num_frames, height, width) = hidden_states.dims5()?;
         let [p_t, p_h, p_w] = self.patch_size;
         let key = (num_frames / p_t, height / p_h, width / p_w);
-        if let Some((k, emb)) = self.cached.borrow().as_ref() {
-            if *k == key {
-                return Ok(emb.clone());
-            }
+        if let Some((k, emb)) = self.cached.borrow().as_ref()
+            && *k == key
+        {
+            return Ok(emb.clone());
         }
         let emb = self.compute_rope(key.0, key.1, key.2)?;
         *self.cached.borrow_mut() = Some((key, emb.clone()));
@@ -130,24 +132,24 @@ impl WanRotaryPosEmbed {
 
         let expand_t = |freqs: Tensor| -> Result<Tensor> {
             let (len, d) = freqs.dims2()?;
-            Ok(freqs
+            freqs
                 .reshape((len, 1, 1, d))?
                 .broadcast_as((ppf, pph, ppw, d))?
-                .reshape((ppf * pph * ppw, d))?)
+                .reshape((ppf * pph * ppw, d))
         };
         let expand_h = |freqs: Tensor| -> Result<Tensor> {
             let (_len, d) = freqs.dims2()?;
-            Ok(freqs
+            freqs
                 .reshape((1, pph, 1, d))?
                 .broadcast_as((ppf, pph, ppw, d))?
-                .reshape((ppf * pph * ppw, d))?)
+                .reshape((ppf * pph * ppw, d))
         };
         let expand_w = |freqs: Tensor| -> Result<Tensor> {
             let (_len, d) = freqs.dims2()?;
-            Ok(freqs
+            freqs
                 .reshape((1, 1, ppw, d))?
                 .broadcast_as((ppf, pph, ppw, d))?
-                .reshape((ppf * pph * ppw, d))?)
+                .reshape((ppf * pph * ppw, d))
         };
 
         let cos_f = expand_t(cos_t)?;

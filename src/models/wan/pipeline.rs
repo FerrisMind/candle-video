@@ -1,6 +1,6 @@
 //! Wan 2.1 text-to-video pipeline (Diffusers `WanPipeline` parity, T2V only).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use candle_core::{DType, Device, Result, Tensor};
 
@@ -99,7 +99,6 @@ pub struct WanDenoiseStack {
     vae_device: Device,
     transformer_dtype: DType,
     vae_dtype: DType,
-    root: PathBuf,
     layout: WanLayout,
     compute_device: Device,
     vae_tiling: bool,
@@ -124,6 +123,7 @@ impl WanDenoiseStack {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn load_with_vae_device(
         root: impl AsRef<Path>,
         transformer_device: &Device,
@@ -170,7 +170,6 @@ impl WanDenoiseStack {
             vae_device: vae_device.clone(),
             transformer_dtype,
             vae_dtype,
-            root,
             layout,
             compute_device: compute_device.clone(),
             vae_tiling,
@@ -209,10 +208,10 @@ impl WanDenoiseStack {
             )
             .map_err(candle_core::Error::wrap)?,
         );
-        if let Some(vae) = self.vae.as_mut() {
-            if self.vae_tiling {
-                vae.enable_tiling();
-            }
+        if let Some(vae) = self.vae.as_mut()
+            && self.vae_tiling
+        {
+            vae.enable_tiling();
         }
         self.vae_device = self.compute_device.clone();
         Ok(())
@@ -254,6 +253,7 @@ impl WanDenoiseStack {
     }
 
     /// Denoise with precomputed prompt embeddings, then VAE-decode to pixels.
+    #[allow(clippy::too_many_arguments)]
     pub fn denoise_and_decode(
         &mut self,
         height: usize,
@@ -303,6 +303,7 @@ impl WanDenoiseStack {
     }
 
     /// Denoise only (no VAE decode) — for profiling and latent export.
+    #[allow(clippy::too_many_arguments)]
     pub fn denoise(
         &mut self,
         height: usize,
@@ -341,6 +342,7 @@ impl WanDenoiseStack {
         let transformer = self.transformer.as_ref().expect("transformer loaded");
 
         for (step_i, t) in timesteps.iter().copied().enumerate() {
+            let _ = step_i;
             profile_zone!("wan_denoise_step", step = step_i, total = timesteps.len());
             let latent_model_input = latents.to_dtype(self.transformer_dtype)?;
             let timestep = Tensor::full(t, batch_size, &self.device)?;
@@ -422,6 +424,7 @@ impl WanPipeline {
     }
 
     /// Load pipeline with per-component devices (e.g. VAE on CPU to save VRAM).
+    #[allow(clippy::too_many_arguments)]
     pub fn load_with_devices(
         root: impl AsRef<Path>,
         compute_device: &Device,
@@ -445,9 +448,7 @@ impl WanPipeline {
         } else {
             text_encoder_device.clone()
         };
-        let te_dtype = if te_device.is_cuda() {
-            transformer_dtype
-        } else if sequential_gpu {
+        let te_dtype = if te_device.is_cuda() || sequential_gpu {
             transformer_dtype
         } else {
             DType::F32
@@ -490,12 +491,11 @@ impl WanPipeline {
     }
 
     fn release_text_encoder_after_encode(&mut self) {
-        if self.sequential_gpu {
-            self.text_encoder = None;
-        } else if self
-            .text_encoder
-            .as_ref()
-            .is_some_and(|te| te.device().is_cuda())
+        if self.sequential_gpu
+            || self
+                .text_encoder
+                .as_ref()
+                .is_some_and(|te| te.device().is_cuda())
         {
             self.text_encoder = None;
         }
@@ -513,9 +513,7 @@ impl WanPipeline {
                 } else {
                     self.text_encoder_storage.clone()
                 };
-            let te_dtype = if te_device.is_cuda() {
-                self.transformer_dtype
-            } else if self.sequential_gpu {
+            let te_dtype = if te_device.is_cuda() || self.sequential_gpu {
                 self.transformer_dtype
             } else {
                 DType::F32
@@ -581,7 +579,7 @@ impl WanPipeline {
     }
 
     pub fn check_inputs(&self, req: &WanGenerateRequest) -> Result<()> {
-        if req.height % 16 != 0 || req.width % 16 != 0 {
+        if !req.height.is_multiple_of(16) || !req.width.is_multiple_of(16) {
             candle_core::bail!(
                 "height and width must be divisible by 16, got {}x{}",
                 req.height,
@@ -661,7 +659,7 @@ impl WanPipeline {
             &self.tokenizer,
             text_encoder,
             &prompts,
-            negative.as_ref().map(|v| v.as_slice()),
+            negative.as_deref(),
             do_cfg,
             req.max_sequence_length,
             &te_device,
@@ -719,7 +717,7 @@ impl WanPipeline {
 }
 
 fn normalize_num_frames(num_frames: usize, temporal_compression: usize) -> usize {
-    let adjusted = if (num_frames.saturating_sub(1)) % temporal_compression != 0 {
+    let adjusted = if !(num_frames.saturating_sub(1)).is_multiple_of(temporal_compression) {
         num_frames / temporal_compression * temporal_compression + 1
     } else {
         num_frames

@@ -1,6 +1,6 @@
 //! RMSNorm across attention heads (`rms_norm_across_heads`).
 
-use candle_core::{D, DType, Result, Tensor};
+use candle_core::{D, Result, Tensor};
 use candle_nn::{Module, VarBuilder};
 
 use crate::engine::wan_inference_compute_dtype;

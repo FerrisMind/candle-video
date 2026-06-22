@@ -276,7 +276,7 @@ impl UniPcMultistepScheduler {
         }
 
         let (h_phi_1, b_h) = self.bh_update_coeffs(h);
-        let rho_last = if order == 1 { 0.5 } else { 0.5 }; // MVP: order 1 uses 0.5
+        let rho_last = 0.5; // MVP: order 1 uses 0.5
 
         let corr_res = if d1s.is_empty() {
             Tensor::zeros_like(x)?

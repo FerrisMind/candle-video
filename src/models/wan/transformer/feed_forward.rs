@@ -1,6 +1,6 @@
 //! Wan transformer FFN (`FeedForward` with `gelu-approximate`).
 
-use candle_core::{DType, Result, Tensor};
+use candle_core::{Result, Tensor};
 use candle_nn::{Module, VarBuilder, linear_b};
 
 use crate::engine::wan_inference_compute_dtype;

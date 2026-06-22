@@ -13,7 +13,7 @@ use super::block::WanTransformerBlock;
 use super::embeddings::WanConditionEmbedder;
 use super::fp32_layer_norm::Fp32LayerNorm;
 use super::patch_embedding::WanPatchEmbedding;
-use super::rope::{WanRotaryEmb, WanRotaryPosEmbed};
+use super::rope::WanRotaryPosEmbed;
 
 #[derive(Debug)]
 pub struct WanTransformer3DModel {
@@ -29,6 +29,7 @@ pub struct WanTransformer3DModel {
 }
 
 impl WanTransformer3DModel {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: WanTransformerConfig,
         rope: WanRotaryPosEmbed,
@@ -106,7 +107,7 @@ impl WanTransformer3DModel {
     ) -> std::result::Result<Self, LoaderError> {
         let dir = transformer_dir.as_ref();
         let config: WanTransformerConfig =
-            crate::models::ltx_video::loader::load_model_config(&dir.join("config.json"))?;
+            crate::models::ltx_video::loader::load_model_config(dir.join("config.json"))?;
         let shards = discover_safetensors(dir)?;
         let loader = WeightLoader::new(device.clone(), dtype);
         let vb = if shards.len() == 1 {

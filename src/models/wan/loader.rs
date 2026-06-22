@@ -13,7 +13,6 @@ use super::configs::{
     WanFullConfig, WanModelIndex, WanSchedulerConfig, WanTextEncoderConfig, WanTransformerConfig,
     WanVaeConfig, infer_variant, validate_model_index,
 };
-use super::weight_format::{load_transformer_tensors, load_vae_tensors};
 
 /// Layout of a Wan checkpoint on disk.
 #[derive(Debug, Clone)]
