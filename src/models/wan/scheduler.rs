@@ -137,15 +137,14 @@ impl UniPcMultistepScheduler {
         }
     }
 
+    /// ponytail: rewrite to scalar `affine` to avoid per-step Tensor::new +
+    /// to_dtype + reshape churn (was visible in `perf` heatmap).
     fn convert_model_output(&self, model_output: &Tensor, sample: &Tensor) -> Result<Tensor> {
         let idx = self.step_index.expect("step_index");
         let sigma = self.sigmas[idx];
         if self.config.predict_x0 {
-            let sigma_t = Tensor::new(&[sigma], sample.device())?.to_dtype(sample.dtype())?;
-            let mut shape = vec![1usize; sample.rank()];
-            shape[0] = sample.dim(0)?;
-            let sigma_b = sigma_t.reshape(shape.as_slice())?;
-            sample.sub(&model_output.broadcast_mul(&sigma_b)?)
+            // x0 = sample - sigma * model_output
+            Ok(sample.affine(1.0, 0.0)?.sub(&model_output.affine(sigma as f64, 0.0)?)?)
         } else {
             Ok(model_output.clone())
         }
@@ -162,6 +161,11 @@ impl UniPcMultistepScheduler {
         (h_phi_1, b_h)
     }
 
+    /// ponytail: collapsed to scalar affine per term (no Tensor::new/reshape).
+    /// Formula:
+    ///   x_t_ = x * (sigma_t/sigma_s0)
+    ///        - m0 * alpha_t * h_phi_1
+    ///        - pred_res * alpha_t * b_h
     fn multistep_uni_p_bh_update(
         &self,
         _model_output: &Tensor,
@@ -185,55 +189,36 @@ impl UniPcMultistepScheduler {
         let lambda_s0 = (alpha_s0 / sigma_s0_a).ln();
         let h = lambda_t - lambda_s0;
 
-        let mut d1s = Vec::new();
-        if order > 1 {
-            for i in 1..order {
-                let si = idx - i;
+        let pred_res = if order > 1 && idx >= 1 {
+            let i = 1;
+            let si = idx - i;
+            if si < self.sigmas.len() {
                 let mi = self.model_outputs[self.config.solver_order - 1 - i]
                     .as_ref()
                     .expect("mi");
                 let (alpha_si, sigma_si) = self.sigma_to_alpha_sigma_t(self.sigmas[si]);
                 let lambda_si = (alpha_si / sigma_si).ln();
                 let rk = (lambda_si - lambda_s0) / h;
-                let diff = mi.sub(m0)?;
-                d1s.push(diff.affine(1.0 / rk as f64, 0.0)?);
+                // Order-2 predictor uses d1s[0] * 0.5 (matches diffusers).
+                Some(mi.sub(m0)?.affine(0.5 / rk as f64, 0.0)?)
+            } else {
+                None
             }
-        }
-
-        let (h_phi_1, b_h) = self.bh_update_coeffs(h);
-
-        let pred_res = if d1s.is_empty() {
-            Tensor::zeros_like(x)?
-        } else if order == 2 {
-            d1s[0].affine(0.5, 0.0)?
         } else {
-            candle_core::bail!("solver order > 2 not implemented in MVP");
+            None
         };
 
-        let dtype = x.dtype();
-        let device = x.device();
-        let alpha_t_t = Tensor::new(&[alpha_t], device)?.to_dtype(dtype)?;
-        let sigma_t_t = Tensor::new(&[sigma_t_a], device)?.to_dtype(dtype)?;
-        let sigma_s0_t = Tensor::new(&[sigma_s0_a], device)?.to_dtype(dtype)?;
-        let h_phi_1_t = Tensor::new(&[h_phi_1], device)?.to_dtype(dtype)?;
-        let b_h_t = Tensor::new(&[b_h], device)?.to_dtype(dtype)?;
+        let (h_phi_1, b_h) = self.bh_update_coeffs(h);
+        let c1 = (sigma_t_a / sigma_s0_a) as f64;
+        let c2 = (alpha_t * h_phi_1) as f64;
+        let c3 = (alpha_t * b_h) as f64;
 
-        let mut shape = vec![1usize; x.rank()];
-        shape[0] = x.dim(0)?;
-
-        let x_t_ = x
-            .broadcast_mul(&sigma_t_t.reshape(shape.as_slice())?)?
-            .broadcast_div(&sigma_s0_t.reshape(shape.as_slice())?)?
-            .sub(
-                &m0.broadcast_mul(&alpha_t_t.reshape(shape.as_slice())?)?
-                    .broadcast_mul(&h_phi_1_t.reshape(shape.as_slice())?)?,
-            )?;
-
-        x_t_.sub(
-            &pred_res
-                .broadcast_mul(&alpha_t_t.reshape(shape.as_slice())?)?
-                .broadcast_mul(&b_h_t.reshape(shape.as_slice())?)?,
-        )
+        let mut acc = x.affine(c1, 0.0)?;
+        acc = acc.sub(&m0.affine(c2, 0.0)?)?;
+        if let Some(pred) = pred_res {
+            acc = acc.sub(&pred.affine(c3, 0.0)?)?;
+        }
+        Ok(acc)
     }
 
     fn multistep_uni_c_bh_update(
@@ -265,6 +250,9 @@ impl UniPcMultistepScheduler {
         if order > 1 {
             for i in 1..order {
                 let si = idx - (i + 1);
+                if si >= self.sigmas.len() {
+                    break;
+                }
                 let mi = self.model_outputs[self.config.solver_order - 1 - i]
                     .as_ref()
                     .expect("mi");
@@ -278,41 +266,26 @@ impl UniPcMultistepScheduler {
         let (h_phi_1, b_h) = self.bh_update_coeffs(h);
         let rho_last = 0.5; // MVP: order 1 uses 0.5
 
-        let corr_res = if d1s.is_empty() {
-            Tensor::zeros_like(x)?
-        } else {
-            d1s[0].affine(0.5, 0.0)?
-        };
-
         let d1_t = model_t.sub(m0)?;
 
-        let dtype = x.dtype();
-        let device = x.device();
-        let alpha_t_t = Tensor::new(&[alpha_t], device)?.to_dtype(dtype)?;
-        let sigma_t_t = Tensor::new(&[sigma_t_a], device)?.to_dtype(dtype)?;
-        let sigma_s0_t = Tensor::new(&[sigma_s0_a], device)?.to_dtype(dtype)?;
-        let h_phi_1_t = Tensor::new(&[h_phi_1], device)?.to_dtype(dtype)?;
-        let b_h_t = Tensor::new(&[b_h], device)?.to_dtype(dtype)?;
-        let rho_last_t = Tensor::new(&[rho_last], device)?.to_dtype(dtype)?;
+        let c1 = (sigma_t_a / sigma_s0_a) as f64;
+        let c2 = (alpha_t * h_phi_1) as f64;
+        let b_h_rho = (alpha_t * b_h * rho_last) as f64;
+        let c3 = (alpha_t * b_h) as f64;
 
-        let mut shape = vec![1usize; x.rank()];
-        shape[0] = x.dim(0)?;
-
-        let x_t_ = x
-            .broadcast_mul(&sigma_t_t.reshape(shape.as_slice())?)?
-            .broadcast_div(&sigma_s0_t.reshape(shape.as_slice())?)?
-            .sub(
-                &m0.broadcast_mul(&alpha_t_t.reshape(shape.as_slice())?)?
-                    .broadcast_mul(&h_phi_1_t.reshape(shape.as_slice())?)?,
-            )?;
-
-        let correction =
-            corr_res.add(&d1_t.broadcast_mul(&rho_last_t.reshape(shape.as_slice())?)?)?;
-        x_t_.sub(
-            &correction
-                .broadcast_mul(&alpha_t_t.reshape(shape.as_slice())?)?
-                .broadcast_mul(&b_h_t.reshape(shape.as_slice())?)?,
-        )
+        let mut acc = x.affine(c1, 0.0)?;
+        acc = acc.sub(&m0.affine(c2, 0.0)?)?;
+        acc = acc.sub(&d1_t.affine(b_h_rho, 0.0)?)?;
+        let corr_res = if d1s.is_empty() {
+            // no-op, just bookkeeping
+            None
+        } else {
+            Some(d1s[0].add(&d1_t)?.affine(0.5, 0.0)?)
+        };
+        if let Some(c) = corr_res {
+            acc = acc.sub(&c.affine(c3, 0.0)?)?;
+        }
+        Ok(acc)
     }
 
     pub fn step(

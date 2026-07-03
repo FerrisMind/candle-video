@@ -1,21 +1,36 @@
 //! Wan 3D rotary positional embeddings (`WanRotaryPosEmbed`).
 
 use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::RwLock;
 
 use candle_core::{D, DType, Result, Tensor};
 
 use crate::engine::wan_inference_compute_dtype;
 use crate::models::wan::configs::WanTransformerConfig;
 
-type RopeCache = Option<((usize, usize, usize), WanRotaryEmb)>;
+type RopeCache = Option<((usize, usize, usize), Rc<WanRotaryEmb>)>;
 
 /// Cached RoPE tables for one latent grid (cos/sin + stride-selected halves for apply).
-#[derive(Debug, Clone)]
 pub struct WanRotaryEmb {
     pub cos: Tensor,
     pub sin: Tensor,
-    cos_even: Tensor,
-    sin_odd: Tensor,
+    pub cos_even: Tensor,
+    pub sin_odd: Tensor,
+    /// ponytail: pair pre-cast to compute dtype (saves 2 to_dtype calls per
+    /// apply; apply runs twice per block × 30 blocks × 50 steps).
+    cast_cache: RwLock<Vec<(DType, (Tensor, Tensor))>>,
+}
+
+impl std::fmt::Debug for WanRotaryEmb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WanRotaryEmb")
+            .field("cos", &self.cos.shape())
+            .field("sin", &self.sin.shape())
+            .field("cos_even", &self.cos_even.shape())
+            .field("sin_odd", &self.sin_odd.shape())
+            .finish()
+    }
 }
 
 impl WanRotaryEmb {
@@ -31,7 +46,33 @@ impl WanRotaryEmb {
             sin,
             cos_even,
             sin_odd,
+            cast_cache: RwLock::new(Vec::new()),
         })
+    }
+
+    /// ponytail: get (cos_even, sin_odd) re-cast to `compute` dtype, cached.
+    fn pair_in(&self, compute: DType) -> Result<(Tensor, Tensor)> {
+        if self.cos_even.dtype() == compute {
+            return Ok((self.cos_even.clone(), self.sin_odd.clone()));
+        }
+        {
+            let guard = self.cast_cache.read().expect("rope cast cache poisoned");
+            for (dt, pair) in guard.iter() {
+                if *dt == compute {
+                    return Ok(pair.clone());
+                }
+            }
+        }
+        let mut guard = self.cast_cache.write().expect("rope cast cache poisoned");
+        for (dt, pair) in guard.iter() {
+            if *dt == compute {
+                return Ok(pair.clone());
+            }
+        }
+        let ce = self.cos_even.to_dtype(compute)?;
+        let so = self.sin_odd.to_dtype(compute)?;
+        guard.push((compute, (ce.clone(), so.clone())));
+        Ok((ce, so))
     }
 }
 
@@ -45,7 +86,6 @@ pub struct WanRotaryPosEmbed {
     h_dim: usize,
     w_dim: usize,
     head_dim: usize,
-    /// ponytail: RoPE grid is resolution-stable across denoise steps — cache avoids 6× broadcast materialize per forward.
     cached: RefCell<RopeCache>,
 }
 
@@ -56,7 +96,7 @@ impl WanRotaryPosEmbed {
         let h_dim = 2 * (head_dim / 6);
         let w_dim = 2 * (head_dim / 6);
         let t_dim = head_dim - h_dim - w_dim;
-        // ponytail: F64 on CPU parity; F16 table on CUDA saves ~2× RoPE buffer vs F64.
+        // F16 table on CUDA saves ~2× RoPE buffer vs F64.
         let freq_dtype = if device.is_cuda() {
             DType::F16
         } else {
@@ -92,19 +132,23 @@ impl WanRotaryPosEmbed {
         })
     }
 
-    /// Input `[B, C, F, H, W]` → cached RoPE tables for all transformer blocks.
     pub fn forward(&self, hidden_states: &Tensor) -> Result<WanRotaryEmb> {
         let (_b, _c, num_frames, height, width) = hidden_states.dims5()?;
         let [p_t, p_h, p_w] = self.patch_size;
         let key = (num_frames / p_t, height / p_h, width / p_w);
-        if let Some((k, emb)) = self.cached.borrow().as_ref()
+        if let Some((k, emb_rc)) = self.cached.borrow().as_ref()
             && *k == key
         {
-            return Ok(emb.clone());
+            // ponytail: returning a *new* RwLock here would break Clone-on-RefCell.
+            // Instead, leak a shallow clone through Rc::try_unwrap fallback. We
+            // simply hand the caller a fresh WanRotaryEmb whose Tensor members
+            // share storage with the cached one.
+            return Ok(wan_rotary_emb_clone_rc(emb_rc));
         }
-        let emb = self.compute_rope(key.0, key.1, key.2)?;
-        *self.cached.borrow_mut() = Some((key, emb.clone()));
-        Ok(emb)
+        let emb = Rc::new(self.compute_rope(key.0, key.1, key.2)?);
+        let clone_emb = wan_rotary_emb_clone_rc(&emb);
+        *self.cached.borrow_mut() = Some((key, emb));
+        Ok(clone_emb)
     }
 
     fn compute_rope(&self, ppf: usize, pph: usize, ppw: usize) -> Result<WanRotaryEmb> {
@@ -176,6 +220,63 @@ impl WanRotaryPosEmbed {
     }
 }
 
+/// Wan-specific RoPE application (Diffusers `WanAttnProcessor`).
+pub fn apply_wan_rotary_emb(hidden_states: &Tensor, rope: &WanRotaryEmb) -> Result<Tensor> {
+    let dtype = hidden_states.dtype();
+    let compute = wan_inference_compute_dtype(hidden_states.device(), dtype);
+    let (b, s, h, d) = hidden_states.dims4()?;
+    if d % 2 != 0 {
+        candle_core::bail!("apply_wan_rotary_emb expects even head_dim, got {d}");
+    }
+
+    // ponytail: skip per-call `to_dtype` on `hs` and rope halves when
+    // compute==dtype (the common CUDA F16 path).
+    let (ce, so) = rope.pair_in(compute)?;
+    let hs_owned;
+    let hs = if dtype == compute {
+        hidden_states
+    } else {
+        hs_owned = hidden_states.to_dtype(compute)?;
+        &hs_owned
+    };
+
+    let pairs = hs.reshape((b, s, h, d / 2, 2))?;
+    let x1 = pairs.narrow(D::Minus1, 0, 1)?.squeeze(D::Minus1)?;
+    let x2 = pairs.narrow(D::Minus1, 1, 1)?.squeeze(D::Minus1)?;
+
+    let out_even = (x1.broadcast_mul(&ce)? - x2.broadcast_mul(&so)?)?;
+    let out_odd = (x1.broadcast_mul(&so)? + x2.broadcast_mul(&ce)?)?;
+    let stacked = Tensor::stack(&[out_even, out_odd], D::Minus1)?.reshape((b, s, h, d))?;
+    if dtype == compute {
+        Ok(stacked)
+    } else {
+        stacked.to_dtype(dtype)
+    }
+}
+
+/// ponytail: produce a fresh `WanRotaryEmb` whose Tensor members share
+/// storage with `rc`, but whose `cast_cache` is empty. This keeps the
+/// outer API stable (callers receive `WanRotaryEmb`, not `&WanRotaryEmb`)
+/// without paying for a 2nd memory allocation of cos/sin.
+fn wan_rotary_emb_clone_rc(rc: &Rc<WanRotaryEmb>) -> WanRotaryEmb {
+    let src = rc.as_ref();
+    WanRotaryEmb {
+        cos: src.cos.clone(),
+        sin: src.sin.clone(),
+        cos_even: src.cos_even.clone(),
+        sin_odd: src.sin_odd.clone(),
+        cast_cache: RwLock::new(Vec::new()),
+    }
+}
+
+fn stride_select(xs: &Tensor, start: usize) -> Result<Tensor> {
+    let last = xs.dim(D::Minus1)?;
+    let idx: Vec<u32> = (start..last).step_by(2).map(|i| i as u32).collect();
+    let device = xs.device();
+    let index = Tensor::new(idx.as_slice(), device)?;
+    xs.index_select(&index, D::Minus1)
+}
+
 fn get_1d_rotary_freqs(
     dim: usize,
     max_seq_len: usize,
@@ -202,35 +303,4 @@ fn get_1d_rotary_freqs(
         }
     }
     Tensor::from_vec(out, (max_seq_len, dim), device)?.to_dtype(dtype)
-}
-
-/// Wan-specific RoPE application (Diffusers `WanAttnProcessor`).
-pub fn apply_wan_rotary_emb(hidden_states: &Tensor, rope: &WanRotaryEmb) -> Result<Tensor> {
-    let dtype = hidden_states.dtype();
-    let compute = wan_inference_compute_dtype(hidden_states.device(), dtype);
-    let hs = hidden_states.to_dtype(compute)?;
-    let (b, s, h, d) = hs.dims4()?;
-    if d % 2 != 0 {
-        candle_core::bail!("apply_wan_rotary_emb expects even head_dim, got {d}");
-    }
-    let pairs = hs.reshape((b, s, h, d / 2, 2))?;
-    let x1 = pairs.narrow(D::Minus1, 0, 1)?.squeeze(D::Minus1)?;
-    let x2 = pairs.narrow(D::Minus1, 1, 1)?.squeeze(D::Minus1)?;
-
-    let cos_even = rope.cos_even.to_dtype(compute)?;
-    let sin_odd = rope.sin_odd.to_dtype(compute)?;
-
-    let out_even = (x1.broadcast_mul(&cos_even)? - x2.broadcast_mul(&sin_odd)?)?;
-    let out_odd = (x1.broadcast_mul(&sin_odd)? + x2.broadcast_mul(&cos_even)?)?;
-    Tensor::stack(&[out_even, out_odd], D::Minus1)?
-        .reshape((b, s, h, d))?
-        .to_dtype(dtype)
-}
-
-fn stride_select(xs: &Tensor, start: usize) -> Result<Tensor> {
-    let last = xs.dim(D::Minus1)?;
-    let idx: Vec<u32> = (start..last).step_by(2).map(|i| i as u32).collect();
-    let device = xs.device();
-    let index = Tensor::new(idx.as_slice(), device)?;
-    xs.index_select(&index, D::Minus1)
 }

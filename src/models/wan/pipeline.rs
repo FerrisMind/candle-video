@@ -344,7 +344,15 @@ impl WanDenoiseStack {
         for (step_i, t) in timesteps.iter().copied().enumerate() {
             let _ = step_i;
             profile_zone!("wan_denoise_step", step = step_i, total = timesteps.len());
-            let latent_model_input = latents.to_dtype(self.transformer_dtype)?;
+            // ponytail: keep `latent_model_input` and `noise_pred` in the
+            // transformer dtype across the loop. Previously we converted
+            // every step (to F16, then F32 → scheduler → F16 → scheduler);
+            // that's two extra GPU copies × 50 steps = 100 avoidable copies.
+            let latent_model_input = if latents.dtype() == self.transformer_dtype {
+                latents.clone()
+            } else {
+                latents.to_dtype(self.transformer_dtype)?
+            };
             let timestep = Tensor::full(t, batch_size, &self.device)?;
 
             profile_zone!("wan_transformer_forward_cond");
@@ -362,7 +370,8 @@ impl WanDenoiseStack {
             } else {
                 noise_pred
             };
-            let noise_pred = noise_pred.to_dtype(DType::F32)?;
+            // Scheduler works in transformer_dtype now (scalar `affine` keeps
+            // precision); skip the F32 round-trip per step.
 
             latents = self.scheduler.step(&noise_pred, t, &latents)?.prev_sample;
         }
