@@ -107,6 +107,12 @@ the real consolidated checkpoint:
 * CUDA CFG + FlowMatch smoke: guidance 2, negative prompt, and
   `--scheduler-profile flow-match-euler --scheduler-shift 5`; output
   `artifacts/wan-smoke-cuda-flow-cfg.mp4` (867 bytes).
+* CUDA CFG + FlowMatch memory sample: the same 32x32, one-frame, one-step
+  low-VRAM run completed in 6.97 s. Sampling `nvidia-smi` under Windows WDDM
+  measured 1,278 MiB before launch and 9,732 MiB at peak (8,454 MiB
+  incremental); peak process working set was 3,147 MiB. Output:
+  `artifacts/wan-smoke-cuda-vram.mp4`. The VRAM value is whole-GPU usage, not
+  process-isolated usage, because per-process memory is unavailable under WDDM.
 * CUDA + Flash Attention release smoke: first kernel build 22 min 13 s,
   prompt encoding 3.74 s, transformer load 1.45 s, denoise+decode 0.38 s;
   output `artifacts/wan-smoke-cuda-flash.mp4` (890 bytes).

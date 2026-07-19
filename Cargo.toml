@@ -97,6 +97,10 @@ name = "wan21-t2v"
 path = "examples/wan21-t2v.rs"
 
 [[example]]
+name = "wan-video"
+path = "examples/wan-video/main.rs"
+
+[[example]]
 name = "wan-manifest"
 path = "examples/wan-manifest.rs"
 
