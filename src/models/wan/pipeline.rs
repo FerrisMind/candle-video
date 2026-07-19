@@ -15,7 +15,7 @@ use super::loader::{
 };
 use super::prompt_clean::prompt_clean;
 use super::prompt_encode::encode_prompt;
-use super::scheduler::UniPcMultistepScheduler;
+use super::scheduler::{WanScheduler, WanSchedulerProfile};
 use super::text_encoder::Umt5TextEncoder;
 use super::tokenizer::{WAN_DEFAULT_MAX_SEQ_LEN, WanTokenizer};
 use super::transformer::WanTransformer3DModel;
@@ -79,7 +79,7 @@ pub fn latent_shape_from_config(
 ) -> Vec<usize> {
     let temporal = config.temporal_compression();
     let spatial = config.spatial_compression();
-    let num_latent_frames = (num_frames - 1) / temporal + 1;
+    let num_latent_frames = num_frames.saturating_sub(1) / temporal + 1;
     vec![
         batch,
         config.latent_channels(),
@@ -94,7 +94,8 @@ pub struct WanDenoiseStack {
     config: WanFullConfig,
     transformer: Option<WanTransformer3DModel>,
     vae: Option<AutoencoderKLWan>,
-    scheduler: UniPcMultistepScheduler,
+    scheduler: WanScheduler,
+    scheduler_profile: WanSchedulerProfile,
     device: Device,
     vae_device: Device,
     transformer_dtype: DType,
@@ -134,6 +135,34 @@ impl WanDenoiseStack {
         defer_transformer: bool,
         vae_tiling: bool,
     ) -> std::result::Result<Self, crate::models::ltx_video::loader::LoaderError> {
+        Self::load_with_scheduler_profile(
+            root,
+            transformer_device,
+            vae_device,
+            compute_device,
+            transformer_dtype,
+            vae_dtype,
+            defer_transformer,
+            vae_tiling,
+            WanSchedulerProfile::Diffusers,
+            None,
+        )
+    }
+
+    /// Load the denoising stack with an explicit scheduler compatibility profile.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_with_scheduler_profile(
+        root: impl AsRef<Path>,
+        transformer_device: &Device,
+        vae_device: &Device,
+        compute_device: &Device,
+        transformer_dtype: DType,
+        vae_dtype: DType,
+        defer_transformer: bool,
+        vae_tiling: bool,
+        scheduler_profile: WanSchedulerProfile,
+        scheduler_shift: Option<f32>,
+    ) -> std::result::Result<Self, crate::models::ltx_video::loader::LoaderError> {
         let root = root.as_ref().to_path_buf();
         let layout = detect_wan_layout(&root)?;
         let config = load_wan_config(&root)?;
@@ -152,16 +181,20 @@ impl WanDenoiseStack {
         if vae_tiling {
             vae.enable_tiling();
         }
-        let scheduler = match wan_scheduler_config_path(&layout) {
-            Some(path) => UniPcMultistepScheduler::from_config_path(&path)?,
-            None => UniPcMultistepScheduler::new(config.scheduler.clone())?,
+        let scheduler_config = match wan_scheduler_config_path(&layout) {
+            Some(path) => crate::models::ltx_video::loader::load_model_config(&path)?,
+            None => config.scheduler.clone(),
         };
+        let scheduler =
+            WanScheduler::from_profile(scheduler_profile, scheduler_config, scheduler_shift)
+                .map_err(crate::models::ltx_video::loader::LoaderError::Candle)?;
 
         Ok(Self {
             config,
             transformer,
             vae: Some(vae),
             scheduler,
+            scheduler_profile,
             device: if defer_transformer {
                 compute_device.clone()
             } else {
@@ -223,6 +256,11 @@ impl WanDenoiseStack {
 
     pub fn device(&self) -> &Device {
         &self.device
+    }
+
+    /// Scheduler profile used by this stack.
+    pub fn scheduler_profile(&self) -> WanSchedulerProfile {
+        self.scheduler_profile
     }
 
     pub fn transformer(&self) -> Result<&WanTransformer3DModel> {
@@ -316,6 +354,19 @@ impl WanDenoiseStack {
         prompt_embeds: Tensor,
         negative_prompt_embeds: Option<Tensor>,
     ) -> Result<Tensor> {
+        if height == 0 || width == 0 || !height.is_multiple_of(16) || !width.is_multiple_of(16) {
+            candle_core::bail!(
+                "Wan denoise requires positive height/width divisible by 16, got {}x{}",
+                height,
+                width
+            );
+        }
+        if num_frames == 0 {
+            candle_core::bail!("Wan denoise requires num_frames >= 1");
+        }
+        if num_inference_steps == 0 {
+            candle_core::bail!("Wan denoise requires num_inference_steps >= 1");
+        }
         let batch_size = prompt_embeds.dim(0)?;
         let do_cfg = guidance_scale > 1.0;
         let num_frames = normalize_num_frames(num_frames, self.config.temporal_compression());
@@ -334,12 +385,11 @@ impl WanDenoiseStack {
 
         self.scheduler.set_timesteps(num_inference_steps)?;
         self.scheduler.set_begin_index(0);
-        let timesteps: Vec<i64> = self.scheduler.timesteps().to_vec();
+        let timesteps = self.scheduler.timesteps_f32();
+        let floating_timesteps = self.scheduler_profile == WanSchedulerProfile::FlowMatchEuler;
 
         let mut latents =
             self.prepare_latents(batch_size, height, width, num_frames, seed, initial_latents)?;
-
-        let transformer = self.transformer.as_ref().expect("transformer loaded");
 
         for (step_i, t) in timesteps.iter().copied().enumerate() {
             let _ = step_i;
@@ -353,13 +403,25 @@ impl WanDenoiseStack {
             } else {
                 latents.to_dtype(self.transformer_dtype)?
             };
-            let timestep = Tensor::full(t, batch_size, &self.device)?;
+            let timestep = if floating_timesteps {
+                Tensor::full(t, batch_size, &self.device)?
+            } else {
+                Tensor::full(t as i64, batch_size, &self.device)?
+            };
 
             profile_zone!("wan_transformer_forward_cond");
+            let transformer = self
+                .transformer
+                .as_ref()
+                .ok_or_else(|| candle_core::Error::Msg("transformer not loaded".into()))?;
             let noise_pred = transformer.forward(&latent_model_input, &timestep, &prompt_embeds)?;
 
             let noise_pred = if do_cfg {
-                let neg = negative_embeds.as_ref().expect("negative embeds");
+                let neg = negative_embeds.as_ref().ok_or_else(|| {
+                    candle_core::Error::Msg(
+                        "negative embeddings are required for classifier-free guidance".into(),
+                    )
+                })?;
                 profile_zone!("wan_transformer_forward_uncond");
                 let noise_uncond = transformer.forward(&latent_model_input, &timestep, neg)?;
                 WanPipeline::apply_classifier_free_guidance(
@@ -373,7 +435,10 @@ impl WanDenoiseStack {
             // Scheduler works in transformer_dtype now (scalar `affine` keeps
             // precision); skip the F32 round-trip per step.
 
-            latents = self.scheduler.step(&noise_pred, t, &latents)?.prev_sample;
+            latents = self
+                .scheduler
+                .step_f32(&noise_pred, t, &latents)?
+                .prev_sample;
         }
 
         Ok(latents)
@@ -444,6 +509,34 @@ impl WanPipeline {
         sequential_gpu: bool,
         vae_tiling: bool,
     ) -> std::result::Result<Self, crate::models::ltx_video::loader::LoaderError> {
+        Self::load_with_devices_and_scheduler(
+            root,
+            compute_device,
+            text_encoder_device,
+            vae_device,
+            transformer_dtype,
+            vae_dtype,
+            sequential_gpu,
+            vae_tiling,
+            WanSchedulerProfile::Diffusers,
+            None,
+        )
+    }
+
+    /// Load a pipeline with an explicit Wan scheduler profile and optional shift.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_with_devices_and_scheduler(
+        root: impl AsRef<Path>,
+        compute_device: &Device,
+        text_encoder_device: &Device,
+        vae_device: &Device,
+        transformer_dtype: DType,
+        vae_dtype: DType,
+        sequential_gpu: bool,
+        vae_tiling: bool,
+        scheduler_profile: WanSchedulerProfile,
+        scheduler_shift: Option<f32>,
+    ) -> std::result::Result<Self, crate::models::ltx_video::loader::LoaderError> {
         let layout = detect_wan_layout(&root)?;
         let config = load_wan_config(&root)?;
 
@@ -475,7 +568,7 @@ impl WanPipeline {
         } else {
             compute_device.clone()
         };
-        let stack = WanDenoiseStack::load_with_vae_device(
+        let stack = WanDenoiseStack::load_with_scheduler_profile(
             &root,
             &transformer_device,
             vae_device,
@@ -484,6 +577,8 @@ impl WanPipeline {
             vae_dtype,
             sequential_gpu,
             vae_tiling,
+            scheduler_profile,
+            scheduler_shift,
         )?;
 
         Ok(Self {
@@ -570,7 +665,7 @@ impl WanPipeline {
     }
 
     pub fn num_latent_frames(&self, num_frames: usize) -> usize {
-        (num_frames - 1) / self.config.temporal_compression() + 1
+        num_frames.saturating_sub(1) / self.config.temporal_compression() + 1
     }
 
     pub fn latent_spatial_size(&self, pixel_size: usize) -> usize {
@@ -588,12 +683,42 @@ impl WanPipeline {
     }
 
     pub fn check_inputs(&self, req: &WanGenerateRequest) -> Result<()> {
+        Self::validate_wan_request(req)
+    }
+
+    /// Validate user-controlled generation parameters before any shape
+    /// arithmetic or model execution. Keeping this separate makes the
+    /// invariants reusable by adapters and easy to test without loading
+    /// multi-gigabyte weights.
+    fn validate_wan_request(req: &WanGenerateRequest) -> Result<()> {
+        if req.height == 0 || req.width == 0 {
+            candle_core::bail!(
+                "height and width must be positive, got {}x{}",
+                req.height,
+                req.width
+            );
+        }
         if !req.height.is_multiple_of(16) || !req.width.is_multiple_of(16) {
             candle_core::bail!(
                 "height and width must be divisible by 16, got {}x{}",
                 req.height,
                 req.width
             );
+        }
+        if req.num_frames == 0 {
+            candle_core::bail!("num_frames must be at least 1, got 0");
+        }
+        if req.num_inference_steps == 0 {
+            candle_core::bail!("num_inference_steps must be at least 1, got 0");
+        }
+        if !req.guidance_scale.is_finite() || req.guidance_scale < 0.0 {
+            candle_core::bail!(
+                "guidance_scale must be finite and non-negative, got {}",
+                req.guidance_scale
+            );
+        }
+        if req.max_sequence_length == 0 {
+            candle_core::bail!("max_sequence_length must be at least 1");
         }
 
         let has_prompt = req.prompt.is_some();
@@ -649,7 +774,9 @@ impl WanPipeline {
             return Ok((embeds.clone(), neg));
         }
 
-        let prompt = req.prompt.as_ref().expect("prompt checked");
+        let prompt = req.prompt.as_ref().ok_or_else(|| {
+            candle_core::Error::Msg("prompt is required when embeddings are absent".into())
+        })?;
         let cleaned = prompt_clean(prompt);
         let prompts = vec![cleaned];
         let negative = req.negative_prompt.as_ref().map(|n| vec![prompt_clean(n)]);
@@ -744,6 +871,7 @@ mod tests {
             variant: WanVariant::Wan21T2v13B,
             model_index: WanModelIndex {
                 class_name: "WanPipeline".to_string(),
+                diffusers_version: Some("0.33.0.dev0".to_string()),
                 scheduler: ("scheduler".into(), "UniPCMultistepScheduler".into()),
                 text_encoder: ("text_encoder".into(), "UMT5EncoderModel".into()),
                 tokenizer: ("tokenizer".into(), "T5Tokenizer".into()),
@@ -817,6 +945,10 @@ mod tests {
         assert_eq!((81 - 1) / temporal + 1, 21);
         assert_eq!(480 / spatial, 60);
         assert_eq!(832 / spatial, 104);
+        assert_eq!(
+            latent_shape_from_config(&config, 1, 32, 32, 0),
+            vec![1, 16, 1, 4, 4]
+        );
     }
 
     #[test]
@@ -824,6 +956,20 @@ mod tests {
         assert_eq!(normalize_num_frames(82, 4), 81);
         assert_eq!(normalize_num_frames(81, 4), 81);
         assert_eq!(normalize_num_frames(1, 4), 1);
+        assert_eq!(normalize_num_frames(0, 4), 1);
+    }
+
+    #[test]
+    fn request_validation_rejects_empty_video_and_zero_steps() {
+        let mut request = WanGenerateRequest::text_to_video("cat", 32, 32, 1, 1);
+        request.num_frames = 0;
+        let error = WanPipeline::validate_wan_request(&request).expect_err("zero frames must fail");
+        assert!(error.to_string().contains("num_frames"));
+
+        request.num_frames = 1;
+        request.num_inference_steps = 0;
+        let error = WanPipeline::validate_wan_request(&request).expect_err("zero steps must fail");
+        assert!(error.to_string().contains("num_inference_steps"));
     }
 
     #[test]

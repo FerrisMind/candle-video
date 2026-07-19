@@ -20,14 +20,17 @@ pub use configs::validate_model_index;
 pub use configs::*;
 pub use loader::{
     WanComponentPaths, WanConsolidatedPaths, WanLayout, WanWeightInventory, detect_wan_layout,
-    discover_safetensors, load_wan_config,
+    discover_safetensors, load_wan_config, validate_vae_weights, write_wan_manifest,
 };
 pub use pipeline::{
     WanDenoiseStack, WanGenerateRequest, WanPipeline, WanPipelineOutput, latent_shape_from_config,
 };
 pub use prompt_clean::*;
 pub use prompt_encode::encode_prompt;
-pub use scheduler::UniPcMultistepScheduler;
+pub use scheduler::{
+    FlowMatchEulerDiscreteScheduler, FlowMatchEulerDiscreteSchedulerConfig,
+    UniPcMultistepScheduler, WanScheduler, WanSchedulerProfile,
+};
 pub use text_encoder::{Umt5EncoderConfig, Umt5TextEncoder};
 pub use tokenizer::{WAN_DEFAULT_MAX_SEQ_LEN, WanTokenizer};
 pub use transformer::{

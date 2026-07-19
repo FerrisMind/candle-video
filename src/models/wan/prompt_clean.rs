@@ -1,11 +1,5 @@
 //! Prompt cleaning matching Diffusers `WanPipeline.prompt_clean`.
 
-use regex::Regex;
-use std::sync::LazyLock;
-
-static WHITESPACE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\s+").expect("valid whitespace regex"));
-
 /// Basic HTML entity unescape (double-pass like Diffusers; ftfy optional at call site).
 pub fn basic_clean(text: &str) -> String {
     let once = unescape_html_entities(text);
@@ -22,7 +16,7 @@ fn unescape_html_entities(text: &str) -> String {
 
 /// Collapse whitespace runs to a single space.
 pub fn whitespace_clean(text: &str) -> String {
-    WHITESPACE_RE.replace_all(text.trim(), " ").to_string()
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Full Wan prompt normalization pipeline.

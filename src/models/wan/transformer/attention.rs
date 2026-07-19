@@ -138,19 +138,19 @@ impl WanAttention {
                 } else {
                     Some(q.contiguous()?.to_dtype(flash_dtype)?)
                 };
-                let q_fa: &Tensor = q_owned.as_ref().unwrap_or(q);
+                let q_fa: &Tensor = q_owned.as_ref().unwrap_or(&q);
                 let k_owned = if k.is_contiguous() && k.dtype() == flash_dtype {
                     None
                 } else {
                     Some(k.contiguous()?.to_dtype(flash_dtype)?)
                 };
-                let k_fa: &Tensor = k_owned.as_ref().unwrap_or(k);
+                let k_fa: &Tensor = k_owned.as_ref().unwrap_or(&k);
                 let v_owned = if v.is_contiguous() && v.dtype() == flash_dtype {
                     None
                 } else {
                     Some(v.contiguous()?.to_dtype(flash_dtype)?)
                 };
-                let v_fa: &Tensor = v_owned.as_ref().unwrap_or(v);
+                let v_fa: &Tensor = v_owned.as_ref().unwrap_or(&v);
                 let out = candle_flash_attn::flash_attn(q_fa, k_fa, v_fa, scale, false)?;
                 drop((q_owned, k_owned, v_owned));
                 out.reshape((b, q_len, self.inner_dim))?.to_dtype(dtype)?

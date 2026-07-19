@@ -33,6 +33,8 @@ impl WanVariant {
 pub struct WanModelIndex {
     #[serde(rename = "_class_name")]
     pub class_name: String,
+    #[serde(rename = "_diffusers_version", default)]
+    pub diffusers_version: Option<String>,
     pub scheduler: (String, String),
     pub text_encoder: (String, String),
     pub tokenizer: (String, String),
@@ -138,6 +140,7 @@ impl WanFullConfig {
             variant: WanVariant::Wan21T2v13B,
             model_index: WanModelIndex {
                 class_name: "WanPipeline".to_string(),
+                diffusers_version: Some("0.33.0.dev0".to_string()),
                 scheduler: ("scheduler".into(), "UniPCMultistepScheduler".into()),
                 text_encoder: ("text_encoder".into(), "UMT5EncoderModel".into()),
                 tokenizer: ("tokenizer".into(), "T5Tokenizer".into()),
@@ -224,12 +227,190 @@ impl WanFullConfig {
 }
 
 /// Infer variant from transformer config heuristics.
-pub fn infer_variant(transformer: &WanTransformerConfig) -> WanVariant {
+pub fn infer_variant(transformer: &WanTransformerConfig) -> Result<WanVariant, String> {
     match (transformer.num_layers, transformer.num_attention_heads) {
-        (30, 12) => WanVariant::Wan21T2v13B,
-        (40, 40) => WanVariant::Wan21T2v14B,
-        _ => WanVariant::Wan21T2v13B,
+        (30, 12) => Ok(WanVariant::Wan21T2v13B),
+        (40, 40) => Ok(WanVariant::Wan21T2v14B),
+        (layers, heads) => Err(format!(
+            "unsupported Wan transformer architecture: expected known (layers, heads), got ({layers}, {heads})"
+        )),
     }
+}
+
+/// Strictly validate the architecture represented by the local Wan 2.1 T2V 1.3B checkpoint.
+///
+/// The checkpoint was authored by Diffusers `0.33.0.dev0`; accepting a partially matching
+/// configuration would make a wrong tensor layout fail later with an opaque shape error.
+pub fn validate_wan21_t2v_13b(config: &WanFullConfig) -> Result<(), String> {
+    macro_rules! check {
+        ($field:expr, $expected:expr, $label:literal) => {
+            if $field != $expected {
+                return Err(format!(
+                    "Wan2.1-T2V-1.3B config mismatch for {}: expected {:?}, got {:?}",
+                    $label, $expected, $field
+                ));
+            }
+        };
+    }
+
+    check!(
+        config.model_index.class_name,
+        "WanPipeline",
+        "model_index._class_name"
+    );
+    check!(
+        config.transformer.attention_head_dim,
+        128usize,
+        "transformer.attention_head_dim"
+    );
+    check!(
+        config.transformer.cross_attn_norm,
+        true,
+        "transformer.cross_attn_norm"
+    );
+    check!(config.transformer.ffn_dim, 8960usize, "transformer.ffn_dim");
+    check!(
+        config.transformer.freq_dim,
+        256usize,
+        "transformer.freq_dim"
+    );
+    check!(
+        config.transformer.in_channels,
+        16usize,
+        "transformer.in_channels"
+    );
+    check!(
+        config.transformer.num_attention_heads,
+        12usize,
+        "transformer.num_attention_heads"
+    );
+    check!(
+        config.transformer.num_layers,
+        30usize,
+        "transformer.num_layers"
+    );
+    check!(
+        config.transformer.out_channels,
+        16usize,
+        "transformer.out_channels"
+    );
+    check!(
+        config.transformer.patch_size,
+        [1usize, 2, 2],
+        "transformer.patch_size"
+    );
+    check!(
+        config.transformer.qk_norm,
+        "rms_norm_across_heads",
+        "transformer.qk_norm"
+    );
+    check!(
+        config.transformer.rope_max_seq_len,
+        1024usize,
+        "transformer.rope_max_seq_len"
+    );
+    check!(
+        config.transformer.text_dim,
+        4096usize,
+        "transformer.text_dim"
+    );
+    check!(
+        config.transformer.image_dim,
+        None::<usize>,
+        "transformer.image_dim"
+    );
+    check!(
+        config.transformer.added_kv_proj_dim,
+        None::<usize>,
+        "transformer.added_kv_proj_dim"
+    );
+    if (config.transformer.eps - 1e-6).abs() > 1e-12 {
+        return Err(format!(
+            "Wan2.1-T2V-1.3B config mismatch for transformer.eps: expected {:?}, got {:?}",
+            1e-6f64, config.transformer.eps
+        ));
+    }
+
+    check!(config.vae.base_dim, 96usize, "vae.base_dim");
+    check!(config.vae.dim_mult, vec![1usize, 2, 4, 4], "vae.dim_mult");
+    check!(config.vae.num_res_blocks, 2usize, "vae.num_res_blocks");
+    check!(
+        config.vae.temporal_downsample,
+        vec![false, true, true],
+        "vae.temperal_downsample"
+    );
+    check!(config.vae.z_dim, 16usize, "vae.z_dim");
+    if config.vae.latents_mean.len() != 16 || config.vae.latents_std.len() != 16 {
+        return Err(format!(
+            "Wan2.1-T2V-1.3B config mismatch for VAE latent statistics: expected 16 values, got mean={} std={}",
+            config.vae.latents_mean.len(),
+            config.vae.latents_std.len()
+        ));
+    }
+    if config.vae.latents_std.iter().any(|value| *value <= 0.0) {
+        return Err("Wan2.1-T2V-1.3B VAE latents_std must be positive".to_string());
+    }
+
+    check!(
+        config.scheduler.num_train_timesteps,
+        1000usize,
+        "scheduler.num_train_timesteps"
+    );
+    check!(
+        config.scheduler.prediction_type,
+        "flow_prediction",
+        "scheduler.prediction_type"
+    );
+    check!(
+        config.scheduler.use_flow_sigmas,
+        true,
+        "scheduler.use_flow_sigmas"
+    );
+    check!(
+        config.scheduler.solver_order,
+        2usize,
+        "scheduler.solver_order"
+    );
+    check!(config.scheduler.solver_type, "bh2", "scheduler.solver_type");
+    check!(
+        config.scheduler.timestep_spacing,
+        "linspace",
+        "scheduler.timestep_spacing"
+    );
+
+    check!(
+        config.text_encoder.d_model,
+        4096usize,
+        "text_encoder.d_model"
+    );
+    check!(config.text_encoder.d_ff, 10240usize, "text_encoder.d_ff");
+    check!(config.text_encoder.d_kv, 64usize, "text_encoder.d_kv");
+    check!(
+        config.text_encoder.num_heads,
+        64usize,
+        "text_encoder.num_heads"
+    );
+    check!(
+        config.text_encoder.num_layers,
+        24usize,
+        "text_encoder.num_layers"
+    );
+    check!(
+        config.text_encoder.vocab_size,
+        256384usize,
+        "text_encoder.vocab_size"
+    );
+    check!(
+        config.text_encoder.model_type,
+        "umt5",
+        "text_encoder.model_type"
+    );
+    check!(
+        config.text_encoder.feed_forward_proj,
+        "gated-gelu",
+        "text_encoder.feed_forward_proj"
+    );
+    Ok(())
 }
 
 /// Validate that a parsed index matches expected Wan Diffusers components.
@@ -252,5 +433,38 @@ pub fn validate_model_index(index: &WanModelIndex) -> Result<(), String> {
             index.text_encoder.1
         ));
     }
+    if !matches!(
+        index.scheduler.1.as_str(),
+        "UniPCMultistepScheduler" | "FlowMatchEulerDiscreteScheduler"
+    ) {
+        return Err(format!("unexpected scheduler class: {}", index.scheduler.1));
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_validation_reports_expected_and_actual_patch_size() {
+        let mut config = WanFullConfig::wan21_t2v_13b();
+        config.transformer.patch_size = [2, 2, 2];
+
+        let error = validate_wan21_t2v_13b(&config).expect_err("mismatch must fail");
+
+        assert!(error.contains("transformer.patch_size"));
+        assert!(error.contains("expected"));
+        assert!(error.contains("got"));
+    }
+
+    #[test]
+    fn unknown_transformer_architecture_is_not_silently_downgraded() {
+        let mut config = WanFullConfig::wan21_t2v_13b();
+        config.transformer.num_layers = 31;
+
+        let error = infer_variant(&config.transformer).expect_err("unknown architecture");
+
+        assert!(error.contains("unsupported Wan transformer architecture"));
+    }
 }

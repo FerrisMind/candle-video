@@ -1,9 +1,11 @@
 //! UMT5-XXL text encoder for Wan video models (safetensors or GGUF).
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
+use candle_core::{DType, Device, IndexOp, Result, Shape, Tensor};
 use candle_nn::VarBuilder;
+use candle_nn::var_builder::SimpleBackend;
 use candle_transformers::models::t5;
 
 use super::quantized_umt5_encoder::QuantizedUmt5Encoder;
@@ -15,6 +17,140 @@ use crate::models::ltx_video::t2v_pipeline::TextEncoder as PipelineTextEncoder;
 
 use super::configs::WanTextEncoderConfig;
 use super::loader::{WanLayout, discover_safetensors};
+
+struct ScaledFp8Safetensors {
+    tensors: candle_core::safetensors::MmapedSafetensors,
+    scales: HashMap<String, String>,
+}
+
+impl ScaledFp8Safetensors {
+    fn open(path: &Path) -> std::result::Result<Self, LoaderError> {
+        let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::new(path) }
+            .map_err(LoaderError::Candle)?;
+        let entries = tensors.tensors();
+        let names: HashSet<&str> = entries.iter().map(|(name, _)| name.as_str()).collect();
+        let mut scales = HashMap::new();
+
+        for (name, view) in &entries {
+            if !is_fp8_dtype(view.dtype()) || name == "scaled_fp8" {
+                continue;
+            }
+            let stem = name.strip_suffix(".weight").ok_or_else(|| {
+                LoaderError::Candle(candle_core::Error::Msg(format!(
+                    "scaled FP8 tensor `{name}` is not a linear `.weight` tensor"
+                )))
+            })?;
+            let scale_name = format!("{stem}.scale_weight");
+            if !names.contains(scale_name.as_str()) {
+                return Err(LoaderError::Candle(candle_core::Error::Msg(format!(
+                    "missing FP8 scale `{scale_name}` for tensor `{name}`"
+                ))));
+            }
+            let scale_view = tensors.get(&scale_name).map_err(LoaderError::Candle)?;
+            if !scale_view.shape().is_empty() || !is_f32_dtype(scale_view.dtype()) {
+                return Err(LoaderError::Candle(candle_core::Error::Msg(format!(
+                    "FP8 scale `{scale_name}` must be scalar F32, got {:?} {:?}",
+                    scale_view.dtype(),
+                    scale_view.shape()
+                ))));
+            }
+            scales.insert(name.clone(), scale_name);
+        }
+
+        for (name, _) in entries
+            .iter()
+            .filter(|(name, _)| name.ends_with(".scale_weight"))
+        {
+            let weight_name = format!("{}.weight", name.trim_end_matches(".scale_weight"));
+            if !scales.contains_key(&weight_name) {
+                return Err(LoaderError::Candle(candle_core::Error::Msg(format!(
+                    "unexpected FP8 scale `{name}` without scaled tensor `{weight_name}`"
+                ))));
+            }
+        }
+
+        if scales.is_empty() {
+            return Err(LoaderError::Candle(candle_core::Error::Msg(format!(
+                "{} contains no scaled FP8 tensors",
+                path.display()
+            ))));
+        }
+
+        Ok(Self { tensors, scales })
+    }
+
+    fn load(&self, name: &str, dtype: DType, device: &Device) -> Result<Tensor> {
+        let tensor = self.tensors.load(name, device)?.to_dtype(dtype)?;
+        match self.scales.get(name) {
+            Some(scale_name) => {
+                let scale = self.tensors.load(scale_name, device)?.to_dtype(dtype)?;
+                tensor.broadcast_mul(&scale)
+            }
+            None => Ok(tensor),
+        }
+    }
+}
+
+fn is_fp8_dtype(dtype: impl std::fmt::Debug) -> bool {
+    matches!(format!("{dtype:?}").as_str(), "F8_E4M3" | "F8E4M3")
+}
+
+fn is_f32_dtype(dtype: impl std::fmt::Debug) -> bool {
+    matches!(format!("{dtype:?}").as_str(), "F32" | "F32E")
+}
+
+impl SimpleBackend for ScaledFp8Safetensors {
+    fn get(
+        &self,
+        shape: Shape,
+        name: &str,
+        _: candle_nn::Init,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Tensor> {
+        let tensor = self.load(name, dtype, device)?;
+        if tensor.shape() != &shape {
+            return Err(candle_core::Error::UnexpectedShape {
+                msg: format!("shape mismatch for scaled FP8 UMT5 tensor `{name}`"),
+                expected: shape,
+                got: tensor.shape().clone(),
+            }
+            .bt());
+        }
+        Ok(tensor)
+    }
+
+    fn get_unchecked(&self, name: &str, dtype: DType, device: &Device) -> Result<Tensor> {
+        self.load(name, dtype, device)
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.tensors.get(name).is_ok()
+    }
+}
+
+fn is_scaled_fp8_safetensors(path: &Path) -> std::result::Result<bool, LoaderError> {
+    let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::new(path) }
+        .map_err(LoaderError::Candle)?;
+    Ok(tensors.get("scaled_fp8").is_ok()
+        || tensors
+            .tensors()
+            .iter()
+            .any(|(name, _)| name.ends_with(".scale_weight")))
+}
+
+fn scaled_fp8_var_builder<'a>(
+    path: &Path,
+    device: &'a Device,
+    dtype: DType,
+) -> std::result::Result<VarBuilder<'a>, LoaderError> {
+    let backend = ScaledFp8Safetensors::open(path)?;
+    Ok(VarBuilder::from_backend(
+        Box::new(backend),
+        dtype,
+        device.clone(),
+    ))
+}
 
 /// UMT5 encoder configuration for Wan 2.1 T2V 1.3B.
 #[derive(Debug, Clone)]
@@ -113,19 +249,23 @@ impl Umt5TextEncoder {
         let config = Umt5EncoderConfig::from(&wan_cfg);
 
         let shards = discover_safetensors(dir)?;
-        let loader = WeightLoader::new(device.clone(), dtype);
-        let vb = if shards.len() == 1 {
-            loader
-                .load_single(&shards[0])
-                .map_err(LoaderError::Candle)?
-        } else {
-            loader
-                .load_sharded(shards.as_slice())
-                .map_err(LoaderError::Candle)?
-        };
-
         let candle_cfg = config.to_candle_t5_config();
-        let model = Umt5EncoderStack::load(vb, &candle_cfg).map_err(LoaderError::Candle)?;
+        let model = if shards.len() == 1 && is_scaled_fp8_safetensors(&shards[0])? {
+            let vb = scaled_fp8_var_builder(&shards[0], device, dtype)?;
+            Umt5EncoderStack::load(vb, &candle_cfg).map_err(LoaderError::Candle)?
+        } else {
+            let loader = WeightLoader::new(device.clone(), dtype);
+            let vb = if shards.len() == 1 {
+                loader
+                    .load_single(&shards[0])
+                    .map_err(LoaderError::Candle)?
+            } else {
+                loader
+                    .load_sharded(shards.as_slice())
+                    .map_err(LoaderError::Candle)?
+            };
+            Umt5EncoderStack::load(vb, &candle_cfg).map_err(LoaderError::Candle)?
+        };
 
         Ok(Self {
             config,
@@ -285,5 +425,64 @@ impl PipelineTextEncoder for Umt5TextEncoder {
 
     fn forward(&mut self, input_ids: &Tensor) -> Result<Tensor> {
         self.forward_hidden_states(input_ids)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    #[test]
+    fn scaled_fp8_backend_applies_scalar_weight_scale() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("scaled.safetensors");
+        let device = Device::Cpu;
+        let weight = Tensor::new(&[1.0f32, 2.0], &device)
+            .expect("weight")
+            .to_dtype(DType::F8E4M3)
+            .expect("fp8");
+        let scale = Tensor::new(2.0f32, &device).expect("scale");
+        candle_core::safetensors::save(
+            &HashMap::from([
+                ("encoder.block.0.q.weight".to_string(), weight),
+                ("encoder.block.0.q.scale_weight".to_string(), scale),
+            ]),
+            &path,
+        )
+        .expect("save");
+
+        let vb = scaled_fp8_var_builder(&path, &device, DType::F32).expect("var builder");
+        let values = vb
+            .get((2,), "encoder.block.0.q.weight")
+            .expect("scaled weight")
+            .to_vec1::<f32>()
+            .expect("values");
+
+        assert_eq!(values, vec![2.0, 4.0]);
+    }
+
+    #[test]
+    fn scaled_fp8_backend_rejects_missing_scale() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("missing-scale.safetensors");
+        let device = Device::Cpu;
+        let weight = Tensor::new(&[1.0f32], &device)
+            .expect("weight")
+            .to_dtype(DType::F8E4M3)
+            .expect("fp8");
+        candle_core::safetensors::save(
+            &HashMap::from([("encoder.block.0.q.weight".to_string(), weight)]),
+            &path,
+        )
+        .expect("save");
+
+        let error = match scaled_fp8_var_builder(&path, &device, DType::F32) {
+            Ok(_) => panic!("missing scale must fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("missing FP8 scale"));
     }
 }
