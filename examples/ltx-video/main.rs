@@ -1,4 +1,4 @@
-use candle_core::{DType, Device, IndexOp, Tensor};
+use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_video::models::ltx_video::{
     AutoencoderKLLtxVideo, LtxVideoTransformer3DModel,
@@ -8,11 +8,25 @@ use candle_video::models::ltx_video::{
     t2v_pipeline::{LtxPipeline, LtxVideoProcessor, OutputType, TextEncoder, Tokenizer},
     text_encoder::{T5EncoderConfig, T5TextEncoderWrapper},
 };
+use candle_video::utils::video_export::{
+    PixelRange, save_gif_atomic_with_observer, save_png_frames_with_observer, tensor_to_rgb_frames,
+};
+use candle_video::{
+    GenerationEvent, GenerationStage, ProgressObserver, RunManifest, ensure_not_cancelled,
+    run_with_heartbeat, write_run_manifest,
+};
 use clap::Parser;
 use hf_hub::{Repo, RepoType, api::sync::Api};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 use tokenizers::Tokenizer as HfTokenizer;
+
+#[path = "../common/progress.rs"]
+mod progress;
+
+use progress::{CliProgressObserver, CliProgressOptions, LogFormat, ProgressMode};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -64,6 +78,10 @@ struct Args {
     #[arg(long)]
     gif: bool,
 
+    /// Output frame rate used for GIF timing and the run manifest.
+    #[arg(long, default_value_t = 25)]
+    fps: usize,
+
     /// Use VAE tiling (spatial)
     #[arg(long, default_value_t = false)]
     vae_tiling: bool,
@@ -104,6 +122,43 @@ struct Args {
     /// Override stochastic sampling (default from preset)
     #[arg(long)]
     stochastic_sampling: Option<bool>,
+
+    /// Progress renderer: auto, always, or never.
+    #[arg(long, value_enum, default_value_t = ProgressMode::Auto)]
+    progress: ProgressMode,
+
+    /// Human terminal events or JSONL events on stderr.
+    #[arg(long, value_enum, default_value_t = LogFormat::Human)]
+    log_format: LogFormat,
+
+    #[arg(short = 'v', long, action = clap::ArgAction::Count)]
+    verbose: u8,
+
+    #[arg(short = 'q', long)]
+    quiet: bool,
+
+    #[arg(long, default_value_t = 5)]
+    heartbeat_seconds: u64,
+
+    #[arg(long)]
+    timings: bool,
+
+    #[arg(long, visible_alias = "trace-stages")]
+    diagnostics: bool,
+
+    #[arg(long)]
+    gpu_stats: bool,
+
+    #[arg(long, visible_alias = "log-file")]
+    events_jsonl: Option<PathBuf>,
+
+    /// Write a run manifest next to the generated GIF or frame directory.
+    #[arg(long)]
+    dump_run_manifest: bool,
+
+    /// Retain an incomplete `.partial` GIF when export fails.
+    #[arg(long)]
+    keep_partial: bool,
 }
 
 struct TokenizerAdapter {
@@ -174,6 +229,25 @@ impl Tokenizer for DummyTokenizer {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if args.fps == 0 {
+        anyhow::bail!("--fps must be greater than zero");
+    }
+    if args.frames && args.gif {
+        anyhow::bail!("--frames and --gif are mutually exclusive");
+    }
+    let renderer = CliProgressObserver::new(CliProgressOptions {
+        progress: args.progress,
+        log_format: args.log_format,
+        quiet: args.quiet,
+        verbose: args.verbose,
+        timings: args.timings,
+        diagnostics: args.diagnostics,
+        gpu_stats: args.gpu_stats,
+        heartbeat_seconds: args.heartbeat_seconds,
+        events_jsonl: args.events_jsonl.clone(),
+    })?;
+    CliProgressObserver::install_ctrlc(&renderer)?;
+    let observer: Arc<dyn ProgressObserver> = renderer.clone();
     let ltxv_config =
         candle_video::models::ltx_video::configs::get_config_by_version(&args.ltxv_version);
     let num_inference_steps = args
@@ -190,10 +264,10 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or(ltxv_config.inference.stochastic_sampling);
     let stg_scale = args.stg_scale.unwrap_or(ltxv_config.inference.stg_scale);
 
-    println!("LTX-Video Text-to-Video Generation");
-    println!("==================================");
-    println!("Prompt: {}", args.prompt);
-    println!(
+    eprintln!("LTX-Video Text-to-Video Generation");
+    eprintln!("==================================");
+    eprintln!("Prompt: {}", args.prompt);
+    eprintln!(
         "Version: {} (steps={}, guidance={:.2}, rescale={:.2}, stg={:.2}, stochastic={})",
         args.ltxv_version,
         num_inference_steps,
@@ -202,7 +276,7 @@ fn main() -> anyhow::Result<()> {
         stg_scale,
         stochastic_sampling
     );
-    println!(
+    eprintln!(
         "Size: {}x{} [{} frames]",
         args.width, args.height, args.num_frames
     );
@@ -216,14 +290,23 @@ fn main() -> anyhow::Result<()> {
     // Generate random seed if not provided
     let seed = args.seed.unwrap_or_else(|| {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
         now.as_secs() ^ (now.subsec_nanos() as u64)
     });
     device.set_seed(seed)?;
-    println!("Device: {:?}", device);
-    println!("Seed: {}", seed);
+    eprintln!("Device: {:?}", device);
+    eprintln!("Seed: {}", seed);
 
     let dtype = DType::BF16;
+
+    let load_started = Instant::now();
+    observer.on_event(&GenerationEvent::StageStarted {
+        stage: GenerationStage::LoadComponents,
+        message: "Locating and loading LTX tokenizer, text encoder, transformer, and VAE"
+            .to_string(),
+    });
 
     // 1. Locate weights
     let (transformer_file, vae_file, t5_file, tokenizer_file) =
@@ -311,7 +394,7 @@ fn main() -> anyhow::Result<()> {
                 } else if path4.exists() {
                     path4
                 } else {
-                    println!("    Tokenizer not found locally, downloading from HF...");
+                    eprintln!("    Tokenizer not found locally, downloading from HF...");
                     let _ = std::io::stdout().flush();
                     // Standard T5 tokenizer from google repository is usually safer
                     Api::new()?
@@ -325,7 +408,7 @@ fn main() -> anyhow::Result<()> {
 
             (transformer, vae, t5, tokenizer)
         } else {
-            println!("\nDownloading models from HuggingFace: {}", args.model_id);
+            eprintln!("\nDownloading models from HuggingFace: {}", args.model_id);
             let api = Api::new()?;
             let repo = api.repo(Repo::with_revision(
                 args.model_id.clone(),
@@ -337,7 +420,7 @@ fn main() -> anyhow::Result<()> {
             let is_098 = args.ltxv_version.contains("0.9.8");
 
             let (transformer, vae) = if is_098 {
-                println!("  Fetching unified weight file (official format)...");
+                eprintln!("  Fetching unified weight file (official format)...");
                 let unified = repo.get("ltxv-2b-0.9.8-distilled.safetensors")?;
                 // Return same path for both, the loading logic will handle it if unified_weights is set
                 // Actually, we'll force unified_weights logic later if we are in this branch
@@ -369,11 +452,15 @@ fn main() -> anyhow::Result<()> {
     });
 
     if let Some(local_weights) = args.local_weights.as_ref() {
-        println!("\nLoading models from local path: {}", local_weights);
+        eprintln!("\nLoading models from local path: {}", local_weights);
     }
 
     // 2. Step 1: Encode prompts with T5 (or load from file)
-    println!("Encoding prompt...");
+    let prompt_started = Instant::now();
+    observer.on_event(&GenerationEvent::StageStarted {
+        stage: GenerationStage::EncodePrompt,
+        message: "Encoding positive and negative prompts".to_string(),
+    });
     let (
         prompt_embeds,
         prompt_attention_mask,
@@ -381,7 +468,7 @@ fn main() -> anyhow::Result<()> {
         negative_prompt_attention_mask,
     ) = if let Some(ref emb_file) = args.embeddings_file {
         // Load pre-computed embeddings from file
-        println!("  Loading embeddings from {}...", emb_file);
+        eprintln!("  Loading embeddings from {}...", emb_file);
         let tensors = candle_core::safetensors::load(emb_file, &device)?;
 
         let p_emb = tensors
@@ -401,7 +488,7 @@ fn main() -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("negative_prompt_attention_mask not found in file"))?
             .clone();
 
-        println!(
+        eprintln!(
             "  Loaded: prompt_embeds {:?}, mask {:?}",
             p_emb.dims(),
             p_mask.dims()
@@ -423,7 +510,7 @@ fn main() -> anyhow::Result<()> {
 
         // Load T5 model (BF16 or GGUF)
         let (p_emb, n_emb) = if args.use_bf16_t5 {
-            println!("  Loading BF16 T5 model...");
+            eprintln!("  Loading BF16 T5 model...");
             let config = T5EncoderConfig::t5_xxl();
             let mut t5_wrapper = T5TextEncoderWrapper::new(config, device.clone(), DType::BF16)?;
 
@@ -435,7 +522,7 @@ fn main() -> anyhow::Result<()> {
             let n_emb = t5_wrapper.forward(&n_ids)?;
             (p_emb, n_emb)
         } else {
-            println!("  Loading GGUF T5 model...");
+            eprintln!("  Loading GGUF T5 model...");
             let t5_model = QuantizedT5EncoderModel::load(&t5_file, &device)?;
             let p_emb = t5_model.forward(&p_ids, Some(&p_mask))?;
             let n_emb = t5_model.forward(&n_ids, Some(&n_mask))?;
@@ -449,16 +536,20 @@ fn main() -> anyhow::Result<()> {
             n_mask.to_dtype(DType::F32)?,
         )
     };
+    observer.on_event(&GenerationEvent::StageFinished {
+        stage: GenerationStage::EncodePrompt,
+        elapsed_secs: prompt_started.elapsed().as_secs_f64(),
+    });
 
     // 3. Step 2: Load Transformer and VAE for generation
     // 3. Step 2: Load Transformer and VAE for generation
-    println!("Loading models...");
+    eprintln!("Loading models...");
 
     // Check if using unified weights (official LTX-Video format)
     let (vae, transformer) = if let Some(ref unified_path) = effective_unified_weights {
         use candle_video::models::ltx_video::weight_format::KeyRemapper;
 
-        println!("  Loading from unified weights: {}", unified_path);
+        eprintln!("  Loading from unified weights: {}", unified_path);
         let unified_file = PathBuf::from(unified_path);
         if !unified_file.exists() {
             anyhow::bail!("Unified weights file not found: {:?}", unified_file);
@@ -494,7 +585,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        println!(
+        eprintln!(
             "    Found {} VAE tensors, {} Transformer tensors",
             vae_tensors.len(),
             trans_tensors.len()
@@ -559,6 +650,10 @@ fn main() -> anyhow::Result<()> {
             timestep_conditioning: true,
         })),
     );
+    observer.on_event(&GenerationEvent::StageFinished {
+        stage: GenerationStage::LoadComponents,
+        elapsed_secs: load_started.elapsed().as_secs_f64(),
+    });
 
     // 4b. Prepare deterministic latents
     use candle_video::utils::deterministic_rng::Pcg32;
@@ -579,15 +674,21 @@ fn main() -> anyhow::Result<()> {
     let latent_frames = (num_frames - 1) / vae_temporal_compression + 1;
     let channels = 128; // transformer in_channels
 
+    let prepare_started = Instant::now();
+    observer.on_event(&GenerationEvent::StageStarted {
+        stage: GenerationStage::PrepareLatents,
+        message: "Preparing initial latent noise".to_string(),
+    });
+
     // Generate or load initial latents
     let latents_packed = if let Some(ref latents_file) = args.initial_latents_file {
-        println!("  Loading initial latents from {}...", latents_file);
+        eprintln!("  Loading initial latents from {}...", latents_file);
         let tensors = candle_core::safetensors::load(latents_file, &device)?;
         let latents = tensors
             .get("initial_latents")
             .ok_or_else(|| anyhow::anyhow!("initial_latents not found in file"))?
             .clone();
-        println!("  Loaded latents shape: {:?}", latents.dims());
+        eprintln!("  Loaded latents shape: {:?}", latents.dims());
         latents
     } else {
         // [B, C, F, H, W]
@@ -599,12 +700,26 @@ fn main() -> anyhow::Result<()> {
             transformer_temporal_patch,
         )?
     };
+    observer.on_event(&GenerationEvent::StageFinished {
+        stage: GenerationStage::PrepareLatents,
+        elapsed_secs: prepare_started.elapsed().as_secs_f64(),
+    });
+    observer.on_event(&GenerationEvent::ConfigResolved {
+        requested_width: args.width,
+        requested_height: args.height,
+        adjusted_width: args.width,
+        adjusted_height: args.height,
+        requested_frames: args.num_frames,
+        adjusted_frames: args.num_frames,
+        latent_shape: latents_packed.dims().to_vec(),
+        steps: num_inference_steps,
+        guidance_scale,
+        seed: Some(seed),
+        scheduler: "ltx".to_string(),
+    });
 
     // 5. Run Generation
-    println!(
-        "\nStarting denoising loop ({} steps)...",
-        num_inference_steps
-    );
+    let generation_started = Instant::now();
     pipeline.guidance_rescale = rescaling_scale;
 
     let sigmas_from_config = ltxv_config.inference.timesteps.clone();
@@ -615,13 +730,13 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or(vec![0.0]);
     let decode_noise_scale = ltxv_config.inference.decode_noise_scale.clone();
 
-    let video_out = pipeline.call(
+    let video_out = pipeline.call_with_observer(
         None, // prompt
         None, // negative_prompt
         args.height,
         args.width,
         args.num_frames,
-        25,
+        args.fps,
         num_inference_steps,
         None,               // timesteps
         sigmas_from_config, // sigmas_provided
@@ -640,71 +755,109 @@ fn main() -> anyhow::Result<()> {
         128,
         Some(ltxv_config.inference.skip_block_list.clone()),
         &device,
+        Arc::clone(&observer),
     )?;
 
+    let postprocess_started = Instant::now();
+    observer.on_event(&GenerationEvent::StageStarted {
+        stage: GenerationStage::PostProcess,
+        message: "Converting decoded tensor to RGB frames".to_string(),
+    });
+    let heartbeat_observer = Arc::clone(&observer);
+    let (frame_data, w, h) = run_with_heartbeat(
+        &heartbeat_observer,
+        GenerationStage::PostProcess,
+        "Converting decoded frames still running",
+        || tensor_to_rgb_frames(&video_out.frames, PixelRange::ZeroTo255),
+    )?;
+    observer.on_event(&GenerationEvent::StageFinished {
+        stage: GenerationStage::PostProcess,
+        elapsed_secs: postprocess_started.elapsed().as_secs_f64(),
+    });
+
     // 5. Save output
-    if !Path::new(&args.output_dir).exists() {
-        std::fs::create_dir_all(&args.output_dir)?;
-    }
-
-    let (b, _c, f, h, w) = video_out.frames.dims5()?;
-
-    // Convert frames to Vec<Vec<u8>> for reuse
-    let mut frame_data = Vec::new();
-    for i in 0..b {
-        for j in 0..f {
-            let frame = video_out.frames.i((i, .., j, .., ..))?;
-            let frame = frame
-                .permute((1, 2, 0))?
-                .clamp(0.0, 255.0)?
-                .to_dtype(DType::U8)?;
-            let data = frame.flatten_all()?.to_vec1::<u8>()?;
-            frame_data.push(data);
-        }
-    }
+    let output_dir = PathBuf::from(&args.output_dir);
+    std::fs::create_dir_all(&output_dir)?;
+    let encode_started = Instant::now();
+    observer.on_event(&GenerationEvent::StageStarted {
+        stage: GenerationStage::EncodeVideo,
+        message: format!("Writing {} decoded frames", frame_data.len()),
+    });
 
     // Exclusive mode: --frames saves ONLY frames
     if args.frames {
-        for (j, data) in frame_data.iter().enumerate() {
-            let filename = format!("{}/frame_{:04}.png", args.output_dir, j);
-            image::save_buffer(&filename, data, w as u32, h as u32, image::ColorType::Rgb8)?;
-        }
-        println!(
+        save_png_frames_with_observer(&frame_data, w, h, &output_dir, Some(observer.as_ref()))?;
+        eprintln!(
             "\nDone! Saved {} frames to {}",
             frame_data.len(),
-            args.output_dir
+            output_dir.display()
         );
-        return Ok(());
+    } else {
+        eprintln!("Creating GIF animation with atomic publication...");
+        let gif_path = output_dir.join("video.gif");
+        let frame_delay = u16::try_from((100usize + args.fps / 2) / args.fps)
+            .unwrap_or(u16::MAX)
+            .max(1);
+        save_gif_atomic_with_observer(
+            &frame_data,
+            w,
+            h,
+            &gif_path,
+            frame_delay,
+            args.keep_partial,
+            Some(observer.as_ref()),
+        )?;
+        println!("\nDone! Saved GIF to {}", gif_path.display());
     }
 
-    // Default or --gif: Save GIF
-    {
-        use gif::{Encoder, Repeat};
-        use rayon::prelude::*;
-        use std::fs::File;
+    observer.on_event(&GenerationEvent::StageFinished {
+        stage: GenerationStage::EncodeVideo,
+        elapsed_secs: encode_started.elapsed().as_secs_f64(),
+    });
 
-        println!("Creating GIF animation (default output, accelerated with rayon)...");
-        let gif_path = format!("{}/video.gif", args.output_dir);
-        let mut image_file = File::create(&gif_path)?;
-        let mut encoder = Encoder::new(&mut image_file, w as u16, h as u16, &[])?;
-        encoder.set_repeat(Repeat::Infinite)?;
+    let generated_output = if args.frames {
+        output_dir.display().to_string()
+    } else {
+        output_dir.join("video.gif").display().to_string()
+    };
 
-        // Parallel quantization
-        let frames: Vec<_> = frame_data
-            .par_iter()
-            .map(|data| {
-                let mut frame = gif::Frame::from_rgb_speed(w as u16, h as u16, data, 30);
-                frame.delay = 4; // ~25 FPS
-                frame
-            })
-            .collect();
-
-        // Sequential write
-        for frame in frames {
-            encoder.write_frame(&frame)?;
-        }
-        println!("\nDone! Saved GIF to {}", gif_path);
+    if args.dump_run_manifest {
+        let manifest_path = output_dir.join("run.json");
+        let manifest = RunManifest {
+            model: format!("LTX-Video-{}", args.ltxv_version),
+            backend: if args.cpu { "cpu" } else { "cuda" }.to_string(),
+            device: format!("{device:?}"),
+            dtype: format!("{dtype:?}"),
+            width: w,
+            height: h,
+            frames: frame_data.len(),
+            fps: args.fps,
+            steps: num_inference_steps,
+            guidance_scale,
+            seed: Some(seed),
+            scheduler: "ltx-config".to_string(),
+            total_seconds: generation_started.elapsed().as_secs_f64(),
+            peak_vram_bytes: renderer.peak_vram_bytes(),
+            output: generated_output.clone(),
+        };
+        let finalize_started = Instant::now();
+        observer.on_event(&GenerationEvent::StageStarted {
+            stage: GenerationStage::Finalize,
+            message: format!("Writing run manifest to {}", manifest_path.display()),
+        });
+        write_run_manifest(&manifest_path, &manifest)?;
+        observer.on_event(&GenerationEvent::StageFinished {
+            stage: GenerationStage::Finalize,
+            elapsed_secs: finalize_started.elapsed().as_secs_f64(),
+        });
+        println!("Saved run manifest to {}", manifest_path.display());
     }
+
+    ensure_not_cancelled(observer.as_ref())?;
+    observer.on_event(&GenerationEvent::GenerationFinished {
+        output: Some(generated_output),
+        elapsed_secs: generation_started.elapsed().as_secs_f64(),
+    });
 
     Ok(())
 }

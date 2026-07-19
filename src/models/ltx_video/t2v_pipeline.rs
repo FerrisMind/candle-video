@@ -1,4 +1,12 @@
+use std::sync::Arc;
+use std::time::Instant;
+
 use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
+
+use crate::engine::{
+    DenoisePass, GenerationEvent, GenerationStage, NoopProgressObserver, ProgressObserver,
+    ensure_not_cancelled, run_with_heartbeat,
+};
 
 #[derive(Debug, Clone)]
 pub struct SchedulerConfig {
@@ -456,10 +464,14 @@ impl<'a> LtxPipeline<'a> {
                     dtype,
                 )?
             } else {
-                let ne =
-                    negative_prompt_embeds.unwrap_or_else(|| prompt_embeds.zeros_like().unwrap());
-                let nm = negative_prompt_attention_mask
-                    .unwrap_or_else(|| prompt_attention_mask.zeros_like().unwrap());
+                let ne = match negative_prompt_embeds {
+                    Some(ne) => ne,
+                    None => prompt_embeds.zeros_like()?,
+                };
+                let nm = match negative_prompt_attention_mask {
+                    Some(nm) => nm,
+                    None => prompt_attention_mask.zeros_like()?,
+                };
                 (ne, nm)
             };
 
@@ -651,6 +663,70 @@ impl<'a> LtxPipeline<'a> {
         skip_block_list: Option<Vec<usize>>,
         device: &Device,
     ) -> Result<LtxPipelineOutput> {
+        self.call_with_observer(
+            prompt,
+            negative_prompt,
+            height,
+            width,
+            num_frames,
+            frame_rate,
+            num_inference_steps,
+            timesteps,
+            sigmas_provided,
+            guidance_scale,
+            guidance_rescale,
+            stg_scale,
+            num_videos_per_prompt,
+            latents,
+            prompt_embeds,
+            prompt_attention_mask,
+            negative_prompt_embeds,
+            negative_prompt_attention_mask,
+            decode_timestep,
+            decode_noise_scale,
+            output_type,
+            max_sequence_length,
+            skip_block_list,
+            device,
+            Arc::new(NoopProgressObserver),
+        )
+    }
+
+    /// Run LTX generation while publishing structured progress events.
+    #[allow(clippy::too_many_arguments)]
+    pub fn call_with_observer(
+        &mut self,
+        prompt: Option<PromptInput>,
+        negative_prompt: Option<PromptInput>,
+        height: usize,
+        width: usize,
+        num_frames: usize,
+        frame_rate: usize,
+        num_inference_steps: usize,
+        timesteps: Option<Vec<i64>>,
+        sigmas_provided: Option<Vec<f32>>,
+        guidance_scale: f32,
+        guidance_rescale: f32,
+        stg_scale: f32,
+        num_videos_per_prompt: usize,
+        latents: Option<Tensor>,
+        prompt_embeds: Option<Tensor>,
+        prompt_attention_mask: Option<Tensor>,
+        negative_prompt_embeds: Option<Tensor>,
+        negative_prompt_attention_mask: Option<Tensor>,
+        decode_timestep: Vec<f32>,
+        decode_noise_scale: Option<Vec<f32>>,
+        output_type: OutputType,
+        max_sequence_length: usize,
+        skip_block_list: Option<Vec<usize>>,
+        device: &Device,
+        observer: Arc<dyn ProgressObserver>,
+    ) -> Result<LtxPipelineOutput> {
+        let validate_started = Instant::now();
+        observer.on_event(&GenerationEvent::StageStarted {
+            stage: GenerationStage::ValidateInputs,
+            message: "Validating LTX generation request".to_string(),
+        });
         self.check_inputs(
             prompt.as_ref(),
             height,
@@ -660,6 +736,10 @@ impl<'a> LtxPipeline<'a> {
             prompt_attention_mask.as_ref(),
             negative_prompt_attention_mask.as_ref(),
         )?;
+        observer.on_event(&GenerationEvent::StageFinished {
+            stage: GenerationStage::ValidateInputs,
+            elapsed_secs: validate_started.elapsed().as_secs_f64(),
+        });
 
         self.guidance_scale = guidance_scale;
         self.guidance_rescale = guidance_rescale;
@@ -697,23 +777,41 @@ impl<'a> LtxPipeline<'a> {
         }
 
         // text embeddings
+        let encode_started = Instant::now();
+        observer.on_event(&GenerationEvent::StageStarted {
+            stage: GenerationStage::EncodePrompt,
+            message: "Encoding positive and negative prompts".to_string(),
+        });
         let dtype = self.text_encoder.dtype();
         let prompt_in = prompt
             .clone()
             .unwrap_or_else(|| PromptInput::Single(String::new()));
-        let (mut p_emb, mut p_mask, n_emb, n_mask) = self.encode_prompt(
-            prompt_in,
-            negative_prompt,
-            self.do_classifier_free_guidance(),
-            num_videos_per_prompt,
-            prompt_embeds,
-            negative_prompt_embeds,
-            prompt_attention_mask,
-            negative_prompt_attention_mask,
-            max_sequence_length,
-            device,
-            dtype,
+        let heartbeat_observer = Arc::clone(&observer);
+        let (mut p_emb, mut p_mask, n_emb, n_mask) = run_with_heartbeat(
+            &heartbeat_observer,
+            GenerationStage::EncodePrompt,
+            "Text encoder forward still running",
+            || {
+                self.encode_prompt(
+                    prompt_in,
+                    negative_prompt,
+                    self.do_classifier_free_guidance(),
+                    num_videos_per_prompt,
+                    prompt_embeds,
+                    negative_prompt_embeds,
+                    prompt_attention_mask,
+                    negative_prompt_attention_mask,
+                    max_sequence_length,
+                    device,
+                    dtype,
+                )
+            },
         )?;
+        observer.on_event(&GenerationEvent::StageFinished {
+            stage: GenerationStage::EncodePrompt,
+            elapsed_secs: encode_started.elapsed().as_secs_f64(),
+        });
+        ensure_not_cancelled(observer.as_ref())?;
 
         // Store individual embeds for sequential CFG
         let prompt_embeds_cond = p_emb.clone();
@@ -727,6 +825,11 @@ impl<'a> LtxPipeline<'a> {
         }
 
         // latents
+        let prepare_started = Instant::now();
+        observer.on_event(&GenerationEvent::StageStarted {
+            stage: GenerationStage::PrepareLatents,
+            message: "Preparing initial latent noise".to_string(),
+        });
         let num_channels_latents = self.transformer.config().in_channels;
         let mut latents = self.prepare_latents(
             effective_batch,
@@ -738,6 +841,11 @@ impl<'a> LtxPipeline<'a> {
             device,
             latents,
         )?;
+        observer.on_event(&GenerationEvent::StageFinished {
+            stage: GenerationStage::PrepareLatents,
+            elapsed_secs: prepare_started.elapsed().as_secs_f64(),
+        });
+        ensure_not_cancelled(observer.as_ref())?;
 
         // timesteps/sigmas/mu
         let latent_num_frames = (num_frames - 1) / self.vae_temporal_compression_ratio + 1;
@@ -773,12 +881,21 @@ impl<'a> LtxPipeline<'a> {
         };
 
         if !has_custom_sigmas {
-            println!(
-                "  Calculated SD3 shift (mu): {:.4} for {} tokens",
-                mu, video_sequence_length
-            );
+            observer.on_event(&GenerationEvent::StageProgress {
+                stage: GenerationStage::PrepareLatents,
+                current: 0,
+                total: None,
+                message: Some(format!(
+                    "calculated scheduler shift mu={mu:.4} for {video_sequence_length} tokens"
+                )),
+            });
         } else {
-            println!("  Using custom distilled sigmas (mu=0.0)");
+            observer.on_event(&GenerationEvent::StageProgress {
+                stage: GenerationStage::PrepareLatents,
+                current: 0,
+                total: None,
+                message: Some("using custom distilled sigmas (mu=0.0)".to_string()),
+            });
         }
 
         let (ts, _nsteps_effective) = retrieve_timesteps(
@@ -790,6 +907,20 @@ impl<'a> LtxPipeline<'a> {
             mu,
         )?;
         self.num_timesteps = ts.len();
+
+        observer.on_event(&GenerationEvent::ConfigResolved {
+            requested_width: width,
+            requested_height: height,
+            adjusted_width: width,
+            adjusted_height: height,
+            requested_frames: num_frames,
+            adjusted_frames: num_frames,
+            latent_shape: latents.dims().to_vec(),
+            steps: ts.len(),
+            guidance_scale,
+            seed: None,
+            scheduler: "ltx".to_string(),
+        });
 
         let num_warmup_steps = ts
             .len()
@@ -857,14 +988,32 @@ impl<'a> LtxPipeline<'a> {
         let _video_coords_batch = Tensor::cat(&vec![video_coords.clone(); num_conds], 0)?;
 
         // denoising loop
+        let denoise_started = Instant::now();
+        observer.on_event(&GenerationEvent::StageStarted {
+            stage: GenerationStage::Denoise,
+            message: format!(
+                "Starting {} denoising steps ({} transformer passes per CFG step)",
+                ts.len(),
+                if self.do_classifier_free_guidance() {
+                    2
+                } else {
+                    1
+                }
+            ),
+        });
         for (i, &t) in ts.iter().enumerate() {
+            ensure_not_cancelled(observer.as_ref())?;
             if self.interrupt {
-                continue;
+                return Err(crate::engine::cancellation_error());
             }
 
             self.current_timestep = Some(t);
-
-            println!("Step {}/{}: t={}", i + 1, ts.len(), t);
+            let step_started = Instant::now();
+            observer.on_event(&GenerationEvent::DenoiseStepStarted {
+                step: i + 1,
+                total_steps: ts.len(),
+                timestep: t as f64,
+            });
 
             // Guidance Logic (CFG and/or STG)
             // We use Sequential CFG style to save memory, running passes one by one.
@@ -876,35 +1025,61 @@ impl<'a> LtxPipeline<'a> {
 
                     // 1. Unconditional pass (if CFG active)
                     let noise_uncond = if self.do_classifier_free_guidance() {
-                        Some(self.transformer.forward(
-                            &latents_input,
-                            &prompt_embeds_uncond,
-                            &timestep_t,
-                            &prompt_mask_uncond,
-                            latent_num_frames,
-                            latent_height,
-                            latent_width,
-                            None,
-                            Some(&video_coords),
-                            None,
+                        observer.on_event(&GenerationEvent::DenoisePassStarted {
+                            step: i + 1,
+                            pass: DenoisePass::Unconditional,
+                        });
+                        let heartbeat_observer = Arc::clone(&observer);
+                        Some(run_with_heartbeat(
+                            &heartbeat_observer,
+                            GenerationStage::Denoise,
+                            format!("Denoising step {} unconditional transformer pass", i + 1),
+                            || {
+                                self.transformer.forward(
+                                    &latents_input,
+                                    &prompt_embeds_uncond,
+                                    &timestep_t,
+                                    &prompt_mask_uncond,
+                                    latent_num_frames,
+                                    latent_height,
+                                    latent_width,
+                                    None,
+                                    Some(&video_coords),
+                                    None,
+                                )
+                            },
                         )?)
                     } else {
                         None
                     };
+                    ensure_not_cancelled(observer.as_ref())?;
 
                     // 2. Conditional pass (Required for both CFG and STG)
-                    let noise_text = self.transformer.forward(
-                        &latents_input,
-                        &prompt_embeds_cond,
-                        &timestep_t,
-                        &prompt_mask_cond,
-                        latent_num_frames,
-                        latent_height,
-                        latent_width,
-                        None,
-                        Some(&video_coords),
-                        None,
+                    observer.on_event(&GenerationEvent::DenoisePassStarted {
+                        step: i + 1,
+                        pass: DenoisePass::Conditional,
+                    });
+                    let heartbeat_observer = Arc::clone(&observer);
+                    let noise_text = run_with_heartbeat(
+                        &heartbeat_observer,
+                        GenerationStage::Denoise,
+                        format!("Denoising step {} conditional transformer pass", i + 1),
+                        || {
+                            self.transformer.forward(
+                                &latents_input,
+                                &prompt_embeds_cond,
+                                &timestep_t,
+                                &prompt_mask_cond,
+                                latent_num_frames,
+                                latent_height,
+                                latent_width,
+                                None,
+                                Some(&video_coords),
+                                None,
+                            )
+                        },
                     )?;
+                    ensure_not_cancelled(observer.as_ref())?;
 
                     // 3. Perturbed pass (if STG active)
                     let noise_perturbed = if self.do_spatio_temporal_guidance() {
@@ -922,17 +1097,29 @@ impl<'a> LtxPipeline<'a> {
                         }
                         let stg_mask = Tensor::from_vec(mask_data, (num_layers, b), device)?;
 
-                        Some(self.transformer.forward(
-                            &latents_input,
-                            &prompt_embeds_cond,
-                            &timestep_t,
-                            &prompt_mask_cond,
-                            latent_num_frames,
-                            latent_height,
-                            latent_width,
-                            None,
-                            Some(&video_coords),
-                            Some(&stg_mask),
+                        observer.on_event(&GenerationEvent::DenoisePassStarted {
+                            step: i + 1,
+                            pass: DenoisePass::Perturbed,
+                        });
+                        let heartbeat_observer = Arc::clone(&observer);
+                        Some(run_with_heartbeat(
+                            &heartbeat_observer,
+                            GenerationStage::Denoise,
+                            format!("Denoising step {} perturbed transformer pass", i + 1),
+                            || {
+                                self.transformer.forward(
+                                    &latents_input,
+                                    &prompt_embeds_cond,
+                                    &timestep_t,
+                                    &prompt_mask_cond,
+                                    latent_num_frames,
+                                    latent_height,
+                                    latent_width,
+                                    None,
+                                    Some(&video_coords),
+                                    Some(&stg_mask),
+                                )
+                            },
                         )?)
                     } else {
                         None
@@ -968,23 +1155,47 @@ impl<'a> LtxPipeline<'a> {
                     let timestep_t = Tensor::full(t as f32, (b,), device)?;
                     let latents_input = latents.to_dtype(p_emb.dtype())?;
 
-                    self.transformer
-                        .forward(
-                            &latents_input,
-                            &p_emb,
-                            &timestep_t,
-                            &p_mask,
-                            latent_num_frames,
-                            latent_height,
-                            latent_width,
-                            None,
-                            Some(&video_coords),
-                            None,
-                        )?
-                        .to_dtype(DType::F32)?
+                    observer.on_event(&GenerationEvent::DenoisePassStarted {
+                        step: i + 1,
+                        pass: DenoisePass::Conditional,
+                    });
+                    let heartbeat_observer = Arc::clone(&observer);
+                    run_with_heartbeat(
+                        &heartbeat_observer,
+                        GenerationStage::Denoise,
+                        format!("Denoising step {} transformer pass", i + 1),
+                        || {
+                            self.transformer.forward(
+                                &latents_input,
+                                &p_emb,
+                                &timestep_t,
+                                &p_mask,
+                                latent_num_frames,
+                                latent_height,
+                                latent_width,
+                                None,
+                                Some(&video_coords),
+                                None,
+                            )
+                        },
+                    )?
+                    .to_dtype(DType::F32)?
                 };
 
             latents = self.scheduler.step(&noise_pred, t, &latents)?;
+
+            observer.on_event(&GenerationEvent::DenoiseStepFinished {
+                step: i + 1,
+                total_steps: ts.len(),
+                timestep: t as f64,
+                elapsed_secs: step_started.elapsed().as_secs_f64(),
+            });
+            observer.on_event(&GenerationEvent::StageProgress {
+                stage: GenerationStage::Denoise,
+                current: (i + 1) as u64,
+                total: Some(ts.len() as u64),
+                message: None,
+            });
 
             if i == ts.len() - 1
                 || ((i + 1) > num_warmup_steps && (i + 1) % self.scheduler.order() == 0)
@@ -993,12 +1204,21 @@ impl<'a> LtxPipeline<'a> {
             }
         }
 
+        observer.on_event(&GenerationEvent::StageFinished {
+            stage: GenerationStage::Denoise,
+            elapsed_secs: denoise_started.elapsed().as_secs_f64(),
+        });
+
         if output_type == OutputType::Latent {
             return Ok(LtxPipelineOutput { frames: latents });
         }
 
         // decode branch
-        println!("  Decoding latents with VAE...");
+        let decode_started = Instant::now();
+        observer.on_event(&GenerationEvent::StageStarted {
+            stage: GenerationStage::DecodeVae,
+            message: format!("Decoding VAE for {num_frames} frames at {width}x{height}"),
+        });
         let mut latents = Self::unpack_latents(
             &latents,
             latent_num_frames,
@@ -1066,8 +1286,28 @@ impl<'a> LtxPipeline<'a> {
 
         latents = latents.to_dtype(self.vae.dtype())?;
 
-        let video = self.vae.decode(&latents, timestep_opt.as_ref())?;
+        let heartbeat_observer = Arc::clone(&observer);
+        let video = run_with_heartbeat(
+            &heartbeat_observer,
+            GenerationStage::DecodeVae,
+            "VAE decode still running",
+            || self.vae.decode(&latents, timestep_opt.as_ref()),
+        )?;
+        observer.on_event(&GenerationEvent::StageFinished {
+            stage: GenerationStage::DecodeVae,
+            elapsed_secs: decode_started.elapsed().as_secs_f64(),
+        });
+
+        let postprocess_started = Instant::now();
+        observer.on_event(&GenerationEvent::StageStarted {
+            stage: GenerationStage::PostProcess,
+            message: "Converting decoded tensor to output frames".to_string(),
+        });
         let video = self.video_processor.postprocess_video(&video)?;
+        observer.on_event(&GenerationEvent::StageFinished {
+            stage: GenerationStage::PostProcess,
+            elapsed_secs: postprocess_started.elapsed().as_secs_f64(),
+        });
 
         Ok(LtxPipelineOutput { frames: video })
     }

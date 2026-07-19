@@ -3,16 +3,26 @@
 // LTX users should continue using `cargo run --example ltx-video`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
 use candle_core::DType;
 use candle_video::profiling::init_tracing;
 use candle_video::utils::latents_fixture::load_latents_json;
-use candle_video::utils::video_export::{PixelRange, export_video_output_with_mp4};
+use candle_video::utils::video_export::{
+    PixelRange, export_video_output_with_mp4_options_and_observer,
+};
 use candle_video::{
-    GenerateRequest, MemoryOptions, VideoPipeline, WanDevicePlan, WanPipeline, WanPipelineAdapter,
-    WanSchedulerProfile,
+    GenerateRequest, GenerationEvent, GenerationStage, MemoryOptions, ProgressObserver,
+    RunManifest, VideoPipeline, WanDevicePlan, WanPipeline, WanPipelineAdapter,
+    WanSchedulerProfile, write_run_manifest,
 };
 use clap::Parser;
+
+#[path = "../common/progress.rs"]
+mod progress;
+
+use progress::{CliProgressObserver, CliProgressOptions, LogFormat, ProgressMode};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -104,11 +114,69 @@ struct Args {
     /// Alias for the explicit CPU-offload/sequential-loading path.
     #[arg(long)]
     low_vram: bool,
+
+    /// Progress renderer: auto uses a terminal bar and plain lines when piped.
+    #[arg(long, value_enum, default_value_t = ProgressMode::Auto)]
+    progress: ProgressMode,
+
+    /// Human terminal events or JSONL events on stderr.
+    #[arg(long, value_enum, default_value_t = LogFormat::Human)]
+    log_format: LogFormat,
+
+    /// Increase diagnostic detail (repeat for more verbosity).
+    #[arg(short = 'v', long, action = clap::ArgAction::Count)]
+    verbose: u8,
+
+    /// Suppress human progress output while retaining machine events.
+    #[arg(short = 'q', long)]
+    quiet: bool,
+
+    /// Heartbeat interval for long model operations; zero disables heartbeats.
+    #[arg(long, default_value_t = 5)]
+    heartbeat_seconds: u64,
+
+    /// Include elapsed timings in human output.
+    #[arg(long)]
+    timings: bool,
+
+    /// Show detailed configuration and stage diagnostics.
+    #[arg(long, visible_alias = "trace-stages")]
+    diagnostics: bool,
+
+    /// Add best-effort nvidia-smi snapshots to heartbeat lines.
+    #[arg(long)]
+    gpu_stats: bool,
+
+    /// Write structured events to a JSONL file as well as stderr.
+    #[arg(long, visible_alias = "log-file")]
+    events_jsonl: Option<PathBuf>,
+
+    /// Write a run manifest beside the generated output.
+    #[arg(long)]
+    dump_run_manifest: bool,
+
+    /// Retain an incomplete `.partial` MP4 when export fails.
+    #[arg(long)]
+    keep_partial: bool,
 }
 
 fn main() -> anyhow::Result<()> {
     init_tracing();
     let args = Args::parse();
+
+    let renderer = CliProgressObserver::new(CliProgressOptions {
+        progress: args.progress,
+        log_format: args.log_format,
+        quiet: args.quiet,
+        verbose: args.verbose,
+        timings: args.timings,
+        diagnostics: args.diagnostics,
+        gpu_stats: args.gpu_stats,
+        heartbeat_seconds: args.heartbeat_seconds,
+        events_jsonl: args.events_jsonl.clone(),
+    })?;
+    CliProgressObserver::install_ctrlc(&renderer)?;
+    let observer: Arc<dyn ProgressObserver> = renderer.clone();
 
     match args.model.as_str() {
         "wan:2.1-t2v-1.3b" | "wan2.1-t2v-1.3b" => {}
@@ -155,13 +223,17 @@ fn main() -> anyhow::Result<()> {
     }
 
     if !args.cpu {
-        println!(
+        eprintln!(
             "Device plan: compute={:?} text_encoder={:?} vae={:?} transformer={:?}",
             plan.compute, plan.text_encoder, plan.vae, plan.transformer_dtype
         );
     }
 
-    println!("Loading Wan pipeline from {} …", args.weights.display());
+    let load_started = Instant::now();
+    observer.on_event(&GenerationEvent::StageStarted {
+        stage: GenerationStage::LoadComponents,
+        message: format!("Loading Wan components from {}", args.weights.display()),
+    });
     let pipeline = WanPipeline::load_with_devices_and_scheduler(
         &args.weights,
         &plan.compute,
@@ -174,11 +246,15 @@ fn main() -> anyhow::Result<()> {
         args.scheduler_profile,
         args.scheduler_shift,
     )?;
+    observer.on_event(&GenerationEvent::StageFinished {
+        stage: GenerationStage::LoadComponents,
+        elapsed_secs: load_started.elapsed().as_secs_f64(),
+    });
     let mut adapter = WanPipelineAdapter::new(pipeline);
 
     let initial_latents = match &args.latents_json {
         Some(path) => {
-            println!("Loading initial latents from {} …", path.display());
+            eprintln!("Loading initial latents from {} …", path.display());
             Some(load_latents_json(path, &plan.compute)?)
         }
         None => None,
@@ -209,13 +285,16 @@ fn main() -> anyhow::Result<()> {
         negative_prompt_attention_mask: None,
     };
 
-    println!(
+    eprintln!(
         "Generating {}x{} video, {} frames, {} steps …",
         req.width, req.height, req.frames, req.steps
     );
-    let out = adapter.generate(req, &plan.compute)?;
+    let generation_started = Instant::now();
+    let out = adapter.generate_with_observer(req, &plan.compute, Arc::clone(&observer))?;
     let dims = out.frames.dims();
-    println!("Output tensor shape: {dims:?}");
+    if args.diagnostics {
+        eprintln!("Output tensor shape: {dims:?}");
+    }
 
     let output_dir = args
         .output
@@ -232,14 +311,17 @@ fn main() -> anyhow::Result<()> {
 
     let save_png = args.frames;
     let save_gif = args.gif || (args.output.is_none() && !args.frames);
-    export_video_output_with_mp4(
+    let output_path = args.output.clone();
+    export_video_output_with_mp4_options_and_observer(
         &out,
         &output_dir,
         PixelRange::NegOneToOne,
         save_png,
         save_gif,
-        args.output.as_deref(),
+        output_path.as_deref(),
         args.fps,
+        args.keep_partial,
+        observer.as_ref(),
     )?;
 
     if save_png {
@@ -248,9 +330,62 @@ fn main() -> anyhow::Result<()> {
     if save_gif {
         println!("Saved GIF to {}", output_dir.join("video.gif").display());
     }
-    if let Some(path) = args.output {
+    let generated_output = output_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .or_else(|| {
+            if save_png {
+                Some(output_dir.display().to_string())
+            } else if save_gif {
+                Some(output_dir.join("video.gif").display().to_string())
+            } else {
+                None
+            }
+        });
+
+    if let Some(path) = output_path.as_ref() {
         println!("Saved MP4 to {}", path.display());
     }
+
+    if args.dump_run_manifest {
+        let manifest_path = output_path.as_ref().map_or_else(
+            || output_dir.join("run.json"),
+            |path| path.with_extension("json"),
+        );
+        let manifest = RunManifest {
+            model: "Wan2.1-T2V-1.3B".to_string(),
+            backend: if args.cpu { "cpu" } else { "cuda" }.to_string(),
+            device: format!("{:?}", plan.compute),
+            dtype: format!("{:?}", plan.transformer_dtype),
+            width: out.width,
+            height: out.height,
+            frames: out.num_frames()?,
+            fps: args.fps,
+            steps: args.steps,
+            guidance_scale: args.guidance_scale,
+            seed: args.seed,
+            scheduler: args.scheduler_profile.to_string(),
+            total_seconds: generation_started.elapsed().as_secs_f64(),
+            peak_vram_bytes: renderer.peak_vram_bytes(),
+            output: generated_output.clone().unwrap_or_default(),
+        };
+        observer.on_event(&GenerationEvent::StageStarted {
+            stage: GenerationStage::Finalize,
+            message: format!("Writing run manifest to {}", manifest_path.display()),
+        });
+        let finalize_started = Instant::now();
+        write_run_manifest(&manifest_path, &manifest)?;
+        observer.on_event(&GenerationEvent::StageFinished {
+            stage: GenerationStage::Finalize,
+            elapsed_secs: finalize_started.elapsed().as_secs_f64(),
+        });
+        println!("Saved run manifest to {}", manifest_path.display());
+    }
+
+    observer.on_event(&GenerationEvent::GenerationFinished {
+        output: generated_output,
+        elapsed_secs: generation_started.elapsed().as_secs_f64(),
+    });
 
     Ok(())
 }

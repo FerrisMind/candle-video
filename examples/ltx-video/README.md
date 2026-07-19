@@ -60,6 +60,23 @@ cargo run --example ltx-video --release --features flash-attn,cudnn -- \
     --vae-tiling --vae-slicing
 ```
 
+### Structured progress, cancellation, and atomic output
+
+Both the LTX and Wan examples expose the same progress observer. Human
+progress is written to stderr, while the final output path stays on stdout:
+
+```bash
+cargo run --release --example ltx-video --features cuda,flash-attn -- \
+    --progress always --timings --gpu-stats --events-jsonl output/events.jsonl \
+    --dump-run-manifest --keep-partial
+```
+
+Use `--progress never --log-format json` for a machine-readable JSONL stream
+without terminal rendering. `Ctrl+C` requests cooperative cancellation between
+model passes; the current CPU/CUDA kernel is allowed to finish safely. GIF
+publication is atomic through `video.gif.partial`, which is removed on failure
+unless `--keep-partial` is supplied.
+
 ## Command-line Flags
 
 | Flag | Description | Default |
@@ -77,6 +94,8 @@ cargo run --example ltx-video --release --features flash-attn,cudnn -- \
 | `--vae-tiling` | Enable spatial VAE tiling | `false` |
 | `--vae-slicing` | Enable batch VAE slicing | `false` |
 | `--frames` | Save output as individual PNG frames (disables GIF) | `false` |
+| `--gif` | Explicitly select GIF output (default without `--frames`) | `false` |
+| `--fps` | GIF/output frame rate | `25` |
 | `--seed` | Random seed for reproducibility | Random |
 | `--cpu` | Run on CPU instead of GPU | `false` |
 | `--model-id` | HF model ID (used to download tokenizer if missing) | `"Lightricks/LTX-Video"` |
@@ -84,6 +103,15 @@ cargo run --example ltx-video --release --features flash-attn,cudnn -- \
 | `--unified-weights` | Path to unified safetensors file (official LTX format) | (None) |
 | `--rescaling-scale` | Override rescaling scale from preset | From version config |
 | `--stochastic-sampling` | Override stochastic sampling from preset | From version config |
+| `--progress` | `auto`, `always`, or `never` terminal rendering | `auto` |
+| `--log-format` | `human` or JSONL events on stderr | `human` |
+| `--events-jsonl` | Also write events to a JSONL file | (None) |
+| `--heartbeat-seconds` | Interval for long-operation heartbeat events | `5` |
+| `--timings` | Include stage elapsed times | `false` |
+| `--diagnostics`, `-v`, `-q` | Diagnostics, verbosity, or quiet human output | `false` |
+| `--gpu-stats` | Add best-effort `nvidia-smi` snapshots | `false` |
+| `--dump-run-manifest` | Write `output/run.json` atomically | `false` |
+| `--keep-partial` | Keep an incomplete `video.gif.partial` on failure | `false` |
 
 ## Video Size Requirements
 
