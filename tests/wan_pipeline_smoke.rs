@@ -9,10 +9,10 @@ use candle_video::models::wan::{
     WanDenoiseStack, WanGenerateRequest, WanPipeline, latent_shape_from_config, load_wan_config,
 };
 
-use wan_fixtures::wan_diffusers_root;
+use wan_fixtures::{wan_consolidated_root, wan_diffusers_root};
 
 fn wan_model_root() -> Option<PathBuf> {
-    wan_diffusers_root()
+    wan_consolidated_root().or_else(wan_diffusers_root)
 }
 
 fn transformer_fixture_embeds() -> Option<Tensor> {

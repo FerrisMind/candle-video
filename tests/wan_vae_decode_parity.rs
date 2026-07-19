@@ -18,10 +18,13 @@ fn wan_vae_fixture_dir() -> Option<PathBuf> {
 fn latent_denorm_math_matches_pipeline_formula() {
     let mean = vec![-0.7571_f32, 0.9653];
     let std = vec![2.8184_f32, 1.7708];
-    let z = vec![1.0_f32, 2.0];
+    // Flattened `[C,T,H,W]`: two values from channel 0, then two from channel 1.
+    let z = vec![1.0_f32, 2.0, 3.0, 4.0];
     let out = denormalize_latents_vec(&z, &mean, &std);
     assert!((out[0] - (1.0 * 2.8184 - 0.7571)).abs() < 1e-4);
-    assert!((out[1] - (2.0 * 1.7708 + 0.9653)).abs() < 1e-4);
+    assert!((out[1] - (2.0 * 2.8184 - 0.7571)).abs() < 1e-4);
+    assert!((out[2] - (3.0 * 1.7708 + 0.9653)).abs() < 1e-4);
+    assert!((out[3] - (4.0 * 1.7708 + 0.9653)).abs() < 1e-4);
 }
 
 #[test]

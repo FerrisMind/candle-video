@@ -3,22 +3,30 @@
 use std::path::PathBuf;
 
 pub fn wan_diffusers_root() -> Option<PathBuf> {
-    let candidates = [
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("CANDLE_VIDEO_WAN_DIFFUSERS_ROOT") {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.extend([
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models/Wan2.1-T2V-1.3B-Diffusers"),
         PathBuf::from("/home/mod479711/Downloads/models/Wan2.1-T2V-1.3B-Diffusers"),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../Wan2.1-T2V-1.3B-Diffusers"),
         PathBuf::from("/home/mod479711/Downloads/Wan2.1-T2V-1.3B-Diffusers"),
-    ];
+    ]);
     candidates
         .into_iter()
         .find(|p| p.join("model_index.json").exists())
 }
 
 pub fn wan_consolidated_root() -> Option<PathBuf> {
-    let candidates = [
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("CANDLE_VIDEO_WAN_MODEL_ROOT") {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.extend([
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models/Wan2.1-T2V-1.3B"),
         PathBuf::from("/home/mod479711/Downloads/models/Wan2.1-T2V-1.3B"),
-    ];
+    ]);
     candidates
         .into_iter()
         .find(|p| p.join("text_encoder_gguf").exists())

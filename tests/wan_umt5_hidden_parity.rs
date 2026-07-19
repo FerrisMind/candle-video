@@ -5,10 +5,7 @@ mod wan_fixtures;
 use std::path::PathBuf;
 
 use candle_core::{DType, Device, Tensor};
-use candle_transformers::models::t5::T5EncoderModel;
-use candle_video::models::ltx_video::loader::WeightLoader;
-use candle_video::models::wan::Umt5EncoderConfig;
-use candle_video::models::wan::loader::discover_safetensors;
+use candle_video::models::wan::Umt5TextEncoder;
 
 use wan_fixtures::wan_diffusers_root;
 
@@ -36,24 +33,7 @@ fn umt5_embed_tokens_match_hf_if_weights_present() {
 
     let device = Device::Cpu;
     let dir = root.join("text_encoder");
-    let shards = discover_safetensors(&dir).expect("shards");
-    let loader = WeightLoader::new(device.clone(), DType::F32);
-    let vb = loader.load_single(&shards[0]).expect("vb");
-
-    let cfg = candle_video::models::wan::configs::WanTextEncoderConfig {
-        d_model: 4096,
-        d_ff: 10240,
-        d_kv: 64,
-        num_heads: 64,
-        num_layers: 24,
-        vocab_size: 256_384,
-        model_type: "umt5".to_string(),
-        feed_forward_proj: "gated-gelu".to_string(),
-        layer_norm_epsilon: 1e-6,
-        dropout_rate: 0.1,
-    };
-    let t5_cfg = Umt5EncoderConfig::from(&cfg).to_candle_t5_config();
-    let mut model = T5EncoderModel::load(vb, &t5_cfg).expect("load");
+    let mut model = Umt5TextEncoder::load(&dir, &device, DType::F32).expect("load custom UMT5");
 
     // ids for "A cat walking in the snow"
     let ids = Tensor::new(&[320u32, 6283, 53049, 301, 312, 45540, 1], &device)
@@ -62,12 +42,12 @@ fn umt5_embed_tokens_match_hf_if_weights_present() {
         .expect("shape");
 
     // Access shared embedding via forward on ids - compare first token embed indirectly
-    let hidden = model.forward(&ids).expect("forward");
+    let hidden = model.forward_hidden_states(&ids).expect("forward");
     let got: Vec<f32> = hidden.flatten_all().unwrap().to_vec1().unwrap();
     eprintln!("hidden first8 {:?}", &got[..8]);
     eprintln!("ref   first8 {:?}", ref_first8);
 
-    // If hidden matches ref HF hidden, T5 blocks are fine; else embed or blocks wrong
+    assert_eq!(hidden.dims(), &[1, 7, 4096]);
     let hf_hidden_first8 = [
         0.0016440969_f32,
         -0.05930363,
@@ -84,4 +64,24 @@ fn umt5_embed_tokens_match_hf_if_weights_present() {
         .map(|(a, b)| (a - b).abs())
         .fold(0f32, f32::max);
     eprintln!("hidden max diff first8: {max}");
+    assert!(max < 0.02, "UMT5 first-token FP8 error too high: {max}");
+}
+
+#[test]
+fn scaled_fp8_loader_is_used_for_local_checkpoint_if_present() {
+    let root = match weights_root() {
+        Some(p) => p,
+        None => return,
+    };
+    let path = root
+        .join("text_encoder")
+        .join("umt5_xxl_fp8_e4m3fn_scaled.safetensors");
+    if !path.exists() {
+        return;
+    }
+    let device = Device::Cpu;
+    let encoder = Umt5TextEncoder::load(&root.join("text_encoder"), &device, DType::F16)
+        .expect("scaled FP8 UMT5 must load through the native backend");
+    assert!(!encoder.is_quantized());
+    assert_eq!(encoder.config().d_model, 4096);
 }

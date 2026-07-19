@@ -139,14 +139,14 @@ fn transformer_block0_forward_matches_reference_if_fixture_present() {
     let expected = load_tensor(&to_f32("output"), &out_shape, &device);
 
     let latent_5d = latent.reshape(latent_shape).expect("latent reshape");
-    let (cos, sin) = rope.forward(&latent_5d).expect("rope");
+    let rotary_emb = rope.forward(&latent_5d).expect("rope");
 
     let out = block
         .forward(
             &hidden_states,
             &encoder_hidden_states,
             &timestep_proj,
-            (&cos, &sin),
+            &rotary_emb,
         )
         .expect("forward");
 
