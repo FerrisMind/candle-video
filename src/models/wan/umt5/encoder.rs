@@ -244,7 +244,15 @@ impl Module for T5LayerFF {
         let ys = self.layer_norm.forward(xs)?;
         let ys = match &self.dense_act {
             Some(dense_act) => dense_act.forward(&ys)?,
-            None => self.gated_dense_act.as_ref().unwrap().forward(&ys)?,
+            None => self
+                .gated_dense_act
+                .as_ref()
+                .ok_or_else(|| {
+                    candle_core::Error::Msg(
+                        "UMT5 feed-forward block has no gated activation module".into(),
+                    )
+                })?
+                .forward(&ys)?,
         };
         let xs = (xs + ys)?;
         Ok(xs)
@@ -585,7 +593,12 @@ impl T5Block {
         let (mut xs, position_bias) = self.self_attn.forward(xs, position_bias, mask.as_ref())?;
         // TODO: clamp for f16?
         if let Some(cross_attn) = &mut self.cross_attn {
-            (xs, _) = cross_attn.forward(&xs, None, encoder_hidden_states.unwrap())?;
+            let encoder_hidden_states = encoder_hidden_states.ok_or_else(|| {
+                candle_core::Error::Msg(
+                    "UMT5 cross-attention requires encoder hidden states".into(),
+                )
+            })?;
+            (xs, _) = cross_attn.forward(&xs, None, encoder_hidden_states)?;
             // TODO: clamp for f16?
         }
         let xs = self.ff.forward(&xs)?;

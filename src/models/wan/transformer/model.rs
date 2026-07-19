@@ -7,7 +7,10 @@ use candle_nn::{Module, VarBuilder, linear_b};
 
 use crate::models::ltx_video::loader::{LoaderError, WeightLoader};
 use crate::models::wan::configs::WanTransformerConfig;
-use crate::models::wan::loader::{WanLayout, discover_safetensors, load_transformer_var_builder};
+use crate::models::wan::loader::{
+    WanComponentPaths, WanLayout, discover_safetensors, load_transformer_var_builder,
+    validate_transformer_weights,
+};
 
 use super::block::WanTransformerBlock;
 use super::embeddings::WanConditionEmbedder;
@@ -108,6 +111,9 @@ impl WanTransformer3DModel {
         let dir = transformer_dir.as_ref();
         let config: WanTransformerConfig =
             crate::models::ltx_video::loader::load_model_config(dir.join("config.json"))?;
+        let root = dir.parent().unwrap_or(dir);
+        let layout = WanLayout::Diffusers(WanComponentPaths::from_root(root));
+        validate_transformer_weights(&layout, &config)?;
         let shards = discover_safetensors(dir)?;
         let loader = WeightLoader::new(device.clone(), dtype);
         let vb = if shards.len() == 1 {
@@ -128,6 +134,7 @@ impl WanTransformer3DModel {
         dtype: DType,
         config: &WanTransformerConfig,
     ) -> std::result::Result<Self, LoaderError> {
+        validate_transformer_weights(layout, config)?;
         let vb = load_transformer_var_builder(layout, device, dtype)?;
         Self::from_var_builder(config.clone(), vb, device).map_err(LoaderError::Candle)
     }

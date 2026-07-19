@@ -7,7 +7,9 @@ use candle_nn::VarBuilder;
 
 use crate::models::ltx_video::loader::{LoaderError, WeightLoader};
 use crate::models::wan::configs::WanVaeConfig;
-use crate::models::wan::loader::{WanLayout, discover_safetensors, load_vae_var_builder};
+use crate::models::wan::loader::{
+    WanLayout, discover_safetensors, load_vae_var_builder, validate_vae_weights,
+};
 
 use super::causal_conv3d::{FeatCache, WanCausalConv3d};
 use super::decoder::WanDecoder3d;
@@ -105,6 +107,7 @@ impl AutoencoderKLWan {
         device: &Device,
         dtype: DType,
     ) -> std::result::Result<Self, LoaderError> {
+        validate_vae_weights(layout, config)?;
         let vb = load_vae_var_builder(layout, device, dtype)?;
         Self::from_var_builder(config.clone(), vb, device.clone(), dtype)
             .map_err(LoaderError::Candle)
@@ -119,7 +122,7 @@ impl AutoencoderKLWan {
         self.use_tiling = true;
     }
 
-    /// Larger tiles for 12 GB GPUs (fewer decoder passes; falls back to 256 on OOM).
+    /// Larger explicit tile profile for constrained GPUs.
     pub fn enable_large_tiling(&mut self) {
         self.use_tiling = true;
         self.tile_sample_min_height = 512;
@@ -147,33 +150,7 @@ impl AutoencoderKLWan {
         if self.use_tiling {
             return self.tiled_decode(&z);
         }
-        match self.decode_full(&z) {
-            Ok(out) => Ok(out),
-            Err(e) if is_cuda_oom(&e) => self.tiled_decode_adaptive(&z),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Try 512px tiles first (fits ~4 GB peak on 3060), then Diffusers 256px defaults.
-    fn tiled_decode_adaptive(&mut self, z: &Tensor) -> Result<Tensor> {
-        let saved = (
-            self.tile_sample_min_height,
-            self.tile_sample_min_width,
-            self.tile_sample_stride_height,
-            self.tile_sample_stride_width,
-        );
-        self.enable_large_tiling();
-        match self.tiled_decode(z) {
-            Ok(out) => Ok(out),
-            Err(e) if is_cuda_oom(&e) => {
-                self.tile_sample_min_height = saved.0.min(256);
-                self.tile_sample_min_width = saved.1.min(256);
-                self.tile_sample_stride_height = saved.2.min(192);
-                self.tile_sample_stride_width = saved.3.min(192);
-                self.tiled_decode(z)
-            }
-            Err(e) => Err(e),
-        }
+        self.decode_full(&z)
     }
 
     fn decode_full(&mut self, z: &Tensor) -> Result<Tensor> {
@@ -265,10 +242,6 @@ impl AutoencoderKLWan {
     }
 }
 
-fn is_cuda_oom(err: &candle_core::Error) -> bool {
-    format!("{err}").contains("OUT_OF_MEMORY")
-}
-
 fn blend_weights(blend: usize, device: &Device, dim: usize) -> Result<(Tensor, Tensor)> {
     if blend == 0 {
         let one = Tensor::ones((), DType::F32, device)?;
@@ -334,12 +307,28 @@ fn blend_v(
     Tensor::cat(&[&mixed, &b_tail], 3)
 }
 
-/// Reference latent denormalization for tests: `z / std + mean`.
+/// Reference denormalization for a flattened single-batch `[C,T,H,W]` latent:
+/// `z * std + mean`, with channel blocks kept contiguous as in Candle's NCTHW layout.
 #[allow(dead_code)]
 pub fn denormalize_latents_vec(z: &[f32], mean: &[f32], std: &[f32]) -> Vec<f32> {
+    assert_eq!(
+        mean.len(),
+        std.len(),
+        "latent statistics must have equal lengths"
+    );
+    assert!(!mean.is_empty(), "latent statistics must not be empty");
+    assert_eq!(
+        z.len() % mean.len(),
+        0,
+        "flattened latent length must be divisible by channel count"
+    );
+    let channel_stride = z.len() / mean.len();
     z.iter()
         .enumerate()
-        .map(|(i, &v)| v * std[i % std.len()] + mean[i % mean.len()])
+        .map(|(i, &v)| {
+            let channel = i / channel_stride;
+            v * std[channel] + mean[channel]
+        })
         .collect()
 }
 
@@ -354,6 +343,14 @@ mod tests {
         let b = Tensor::ones((1, 3, 1, 4, 4), DType::F32, &device).unwrap();
         let w = blend_weights(0, &device, 4).unwrap();
         let out = blend_h(&a, &b, 0, &w).unwrap();
-        assert_eq!(out.to_vec3::<f32>().unwrap()[0][0][0], 1.0);
+        assert_eq!(out.dims(), b.dims());
+        assert!(
+            out.flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+                .into_iter()
+                .all(|value| value == 1.0)
+        );
     }
 }

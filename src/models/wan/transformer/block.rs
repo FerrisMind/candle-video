@@ -68,14 +68,18 @@ impl WanTransformerBlock {
             return Ok(self.table_source.clone());
         }
         {
-            let guard = self.table_cache.read().expect("table_cache poisoned");
+            let guard = self.table_cache.read().map_err(|_| {
+                candle_core::Error::Msg("transformer modulation cache lock is poisoned".into())
+            })?;
             for (dt, t) in guard.iter() {
                 if *dt == dtype {
                     return Ok(t.clone());
                 }
             }
         }
-        let mut guard = self.table_cache.write().expect("table_cache poisoned");
+        let mut guard = self.table_cache.write().map_err(|_| {
+            candle_core::Error::Msg("transformer modulation cache lock is poisoned".into())
+        })?;
         // Re-check in case another thread raced us.
         for (dt, t) in guard.iter() {
             if *dt == dtype {
@@ -142,7 +146,7 @@ impl WanTransformerBlock {
         let attn_out = self.attn1.forward(&norm_hidden, None, Some(rotary_emb))?;
         let mut hidden_states = (hs_f32
             + attn_out.to_dtype(DType::F32)?.broadcast_mul(&gate_msa)?)?
-            .to_dtype(hidden_states.dtype())?;
+        .to_dtype(hidden_states.dtype())?;
 
         let attn_out = if self.cross_attn_norm {
             let norm_hidden = self
@@ -198,7 +202,9 @@ impl WanTransformerBlock {
         // and one full-tensor fill per block per step.
         let s_msa_1 = scale_msa.affine(1.0, 1.0)?;
         let mut norm_hidden = self.norm1.forward(hidden_states)?;
-        norm_hidden = norm_hidden.broadcast_mul(&s_msa_1)?.broadcast_add(&shift_msa)?;
+        norm_hidden = norm_hidden
+            .broadcast_mul(&s_msa_1)?
+            .broadcast_add(&shift_msa)?;
 
         let attn_out = self.attn1.forward(&norm_hidden, None, Some(rotary_emb))?;
         let attn_out = attn_out.broadcast_mul(&gate_msa)?;
@@ -216,7 +222,9 @@ impl WanTransformerBlock {
 
         let c_s_msa_1 = c_scale_msa.affine(1.0, 1.0)?;
         norm_hidden = self.norm3.forward(&hidden_states)?;
-        norm_hidden = norm_hidden.broadcast_mul(&c_s_msa_1)?.broadcast_add(&c_shift_msa)?;
+        norm_hidden = norm_hidden
+            .broadcast_mul(&c_s_msa_1)?
+            .broadcast_add(&c_shift_msa)?;
         let ff_out = self.ffn.forward(&norm_hidden)?;
         let ff_out = ff_out.broadcast_mul(&c_gate_msa)?;
         let hidden_states = hidden_states.add(&ff_out)?;

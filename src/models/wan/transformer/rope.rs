@@ -56,14 +56,20 @@ impl WanRotaryEmb {
             return Ok((self.cos_even.clone(), self.sin_odd.clone()));
         }
         {
-            let guard = self.cast_cache.read().expect("rope cast cache poisoned");
+            let guard = self
+                .cast_cache
+                .read()
+                .map_err(|_| candle_core::Error::Msg("RoPE cast cache lock is poisoned".into()))?;
             for (dt, pair) in guard.iter() {
                 if *dt == compute {
                     return Ok(pair.clone());
                 }
             }
         }
-        let mut guard = self.cast_cache.write().expect("rope cast cache poisoned");
+        let mut guard = self
+            .cast_cache
+            .write()
+            .map_err(|_| candle_core::Error::Msg("RoPE cast cache lock is poisoned".into()))?;
         for (dt, pair) in guard.iter() {
             if *dt == compute {
                 return Ok(pair.clone());

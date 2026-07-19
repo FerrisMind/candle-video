@@ -164,7 +164,10 @@ impl WanCausalConv3d {
                     Some(prev) => prev.add(&yt)?,
                 });
             }
-            ys.push(acc.expect("kt>=1").unsqueeze(2)?);
+            let acc = acc.ok_or_else(|| {
+                candle_core::Error::Msg("causal convolution produced no temporal slices".into())
+            })?;
+            ys.push(acc.unsqueeze(2)?);
         }
         let y = cat_time(&ys)?;
         let bias = self.bias.reshape((1, self.bias.dims1()?, 1, 1, 1))?;
