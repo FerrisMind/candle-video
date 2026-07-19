@@ -45,6 +45,33 @@ pub enum LoaderError {
     #[error("Missing required tensors: {missing:?}")]
     MissingTensors { missing: Vec<String> },
 
+    #[error("Duplicate mapped tensor `{mapped}`: `{first}` and `{second}`")]
+    DuplicateMappedTensor {
+        mapped: String,
+        first: String,
+        second: String,
+    },
+
+    #[error("Unexpected tensors: {names:?}")]
+    UnexpectedTensors { names: Vec<String> },
+
+    #[error("Tensor `{tensor}` is assigned to shard `{expected}` but found in `{actual}`")]
+    ShardTensorMismatch {
+        tensor: String,
+        expected: String,
+        actual: String,
+    },
+
+    #[error("Tensor shape mismatch for `{tensor}`: expected {expected:?}, got {actual:?}")]
+    TensorShapeMismatch {
+        tensor: String,
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+
+    #[error("Unsupported dtype for tensor `{tensor}`: {dtype}")]
+    UnsupportedTensorDtype { tensor: String, dtype: String },
+
     #[error("Invalid safetensors file: {path}")]
     InvalidSafetensors {
         path: String,

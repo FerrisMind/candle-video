@@ -15,5 +15,6 @@ pub use engine::{
 };
 pub use models::ltx_video::*;
 pub use models::wan::{
-    WanDenoiseStack, WanGenerateRequest, WanPipeline, WanPipelineOutput, latent_shape_from_config,
+    WanDenoiseStack, WanGenerateRequest, WanPipeline, WanPipelineOutput, WanSchedulerProfile,
+    latent_shape_from_config, write_wan_manifest,
 };

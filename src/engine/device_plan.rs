@@ -65,11 +65,7 @@ impl WanDevicePlan {
             None => DType::F16,
         };
 
-        let vae_dtype = if compute.is_cuda() {
-            DType::F16
-        } else {
-            DType::F32
-        };
+        let vae_dtype = wan_vae_baseline_dtype();
 
         Ok(Self {
             compute,
@@ -81,6 +77,12 @@ impl WanDevicePlan {
             sequential_gpu,
         })
     }
+}
+
+/// Wan 2.1 VAE baseline dtype. The local checkpoint and Diffusers reference use FP32;
+/// lower precision is an explicit future parity profile, never an implicit fallback.
+fn wan_vae_baseline_dtype() -> DType {
+    DType::F32
 }
 
 /// Runtime checks for CUDA Wan inference.
@@ -112,11 +114,21 @@ pub fn ensure_wan_cuda_requirements(device: &Device, seq_len: usize) -> Result<(
 pub fn wan_patch_token_count(height: usize, width: usize, num_frames: usize) -> usize {
     let temporal = 4usize;
     let spatial = 8usize;
-    let num_latent_frames = (num_frames - 1) / temporal + 1;
+    let num_latent_frames = num_frames.saturating_sub(1) / temporal + 1;
     let lh = height / spatial;
     let lw = width / spatial;
     let p_t = 1usize;
     let p_h = 2usize;
     let p_w = 2usize;
     (num_latent_frames / p_t) * (lh / p_h) * (lw / p_w)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wan_vae_baseline_uses_f32() {
+        assert_eq!(wan_vae_baseline_dtype(), DType::F32);
+    }
 }

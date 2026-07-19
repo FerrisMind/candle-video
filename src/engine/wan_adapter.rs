@@ -38,7 +38,11 @@ impl VideoPipeline for WanPipelineAdapter {
         }
 
         let wan_req = WanGenerateRequest {
-            prompt: Some(req.prompt.clone()),
+            prompt: if req.prompt_embeds.is_some() {
+                None
+            } else {
+                Some(req.prompt.clone())
+            },
             negative_prompt: req.negative_prompt.clone(),
             height: req.height,
             width: req.width,
@@ -78,11 +82,12 @@ impl VideoPipeline for WanPipelineAdapter {
         };
 
         let out = self.pipeline.generate(wan_req)?;
+        let (_, _, _, height, width) = out.frames.dims5()?;
         Ok(VideoOutput {
             frames: out.frames,
             frame_rate: req.frame_rate,
-            width: req.width,
-            height: req.height,
+            width,
+            height,
         })
     }
 }

@@ -62,7 +62,7 @@ pub fn remap_vae_state_dict(native: HashMap<String, Tensor>) -> HashMap<String, 
     out
 }
 
-fn remap_vae_key(key: &str) -> Option<String> {
+pub(crate) fn remap_vae_key(key: &str) -> Option<String> {
     const MIDDLE: &[(&str, &str)] = &[
         (
             "encoder.middle.0.residual.0.gamma",
@@ -255,7 +255,10 @@ fn remap_decoder_upsample_key(key: &str) -> Option<String> {
     if parts.len() < 4 {
         return Some(key.to_string());
     }
-    let block_idx: usize = parts[2].parse().unwrap_or(0);
+    let block_idx = match parts[2].parse::<usize>() {
+        Ok(index) => index,
+        Err(_) => return Some(key.to_string()),
+    };
 
     if key.contains("residual") {
         let (new_block_idx, resnet_idx) = match block_idx {

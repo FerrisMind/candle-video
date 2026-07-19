@@ -16,12 +16,17 @@ def load_safetensors_shapes(path: Path) -> dict[str, list[int]]:
     return {k: v["shape"] for k, v in header.items() if k != "__metadata__"}
 
 
-def manual_decode_stub(latent: list[float], mean: list[float], std: list[float]) -> list[float]:
+def manual_decode_stub(
+    latent: list[float], mean: list[float], std: list[float], shape: list[int]
+) -> list[float]:
     """Latent denorm only (no torch/diffusers required)."""
+    if len(shape) != 5 or shape[0] != 1 or shape[1] != len(mean):
+        raise ValueError(f"expected [1,C,T,H,W] with C={len(mean)}, got {shape}")
+    channel_stride = shape[2] * shape[3] * shape[4]
     out = []
-    c = len(mean)
-    for i, v in enumerate(latent):
-        out.append(v / std[i % c] + mean[i % c])
+    for i, value in enumerate(latent):
+        channel = i // channel_stride
+        out.append(value * std[channel] + mean[channel])
     return out
 
 
@@ -43,11 +48,14 @@ def main() -> None:
     random.seed(args.seed)
     z_dim = cfg["z_dim"]
     latent = [random.gauss(0, 1) for _ in range(z_dim * 4 * 4)]
-    denorm = manual_decode_stub(latent, cfg["latents_mean"], cfg["latents_std"])
+    latent_shape = [1, z_dim, 1, 4, 4]
+    denorm = manual_decode_stub(
+        latent, cfg["latents_mean"], cfg["latents_std"], latent_shape
+    )
 
     fixture: dict = {
         "z_dim": z_dim,
-        "latent_shape": [1, z_dim, 1, 4, 4],
+        "latent_shape": latent_shape,
         "latent": latent,
         "denormalized_latent": denorm,
         "decoder_weight_count": sum(1 for k in shapes if k.startswith("decoder.")),
