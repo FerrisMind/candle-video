@@ -31,6 +31,8 @@ tracing-tracy = { version = "0.11.4", optional = true }
 glob = "0.3.3"
 statrs = "0.18.0"
 gif = "0.14.2"
+openh264 = "0.9.7"
+muxide = "0.2.5"
 rayon = "1.12.0"
 rand = "0.10.1"
 regex = "1.12.3"
@@ -89,6 +91,14 @@ path = "examples/ltx-video/main.rs"
 [[example]]
 name = "video-generate"
 path = "examples/video-generate/main.rs"
+
+[[example]]
+name = "wan21-t2v"
+path = "examples/wan21-t2v.rs"
+
+[[example]]
+name = "wan-manifest"
+path = "examples/wan-manifest.rs"
 
 [[example]]
 name = "wan-profile"

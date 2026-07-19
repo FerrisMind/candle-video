@@ -106,10 +106,10 @@ enum Scenario {
 fn main() -> anyhow::Result<()> {
     init_tracing();
     let mut args = Args::parse();
-    if let Ok(w) = std::env::var("WAN_WEIGHTS") {
-        if !w.is_empty() {
-            args.weights = PathBuf::from(w);
-        }
+    if let Ok(w) = std::env::var("WAN_WEIGHTS")
+        && !w.is_empty()
+    {
+        args.weights = PathBuf::from(w);
     }
 
     if !args.weights.join("model_index.json").exists() {
@@ -186,8 +186,8 @@ fn run_synthetic(device: &Device, seq_len: usize, iters: usize) -> anyhow::Resul
     let head_dim = 128usize;
     let b = 1usize;
 
-    for i in 0..iters {
-        candle_video::profile_zone!("synthetic_hot_op", iter = i);
+    for _i in 0..iters {
+        candle_video::profile_zone!("synthetic_hot_op", iter = _i);
         let q = Tensor::randn(0f32, 1f32, (b, seq_len, heads, head_dim), device)?;
         let k = q.clone();
         let v = q.clone();
@@ -273,7 +273,7 @@ fn run_prefill(
 
     vram::log_vram("prefill_start");
     let t0 = Instant::now();
-    let mut stack = WanDenoiseStack::load_with_vae_device(
+    let stack = WanDenoiseStack::load_with_vae_device(
         weights,
         &plan.compute,
         &plan.vae,

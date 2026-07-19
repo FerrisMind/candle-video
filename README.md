@@ -14,6 +14,9 @@
 
 Rust library for AI video generation built on the [Candle](https://github.com/huggingface/candle) ML framework. High-performance, standalone video generation inference without Python runtime dependencies.
 
+Wan2.1 T2V 1.3B support, scheduler profiles, parity evidence, and native MP4
+export are documented in [docs/wan21.md](docs/wan21.md).
+
 ---
 
 ## 📚 Table of Contents

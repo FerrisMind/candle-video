@@ -328,7 +328,7 @@ fn main() -> anyhow::Result<()> {
             println!("\nDownloading models from HuggingFace: {}", args.model_id);
             let api = Api::new()?;
             let repo = api.repo(Repo::with_revision(
-                args.model_id.clone().into(),
+                args.model_id.clone(),
                 RepoType::Model,
                 "main".into(),
             ));
@@ -368,11 +368,8 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    if args.local_weights.is_some() {
-        println!(
-            "\nLoading models from local path: {}",
-            args.local_weights.as_ref().unwrap()
-        );
+    if let Some(local_weights) = args.local_weights.as_ref() {
+        println!("\nLoading models from local path: {}", local_weights);
     }
 
     // 2. Step 1: Encode prompts with T5 (or load from file)
