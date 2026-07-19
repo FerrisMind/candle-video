@@ -11,6 +11,9 @@ use openh264::formats::{RgbSliceU8, YUVBuffer};
 use rayon::prelude::*;
 
 use crate::engine::video::VideoOutput;
+use crate::engine::{
+    GenerationEvent, GenerationStage, NoopProgressObserver, ProgressObserver, ensure_not_cancelled,
+};
 
 /// Pixel value range of the input tensor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,8 +55,23 @@ pub fn save_png_frames(
     height: usize,
     output_dir: impl AsRef<Path>,
 ) -> Result<()> {
+    save_png_frames_with_observer(frame_data, width, height, output_dir, None)
+}
+
+/// Write PNG frames while optionally publishing progress and cancellation.
+pub fn save_png_frames_with_observer(
+    frame_data: &[Vec<u8>],
+    width: usize,
+    height: usize,
+    output_dir: impl AsRef<Path>,
+    observer: Option<&dyn ProgressObserver>,
+) -> Result<()> {
     let output_dir = output_dir.as_ref();
+    std::fs::create_dir_all(output_dir).map_err(candle_core::Error::wrap)?;
     for (idx, data) in frame_data.iter().enumerate() {
+        if let Some(observer) = observer {
+            ensure_not_cancelled(observer)?;
+        }
         let path = output_dir.join(format!("frame_{idx:04}.png"));
         image::save_buffer(
             &path,
@@ -63,6 +81,14 @@ pub fn save_png_frames(
             image::ColorType::Rgb8,
         )
         .map_err(candle_core::Error::wrap)?;
+        if let Some(observer) = observer {
+            observer.on_event(&GenerationEvent::StageProgress {
+                stage: GenerationStage::EncodeVideo,
+                current: (idx + 1) as u64,
+                total: Some(frame_data.len() as u64),
+                message: Some(format!("{} / {} frames", idx + 1, frame_data.len())),
+            });
+        }
     }
     Ok(())
 }
@@ -75,10 +101,106 @@ pub fn save_gif(
     output_path: impl AsRef<Path>,
     frame_delay: u16,
 ) -> Result<()> {
+    save_gif_atomic(frame_data, width, height, output_path, frame_delay, false)
+}
+
+/// Encode a GIF through a sibling `.partial` file and publish it after the
+/// animation has been finalized successfully.
+pub fn save_gif_atomic(
+    frame_data: &[Vec<u8>],
+    width: usize,
+    height: usize,
+    output_path: impl AsRef<Path>,
+    frame_delay: u16,
+    keep_partial: bool,
+) -> Result<()> {
+    save_gif_atomic_with_observer(
+        frame_data,
+        width,
+        height,
+        output_path,
+        frame_delay,
+        keep_partial,
+        None,
+    )
+}
+
+/// Atomic GIF export with optional per-frame progress and cancellation.
+pub fn save_gif_atomic_with_observer(
+    frame_data: &[Vec<u8>],
+    width: usize,
+    height: usize,
+    output_path: impl AsRef<Path>,
+    frame_delay: u16,
+    keep_partial: bool,
+    observer: Option<&dyn ProgressObserver>,
+) -> Result<()> {
     let output_path = output_path.as_ref();
+    let partial_path = std::path::PathBuf::from(format!("{}.partial", output_path.display()));
+    let result = write_gif_file(
+        frame_data,
+        width,
+        height,
+        &partial_path,
+        frame_delay,
+        observer,
+    )
+    .and_then(|_| {
+        if output_path.exists() {
+            std::fs::remove_file(output_path).map_err(candle_core::Error::wrap)?;
+        }
+        std::fs::rename(&partial_path, output_path).map_err(candle_core::Error::wrap)
+    });
+
+    if result.is_err() && !keep_partial {
+        let _ = std::fs::remove_file(&partial_path);
+    }
+    result
+}
+
+fn write_gif_file(
+    frame_data: &[Vec<u8>],
+    width: usize,
+    height: usize,
+    output_path: &Path,
+    frame_delay: u16,
+    observer: Option<&dyn ProgressObserver>,
+) -> Result<()> {
+    if frame_data.is_empty() {
+        candle_core::bail!("GIF export requires at least one frame");
+    }
+    if width == 0 || height == 0 {
+        candle_core::bail!("GIF dimensions must be positive, got {width}x{height}");
+    }
+    let expected_len = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| candle_core::Error::Msg("GIF frame dimensions overflow".into()))?;
+    for (index, frame) in frame_data.iter().enumerate() {
+        if frame.len() != expected_len {
+            candle_core::bail!(
+                "GIF frame {} has {} RGB bytes, expected {} for {}x{}",
+                index,
+                frame.len(),
+                expected_len,
+                width,
+                height
+            );
+        }
+    }
+    let width = u16::try_from(width)
+        .map_err(|_| candle_core::Error::Msg(format!("GIF width {width} exceeds u16")))?;
+    let height = u16::try_from(height)
+        .map_err(|_| candle_core::Error::Msg(format!("GIF height {height} exceeds u16")))?;
+    if let Some(parent) = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(candle_core::Error::wrap)?;
+    }
     let mut file = File::create(output_path).map_err(candle_core::Error::wrap)?;
-    let mut encoder = Encoder::new(&mut file, width as u16, height as u16, &[])
-        .map_err(candle_core::Error::wrap)?;
+    let mut encoder =
+        Encoder::new(&mut file, width, height, &[]).map_err(candle_core::Error::wrap)?;
     encoder
         .set_repeat(Repeat::Infinite)
         .map_err(candle_core::Error::wrap)?;
@@ -86,16 +208,27 @@ pub fn save_gif(
     let gif_frames: Vec<_> = frame_data
         .par_iter()
         .map(|data| {
-            let mut frame = gif::Frame::from_rgb_speed(width as u16, height as u16, data, 30);
+            let mut frame = gif::Frame::from_rgb_speed(width, height, data, 30);
             frame.delay = frame_delay;
             frame
         })
         .collect();
 
-    for frame in gif_frames {
+    for (index, frame) in gif_frames.iter().enumerate() {
+        if let Some(observer) = observer {
+            ensure_not_cancelled(observer)?;
+        }
         encoder
-            .write_frame(&frame)
+            .write_frame(frame)
             .map_err(candle_core::Error::wrap)?;
+        if let Some(observer) = observer {
+            observer.on_event(&GenerationEvent::StageProgress {
+                stage: GenerationStage::EncodeVideo,
+                current: (index + 1) as u64,
+                total: Some(frame_data.len() as u64),
+                message: Some(format!("{} / {} frames", index + 1, frame_data.len())),
+            });
+        }
     }
     Ok(())
 }
@@ -112,6 +245,64 @@ pub fn save_mp4(
     height: usize,
     fps: u32,
     output_path: impl AsRef<Path>,
+) -> Result<()> {
+    save_mp4_atomic(frame_data, width, height, fps, output_path, false)
+}
+
+/// Encode an MP4 through a sibling `.partial` file and publish it after the
+/// container has been finalized successfully.
+pub fn save_mp4_atomic(
+    frame_data: &[Vec<u8>],
+    width: usize,
+    height: usize,
+    fps: u32,
+    output_path: impl AsRef<Path>,
+    keep_partial: bool,
+) -> Result<()> {
+    save_mp4_atomic_with_observer(
+        frame_data,
+        width,
+        height,
+        fps,
+        output_path,
+        keep_partial,
+        None,
+    )
+}
+
+/// Atomic MP4 export with optional per-frame progress events.
+pub fn save_mp4_atomic_with_observer(
+    frame_data: &[Vec<u8>],
+    width: usize,
+    height: usize,
+    fps: u32,
+    output_path: impl AsRef<Path>,
+    keep_partial: bool,
+    observer: Option<&dyn ProgressObserver>,
+) -> Result<()> {
+    let output_path = output_path.as_ref();
+    let partial_path = std::path::PathBuf::from(format!("{}.partial", output_path.display()));
+    let result =
+        write_mp4_file(frame_data, width, height, fps, &partial_path, observer).and_then(|_| {
+            if output_path.exists() {
+                std::fs::remove_file(output_path).map_err(candle_core::Error::wrap)?;
+            }
+            std::fs::rename(&partial_path, output_path).map_err(candle_core::Error::wrap)
+        });
+
+    if result.is_err() && !keep_partial {
+        let _ = std::fs::remove_file(&partial_path);
+    }
+    result
+}
+
+fn write_mp4_file(
+    frame_data: &[Vec<u8>],
+    width: usize,
+    height: usize,
+    fps: u32,
+    output_path: &Path,
+    observer: Option<&dyn ProgressObserver>,
 ) -> Result<()> {
     if frame_data.is_empty() {
         candle_core::bail!("MP4 export requires at least one frame");
@@ -143,7 +334,6 @@ pub fn save_mp4(
         }
     }
 
-    let output_path = output_path.as_ref();
     if let Some(parent) = output_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -174,6 +364,14 @@ pub fn save_mp4(
             .map_err(|error| {
                 candle_core::Error::Msg(format!("MP4 muxing frame {index} failed: {error}"))
             })?;
+        if let Some(observer) = observer {
+            observer.on_event(&GenerationEvent::StageProgress {
+                stage: GenerationStage::EncodeVideo,
+                current: (index + 1) as u64,
+                total: Some(frame_data.len() as u64),
+                message: Some(format!("{} / {} frames", index + 1, frame_data.len())),
+            });
+        }
     }
 
     muxer
@@ -215,15 +413,81 @@ pub fn export_video_output_with_mp4(
     mp4_path: Option<&Path>,
     fps: usize,
 ) -> Result<()> {
+    export_video_output_with_mp4_options(
+        output,
+        output_dir,
+        pixel_range,
+        save_png,
+        write_gif,
+        mp4_path,
+        fps,
+        false,
+    )
+}
+
+/// Export video frames and optionally publish an atomic MP4.
+#[allow(clippy::too_many_arguments)]
+pub fn export_video_output_with_mp4_options(
+    output: &VideoOutput,
+    output_dir: impl AsRef<Path>,
+    pixel_range: PixelRange,
+    save_png: bool,
+    write_gif: bool,
+    mp4_path: Option<&Path>,
+    fps: usize,
+    keep_partial: bool,
+) -> Result<()> {
+    let observer = NoopProgressObserver;
+    export_video_output_with_mp4_options_and_observer(
+        output,
+        output_dir,
+        pixel_range,
+        save_png,
+        write_gif,
+        mp4_path,
+        fps,
+        keep_partial,
+        &observer,
+    )
+}
+
+/// Export video frames with an observer for machine-readable output progress.
+#[allow(clippy::too_many_arguments)]
+pub fn export_video_output_with_mp4_options_and_observer(
+    output: &VideoOutput,
+    output_dir: impl AsRef<Path>,
+    pixel_range: PixelRange,
+    save_png: bool,
+    write_gif: bool,
+    mp4_path: Option<&Path>,
+    fps: usize,
+    keep_partial: bool,
+    observer: &dyn ProgressObserver,
+) -> Result<()> {
     let output_dir = output_dir.as_ref();
     if !output_dir.exists() {
         std::fs::create_dir_all(output_dir).map_err(candle_core::Error::wrap)?;
     }
 
+    let postprocess_started = std::time::Instant::now();
+    observer.on_event(&GenerationEvent::StageStarted {
+        stage: GenerationStage::PostProcess,
+        message: "Converting decoded tensor to RGB8 frames".to_string(),
+    });
     let (frame_data, w, h) = tensor_to_rgb_frames(&output.frames, pixel_range)?;
+    observer.on_event(&GenerationEvent::StageFinished {
+        stage: GenerationStage::PostProcess,
+        elapsed_secs: postprocess_started.elapsed().as_secs_f64(),
+    });
+
+    let encode_started = std::time::Instant::now();
+    observer.on_event(&GenerationEvent::StageStarted {
+        stage: GenerationStage::EncodeVideo,
+        message: format!("Encoding {} frames", frame_data.len()),
+    });
 
     if save_png {
-        save_png_frames(&frame_data, w, h, output_dir)?;
+        save_png_frames_with_observer(&frame_data, w, h, output_dir, Some(observer))?;
     }
 
     if write_gif {
@@ -240,8 +504,21 @@ pub fn export_video_output_with_mp4(
     if let Some(mp4_path) = mp4_path {
         let fps = u32::try_from(fps)
             .map_err(|_| candle_core::Error::Msg(format!("FPS {fps} does not fit in u32")))?;
-        save_mp4(&frame_data, w, h, fps, mp4_path)?;
+        save_mp4_atomic_with_observer(
+            &frame_data,
+            w,
+            h,
+            fps,
+            mp4_path,
+            keep_partial,
+            Some(observer),
+        )?;
     }
+
+    observer.on_event(&GenerationEvent::StageFinished {
+        stage: GenerationStage::EncodeVideo,
+        elapsed_secs: encode_started.elapsed().as_secs_f64(),
+    });
 
     Ok(())
 }
@@ -275,5 +552,37 @@ mod tests {
         assert_eq!(&bytes[4..8], b"ftyp", "missing MP4 ftyp box");
         assert!(bytes.windows(4).any(|window| window == b"moov"));
         assert!(bytes.windows(4).any(|window| window == b"mdat"));
+    }
+
+    #[test]
+    fn save_mp4_atomic_commits_and_removes_partial_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("atomic.mp4");
+        let partial = std::path::PathBuf::from(format!("{}.partial", path.display()));
+        let frames = vec![vec![0u8; 16 * 16 * 3]];
+
+        save_mp4_atomic(&frames, 16, 16, 12, &path, false).expect("atomic mp4 export");
+
+        assert!(path.exists(), "final MP4 must exist");
+        assert!(
+            !partial.exists(),
+            "successful export must remove partial file"
+        );
+    }
+
+    #[test]
+    fn save_gif_atomic_commits_and_removes_partial_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("atomic.gif");
+        let partial = std::path::PathBuf::from(format!("{}.partial", path.display()));
+        let frames = vec![vec![0u8; 2 * 2 * 3]];
+
+        save_gif_atomic(&frames, 2, 2, &path, 6, false).expect("atomic gif export");
+
+        assert!(path.exists(), "final GIF must exist");
+        assert!(
+            !partial.exists(),
+            "successful export must remove partial file"
+        );
     }
 }
