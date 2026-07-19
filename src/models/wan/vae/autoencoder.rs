@@ -40,6 +40,14 @@ impl AutoencoderKLWan {
         dtype: DType,
     ) -> Result<Self> {
         let z_dim = config.z_dim;
+        if config.latents_mean.len() != z_dim || config.latents_std.len() != z_dim {
+            candle_core::bail!(
+                "Wan VAE latent statistics must have z_dim={} entries, got mean={} std={}",
+                z_dim,
+                config.latents_mean.len(),
+                config.latents_std.len()
+            );
+        }
         let mean = Tensor::from_vec(config.latents_mean.clone(), (1, z_dim, 1, 1, 1), &device)?
             .to_dtype(dtype)?;
         let std = Tensor::from_vec(config.latents_std.clone(), (1, z_dim, 1, 1, 1), &device)?

@@ -42,7 +42,7 @@ impl Module for WanRmsNorm {
         // Diffusers: F.normalize(x, dim=1) — L2 norm over channels, not RMS mean.
         let sq = x32.sqr()?;
         let sum_sq = sq.sum_keepdim(norm_dim)?;
-        let l2 = sum_sq.sqrt()?;
+        let l2 = sum_sq.sqrt()?.clamp(1e-12, f32::MAX as f64)?;
         let normalized = x32.broadcast_div(&l2)?;
         let mut out = normalized.affine(self.scale, 0.0)?;
 
@@ -56,5 +56,37 @@ impl Module for WanRmsNorm {
         let gamma = gamma.to_dtype(DType::F32)?;
         out = out.broadcast_mul(&gamma)?;
         out.to_dtype(x.dtype())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use candle_core::Device;
+
+    use super::*;
+
+    #[test]
+    fn zero_channel_vector_stays_finite() {
+        let device = Device::Cpu;
+        let weights = HashMap::from([(
+            "gamma".to_string(),
+            Tensor::ones((2, 1, 1, 1), DType::F32, &device).expect("gamma"),
+        )]);
+        let vb = VarBuilder::from_tensors(weights, DType::F32, &device);
+        let norm = WanRmsNorm::new(2, true, false, vb).expect("norm");
+        let input = Tensor::zeros((1, 2, 1, 1, 1), DType::F32, &device).expect("input");
+
+        let values = norm
+            .forward(&input)
+            .expect("forward")
+            .flatten_all()
+            .expect("flat")
+            .to_vec1::<f32>()
+            .expect("values");
+
+        assert!(values.iter().all(|value| value.is_finite()));
+        assert!(values.iter().all(|value| *value == 0.0));
     }
 }

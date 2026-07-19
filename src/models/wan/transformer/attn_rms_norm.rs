@@ -35,14 +35,18 @@ impl AttnRmsNorm {
             return Ok(self.weight.clone());
         }
         {
-            let guard = self.cached.read().expect("attn_rms_norm cached poisoned");
+            let guard = self.cached.read().map_err(|_| {
+                candle_core::Error::Msg("attention RMSNorm cache lock is poisoned".into())
+            })?;
             for (dt, t) in guard.iter() {
                 if *dt == compute {
                     return Ok(t.clone());
                 }
             }
         }
-        let mut guard = self.cached.write().expect("attn_rms_norm cached poisoned");
+        let mut guard = self.cached.write().map_err(|_| {
+            candle_core::Error::Msg("attention RMSNorm cache lock is poisoned".into())
+        })?;
         for (dt, t) in guard.iter() {
             if *dt == compute {
                 return Ok(t.clone());
@@ -67,13 +71,14 @@ impl AttnRmsNorm {
         let ys = xs_c.broadcast_div(&denom)?;
         let w = self.weight_in(compute)?;
         let rank = ys.rank();
+        if rank == 0 || rank > 8 {
+            candle_core::bail!("AttnRmsNorm expects tensor rank in 1..=8, got {rank}");
+        }
         let mut shapes = self.bcast_shapes.borrow_mut();
-        let arr = if rank <= shapes.len() {
-            shapes[rank - 1]
-        } else {
-            shapes.push([1usize; 8]);
-            shapes[rank - 1]
-        };
+        if shapes.len() < rank {
+            shapes.resize(rank, [1usize; 8]);
+        }
+        let arr = shapes[rank - 1];
         let mut shape = [1usize; 8];
         shape[..rank].copy_from_slice(&arr[..rank]);
         shape[rank - 1] = w.dims1()?;
@@ -85,5 +90,30 @@ impl AttnRmsNorm {
 impl Module for AttnRmsNorm {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         self.forward(xs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use candle_core::Device;
+
+    use super::*;
+
+    #[test]
+    fn rank_three_attention_tensor_does_not_panic() {
+        let device = Device::Cpu;
+        let weights = HashMap::from([(
+            "weight".to_string(),
+            Tensor::ones((4,), DType::F32, &device).expect("weight"),
+        )]);
+        let vb = VarBuilder::from_tensors(weights, DType::F32, &device);
+        let norm = AttnRmsNorm::new(4, 1e-6, vb).expect("norm");
+        let xs = Tensor::ones((1, 2, 4), DType::F32, &device).expect("input");
+
+        let output = norm.forward(&xs).expect("forward");
+
+        assert_eq!(output.dims(), &[1, 2, 4]);
     }
 }

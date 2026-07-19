@@ -3,7 +3,7 @@
 mod wan_fixtures;
 
 use candle_core::Device;
-use candle_video::models::wan::{WAN_DEFAULT_MAX_SEQ_LEN, WanTokenizer};
+use candle_video::models::wan::{WAN_DEFAULT_MAX_SEQ_LEN, WanTokenizer, prompt_clean};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -71,8 +71,9 @@ fn wan_tokenizer_matches_hf_fixture() {
 
     assert_eq!(ids_vec, fixture.input_ids, "input_ids mismatch");
     assert_eq!(mask_vec, fixture.attention_mask, "attention_mask mismatch");
+    assert_eq!(prompt_clean(&fixture.prompt), fixture.clean_prompt);
     assert_eq!(
-        mask_vec.iter().map(|&v| v as u32).sum::<u32>() as usize,
+        mask_vec.iter().copied().sum::<u32>() as usize,
         fixture.seq_len
     );
 }

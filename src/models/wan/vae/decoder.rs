@@ -56,7 +56,9 @@ impl WanDecoder3d {
             )?);
         }
 
-        let out_dim = *dims.last().expect("dim_mult non-empty");
+        let out_dim = *dims.last().ok_or_else(|| {
+            candle_core::Error::Msg("Wan VAE decoder has no output channel level".into())
+        })?;
 
         Ok(Self {
             conv_in: WanCausalConv3d::new(

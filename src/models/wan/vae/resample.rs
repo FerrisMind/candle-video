@@ -63,10 +63,9 @@ impl WanResample {
     }
 
     fn upsample3d_time(&self, x: &Tensor, cache: &mut FeatCache) -> Result<Tensor> {
-        let time_conv = self
-            .time_conv
-            .as_ref()
-            .expect("upsample3d requires time_conv");
+        let time_conv = self.time_conv.as_ref().ok_or_else(|| {
+            candle_core::Error::Msg("3D upsampler is missing its temporal convolution".into())
+        })?;
         let (b, c, t, h, w) = x.dims5()?;
         let idx = cache.next_slot();
         match cache.get(idx).clone() {
