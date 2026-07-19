@@ -21,14 +21,14 @@ fn umt5_embed_tokens_match_hf_if_weights_present() {
     };
 
     let ref_first8 = [
-        -3.7315518856048584_f32,
-        -6.049055576324463,
-        -0.10635623335838318,
-        -1.5744329690933228,
-        -0.3948548436164856,
-        3.1780805587768555,
-        0.42179834842681885,
-        -2.1997087001800537,
+        -3.731_552_f32,
+        -6.049_055_6_f32,
+        -0.106_356_23_f32,
+        -1.574_433_f32,
+        -0.394_854_84_f32,
+        3.178_080_6_f32,
+        0.421_798_35_f32,
+        -2.199_708_7_f32,
     ];
 
     let device = Device::Cpu;
@@ -80,7 +80,7 @@ fn scaled_fp8_loader_is_used_for_local_checkpoint_if_present() {
         return;
     }
     let device = Device::Cpu;
-    let encoder = Umt5TextEncoder::load(&root.join("text_encoder"), &device, DType::F16)
+    let encoder = Umt5TextEncoder::load(root.join("text_encoder"), &device, DType::F16)
         .expect("scaled FP8 UMT5 must load through the native backend");
     assert!(!encoder.is_quantized());
     assert_eq!(encoder.config().d_model, 4096);

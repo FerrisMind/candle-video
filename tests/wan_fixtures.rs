@@ -1,5 +1,10 @@
 //! Shared paths for Wan integration tests.
 
+// This module is included by several independent integration-test crates.  A
+// helper is intentionally used only by the tests that need its checkpoint
+// layout, so suppress per-crate dead-code warnings here.
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 
 pub fn wan_diffusers_root() -> Option<PathBuf> {

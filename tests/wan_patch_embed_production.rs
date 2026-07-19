@@ -6,7 +6,6 @@ use std::path::PathBuf;
 
 use candle_core::{DType, Device, IndexOp, Tensor};
 
-use candle_nn::VarBuilder;
 use candle_video::models::ltx_video::loader::WeightLoader;
 use candle_video::models::wan::WanPatchEmbedding;
 use candle_video::models::wan::loader::discover_safetensors;
@@ -60,10 +59,10 @@ fn patch_embedding_production_shape_matches_fixture() {
         .collect();
 
     let expected = [
-        -0.2295476645231247f32,
-        0.1298161745071411,
-        0.045674264430999756,
-        -0.26436924934387207,
+        -0.229_547_66_f32,
+        0.129_816_17_f32,
+        0.045_674_264_f32,
+        -0.264_369_25_f32,
     ];
     for (i, (&e, &g)) in expected.iter().zip(row.iter()).enumerate() {
         eprintln!("patch dim {i}: ref={e} got={g} diff={}", (e - g).abs());

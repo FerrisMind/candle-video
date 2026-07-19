@@ -4,7 +4,7 @@ mod wan_fixtures;
 
 use std::path::PathBuf;
 
-use candle_core::{DType, Device};
+use candle_core::Device;
 use candle_video::models::wan::loader::WanConsolidatedPaths;
 use candle_video::models::wan::{Umt5TextEncoder, WanTokenizer, encode_prompt};
 
@@ -35,7 +35,7 @@ fn gguf_prompt_embeds_within_quantization_tolerance() {
 
     let device = Device::Cpu;
     let tokenizer =
-        WanTokenizer::from_pretrained(&paths.tokenizer_json.parent().unwrap()).expect("tok");
+        WanTokenizer::from_pretrained(paths.tokenizer_json.parent().unwrap()).expect("tok");
     let mut text_encoder =
         Umt5TextEncoder::load_gguf(&paths.text_encoder_gguf, &device).expect("gguf te");
     assert!(text_encoder.is_quantized());
