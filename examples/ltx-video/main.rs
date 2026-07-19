@@ -253,6 +253,10 @@ fn main() -> anyhow::Result<()> {
     let num_inference_steps = args
         .steps
         .unwrap_or(ltxv_config.inference.num_inference_steps);
+    let sigmas_from_config = ltxv_config.inference.timesteps.clone();
+    let effective_steps = sigmas_from_config
+        .as_ref()
+        .map_or(num_inference_steps, Vec::len);
     let guidance_scale = args
         .guidance_scale
         .unwrap_or(ltxv_config.inference.guidance_scale);
@@ -268,9 +272,10 @@ fn main() -> anyhow::Result<()> {
     eprintln!("==================================");
     eprintln!("Prompt: {}", args.prompt);
     eprintln!(
-        "Version: {} (steps={}, guidance={:.2}, rescale={:.2}, stg={:.2}, stochastic={})",
+        "Version: {} (requested_steps={}, schedule_steps={}, guidance={:.2}, rescale={:.2}, stg={:.2}, stochastic={})",
         args.ltxv_version,
         num_inference_steps,
+        effective_steps,
         guidance_scale,
         rescaling_scale,
         stg_scale,
@@ -295,7 +300,12 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or_default();
         now.as_secs() ^ (now.subsec_nanos() as u64)
     });
-    device.set_seed(seed)?;
+    // Candle's CPU backend does not expose a global RNG seed; latents use the
+    // explicit Pcg32 stream below. CUDA/Metal still receive the seed for
+    // kernels that consume the device RNG.
+    if !device.is_cpu() {
+        device.set_seed(seed)?;
+    }
     eprintln!("Device: {:?}", device);
     eprintln!("Seed: {}", seed);
 
@@ -309,13 +319,29 @@ fn main() -> anyhow::Result<()> {
     });
 
     // 1. Locate weights
+    let mut detected_unified_weights = None;
     let (transformer_file, vae_file, t5_file, tokenizer_file) =
         if let Some(local_path) = &args.local_weights {
             let base = PathBuf::from(local_path);
 
-            let transformer = if args.unified_weights.is_some() {
+            let unified_candidate = [
+                base.join("ltxv-2b-0.9.8-distilled.safetensors"),
+                base.join("ltxv-2b-0.9.8.safetensors"),
+            ]
+            .into_iter()
+            .find(|path| path.exists());
+            let use_unified = args.unified_weights.is_some() || unified_candidate.is_some();
+            if args.unified_weights.is_none() {
+                detected_unified_weights = unified_candidate
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned());
+            }
+
+            let transformer = if use_unified {
                 // When using unified weights, transformer is embedded in the single file
-                PathBuf::from("dummy") // Will be ignored
+                unified_candidate
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("dummy")) // explicit --unified-weights
             } else if base
                 .join("transformer/diffusion_pytorch_model.safetensors")
                 .exists()
@@ -327,9 +353,11 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!("Transformer weights not found in {:?}", base);
             };
 
-            let vae = if args.unified_weights.is_some() {
+            let vae = if use_unified {
                 // When using unified weights, VAE is embedded in the single file
-                PathBuf::from("dummy") // Will be ignored
+                unified_candidate
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("dummy")) // explicit --unified-weights
             } else if base
                 .join("vae/diffusion_pytorch_model.safetensors")
                 .exists()
@@ -443,13 +471,17 @@ fn main() -> anyhow::Result<()> {
     // we should treat the transformer/vae paths (which are the same) as unified weights.
     // We'll update args.unified_weights to reflect this.
     // NOTE: This is a hack because args is immutable here, but we'll adapt the loading logic.
-    let effective_unified_weights = args.unified_weights.clone().or_else(|| {
-        if args.ltxv_version.contains("0.9.8") && args.local_weights.is_none() {
-            Some(transformer_file.to_string_lossy().to_string())
-        } else {
-            None
-        }
-    });
+    let effective_unified_weights = args
+        .unified_weights
+        .clone()
+        .or(detected_unified_weights)
+        .or_else(|| {
+            if args.ltxv_version.contains("0.9.8") && args.local_weights.is_none() {
+                Some(transformer_file.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        });
 
     if let Some(local_weights) = args.local_weights.as_ref() {
         eprintln!("\nLoading models from local path: {}", local_weights);
@@ -712,7 +744,7 @@ fn main() -> anyhow::Result<()> {
         requested_frames: args.num_frames,
         adjusted_frames: args.num_frames,
         latent_shape: latents_packed.dims().to_vec(),
-        steps: num_inference_steps,
+        steps: effective_steps,
         guidance_scale,
         seed: Some(seed),
         scheduler: "ltx".to_string(),
@@ -722,7 +754,6 @@ fn main() -> anyhow::Result<()> {
     let generation_started = Instant::now();
     pipeline.guidance_rescale = rescaling_scale;
 
-    let sigmas_from_config = ltxv_config.inference.timesteps.clone();
     let decode_timestep = ltxv_config
         .inference
         .decode_timestep
@@ -737,7 +768,7 @@ fn main() -> anyhow::Result<()> {
         args.width,
         args.num_frames,
         args.fps,
-        num_inference_steps,
+        effective_steps,
         None,               // timesteps
         sigmas_from_config, // sigmas_provided
         guidance_scale,
@@ -832,7 +863,7 @@ fn main() -> anyhow::Result<()> {
             height: h,
             frames: frame_data.len(),
             fps: args.fps,
-            steps: num_inference_steps,
+            steps: effective_steps,
             guidance_scale,
             seed: Some(seed),
             scheduler: "ltx-config".to_string(),

@@ -115,10 +115,16 @@ perf.data.*
 *.png
 *.jpg
 *.jpeg
-# *.gif
+*.gif
 *.mp4
 *.webm
 *.avi
+
+# Native inference artifacts and progress logs
+/artifacts/
+*.partial
+*.events.jsonl
+**/run.json
 
 # =============================================================================
 # Temporary / System Files
