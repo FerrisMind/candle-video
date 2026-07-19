@@ -49,6 +49,24 @@ cargo run --example ltx-video --release --features flash-attn,cudnn -- \
     --steps 20
 ```
 
+### Native MP4 output
+
+LTX uses the same in-process H.264/MP4 exporter as Wan; no ffmpeg process is
+started. `--output` selects an atomic MP4 destination (`.partial` is removed
+on failure):
+
+```powershell
+cargo run --release --example ltx-video --features cuda,flash-attn -- `
+    --local-weights "C:\Users\PC\Documents\models\LTX-Video-0.9.8-2B-distilled" `
+    --prompt "A cute robot dancing in a neon city" `
+    --width 768 --height 512 --num-frames 97 --seed 42 --fps 25 `
+    --output "output\ltx-video.mp4" --dump-run-manifest
+```
+
+Add `--gif` to write both MP4 and GIF. `--frames` can be combined with an
+explicit MP4 path to write PNG frames and MP4 together. If `--output` is
+omitted, the default remains `output/video.gif` (unless `--frames` is used).
+
 ### Low VRAM Mode (VAE Tiling)
 
 If you encounter Out of Memory (OOM) errors, enable VAE tiling and slicing:
@@ -91,6 +109,7 @@ unless `--keep-partial` is supplied.
 | `--ltxv-version` | LTX-Video version (0.9.5, 0.9.8-2b-distilled, etc.) | `0.9.5` |
 | `--local-weights` | Path to local model weight directory | Auto-download from HuggingFace |
 | `--output-dir` | Directory to save results | `"output"` |
+| `--output` | Atomic native H.264/MP4 destination | (None) |
 | `--vae-tiling` | Enable spatial VAE tiling | `false` |
 | `--vae-slicing` | Enable batch VAE slicing | `false` |
 | `--frames` | Save output as individual PNG frames (disables GIF) | `false` |
@@ -111,7 +130,7 @@ unless `--keep-partial` is supplied.
 | `--diagnostics`, `-v`, `-q` | Diagnostics, verbosity, or quiet human output | `false` |
 | `--gpu-stats` | Add best-effort `nvidia-smi` snapshots | `false` |
 | `--dump-run-manifest` | Write `output/run.json` atomically | `false` |
-| `--keep-partial` | Keep an incomplete `video.gif.partial` on failure | `false` |
+| `--keep-partial` | Keep an incomplete MP4/GIF `.partial` file on failure | `false` |
 
 ## Video Size Requirements
 

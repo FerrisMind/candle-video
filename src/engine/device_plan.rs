@@ -21,7 +21,8 @@ pub struct WanDevicePlan {
 impl WanDevicePlan {
     /// Build a plan for RTX 3060-class 12 GB GPUs.
     ///
-    /// Defaults: text encoder + VAE on CPU, transformer F16 on CUDA, flash-attn required.
+    /// Defaults: text encoder is sequenced before the transformer, VAE is
+    /// deferred until decode, transformer F16 on CUDA, flash-attn required.
     pub fn for_wan(
         cpu: bool,
         transformer_f16: Option<bool>,
@@ -49,11 +50,19 @@ impl WanDevicePlan {
             Device::Cpu
         };
 
-        // LTX-style: TE encodes first then drops; transformer + VAE stay on GPU (VAE weights ~0.2 GB).
+        // LTX-style sequencing: TE encodes first then drops. With CPU
+        // offload, VAE is deferred as well and loaded only after denoising.
         let sequential_gpu = !cpu && text_encoder.is_cpu();
+        // A 12 GB GPU needs tiled decode for the full 832x480x81 preset. The
+        // low-VRAM switch therefore opts into the existing VAE tile path in
+        // addition to deferring the VAE load; this changes only execution
+        // order/working-set size, not resolution, frame count, or denoise.
+        let vae_tiling = memory.vae_tiling || memory.cpu_offload;
 
-        let vae = if memory.vae_tiling {
-            // ponytail: optional CPU VAE only when user forces tiling path via CLI
+        let vae = if memory.cpu_offload || memory.vae_tiling {
+            // Keep VAE off the GPU while the transformer is resident. It is
+            // loaded onto the compute device only after denoising drops the
+            // transformer, avoiding the decode-time VRAM peak on 12 GB cards.
             Device::Cpu
         } else {
             compute.clone()
@@ -73,7 +82,7 @@ impl WanDevicePlan {
             vae,
             transformer_dtype,
             vae_dtype,
-            vae_tiling: memory.vae_tiling,
+            vae_tiling,
             sequential_gpu,
         })
     }

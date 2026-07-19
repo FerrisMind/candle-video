@@ -154,10 +154,13 @@ default feature sets above are the maximal relevant Windows checks.
 
 ## Resource guidance and limitations
 
-The baseline VAE path is FP32. On a 12-GB GPU, use sequential/CPU text
-encoding (--low-vram) and build with cuda,flash-attn; materialized
+The baseline VAE path is FP32. On a 12-GB GPU, use sequential text encoding
+and deferred/tiled VAE loading (`--low-vram`); the VAE is loaded on CUDA only
+after denoising drops the transformer and decoded in spatial tiles. Build with
+cuda,flash-attn; materialized
 attention without Flash Attention is rejected for large token counts.
-VAE tiling is opt-in and is not an implicit OOM fallback.
+Outside `--low-vram`, VAE tiling remains opt-in; low-VRAM enables it
+automatically for the full-resolution preset.
 
 The default implementation is T2V only. CUDA numerical parity is not claimed
 for every mixed-precision kernel; use --dtype f32 for a correctness baseline.

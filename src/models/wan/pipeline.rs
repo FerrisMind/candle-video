@@ -181,11 +181,20 @@ impl WanDenoiseStack {
                 &config.transformer,
             )?)
         };
-        let mut vae =
-            AutoencoderKLWan::load_with_layout(&layout, &config.vae, vae_device, vae_dtype)?;
-        if vae_tiling {
-            vae.enable_tiling();
-        }
+        // In the sequential GPU path, defer the VAE entirely instead of
+        // occupying CPU RAM with a copy that cannot be used while the
+        // transformer is resident. `ensure_vae_on_compute` loads it lazily
+        // after denoising has dropped the transformer.
+        let vae = if defer_transformer && !vae_device.is_cuda() && compute_device.is_cuda() {
+            None
+        } else {
+            let mut vae =
+                AutoencoderKLWan::load_with_layout(&layout, &config.vae, vae_device, vae_dtype)?;
+            if vae_tiling {
+                vae.enable_tiling();
+            }
+            Some(vae)
+        };
         let scheduler_config = match wan_scheduler_config_path(&layout) {
             Some(path) => crate::models::ltx_video::loader::load_model_config(&path)?,
             None => config.scheduler.clone(),
@@ -197,7 +206,7 @@ impl WanDenoiseStack {
         Ok(Self {
             config,
             transformer,
-            vae: Some(vae),
+            vae,
             scheduler,
             scheduler_profile,
             device: if defer_transformer {
@@ -358,7 +367,10 @@ impl WanDenoiseStack {
             message: format!("Decoding VAE for {num_frames} frames at {width}x{height}"),
         });
 
-        // Drop transformer before VAE decode so 12 GB GPUs fit Wan + VAE sequentially.
+        // Drop the transformer before VAE decode so 12 GB GPUs fit Wan + VAE
+        // sequentially. In low-VRAM mode the VAE remains unloaded while the
+        // transformer runs and is loaded only after this drop, so the two
+        // largest runtime allocations never overlap.
         if self.compute_device.is_cuda() {
             self.transformer = None;
             self.compute_device.synchronize()?;
@@ -367,6 +379,10 @@ impl WanDenoiseStack {
 
         profile_zone!("wan_vae_decode");
         if !self.vae_device.is_cuda() && self.compute_device.is_cuda() {
+            // Release the CPU-resident VAE before loading its GPU copy. This
+            // makes the offload boundary explicit and avoids retaining two
+            // VAE module trees during the device transfer.
+            self.vae = None;
             self.ensure_vae_on_compute()?;
             crate::profiling::vram::log_vram("post_vae_load");
         }

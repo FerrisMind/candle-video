@@ -101,7 +101,7 @@ are emitted every five seconds by default, and `--gpu-stats` adds best-effort
 | `--frames` | Save PNG frames instead of the default GIF | false |
 | `--gif` | Also save GIF when an MP4 path is supplied | false |
 | `--cpu` | Force CPU execution | false |
-| `--low-vram` | Enable sequential text/transformer/VAE loading | false |
+| `--low-vram` | Enable sequential text/transformer loading, deferred VAE, and tiled decode | false |
 | `--cpu-offload` | Explicit CPU offload path | false |
 | `--vae-tiling` | Opt-in VAE tiling | false |
 | `--vae-slicing` | Opt-in VAE slicing | false |
@@ -126,8 +126,10 @@ from the configured temporal compression. The recommended preset is
 `--low-vram`; the baseline VAE path is FP32.
 
 The measured 32×32 one-frame CUDA smoke used 9,732 MiB peak whole-GPU memory
-under Windows WDDM. Full-quality generation time and memory scale with
-resolution, frame count, steps, and dtype.
+under Windows WDDM. In `--low-vram` mode the VAE is not loaded at startup: it
+is loaded on CUDA only after denoising drops the transformer, then uses the
+existing tiled decode path to bound spatial activations. Full-quality
+generation time and memory scale with resolution, frame count, steps, and dtype.
 
 ## Production boundary
 

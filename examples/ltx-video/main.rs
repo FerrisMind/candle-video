@@ -9,11 +9,11 @@ use candle_video::models::ltx_video::{
     text_encoder::{T5EncoderConfig, T5TextEncoderWrapper},
 };
 use candle_video::utils::video_export::{
-    PixelRange, save_gif_atomic_with_observer, save_png_frames_with_observer, tensor_to_rgb_frames,
+    PixelRange, export_video_output_with_mp4_options_and_observer,
 };
 use candle_video::{
-    GenerationEvent, GenerationStage, ProgressObserver, RunManifest, ensure_not_cancelled,
-    run_with_heartbeat, write_run_manifest,
+    GenerationEvent, GenerationStage, ProgressObserver, RunManifest, VideoOutput,
+    write_run_manifest,
 };
 use clap::Parser;
 use hf_hub::{Repo, RepoType, api::sync::Api};
@@ -63,6 +63,10 @@ struct Args {
 
     #[arg(long, default_value = "output")]
     output_dir: String,
+
+    /// Explicit MP4 output path. Parent directories are created automatically.
+    #[arg(long)]
+    output: Option<PathBuf>,
 
     #[arg(long)]
     cpu: bool,
@@ -152,13 +156,45 @@ struct Args {
     #[arg(long, visible_alias = "log-file")]
     events_jsonl: Option<PathBuf>,
 
-    /// Write a run manifest next to the generated GIF or frame directory.
+    /// Write a run manifest next to the generated MP4, GIF, or frame directory.
     #[arg(long)]
     dump_run_manifest: bool,
 
-    /// Retain an incomplete `.partial` GIF when export fails.
+    /// Retain an incomplete `.partial` MP4/GIF when export fails.
     #[arg(long)]
     keep_partial: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputPlan {
+    output_dir: PathBuf,
+    mp4_path: Option<PathBuf>,
+    save_png: bool,
+    save_gif: bool,
+}
+
+fn resolve_output_plan(
+    output_dir: &str,
+    output: Option<&Path>,
+    save_png: bool,
+    explicit_gif: bool,
+) -> OutputPlan {
+    let mp4_path = output.map(Path::to_path_buf);
+    let output_dir = output
+        .and_then(|path| {
+            path.parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+        })
+        .unwrap_or_else(|| PathBuf::from(output_dir));
+    let save_gif = explicit_gif || (mp4_path.is_none() && !save_png);
+
+    OutputPlan {
+        output_dir,
+        mp4_path,
+        save_png,
+        save_gif,
+    }
 }
 
 struct TokenizerAdapter {
@@ -789,79 +825,74 @@ fn main() -> anyhow::Result<()> {
         Arc::clone(&observer),
     )?;
 
-    let postprocess_started = Instant::now();
-    observer.on_event(&GenerationEvent::StageStarted {
-        stage: GenerationStage::PostProcess,
-        message: "Converting decoded tensor to RGB frames".to_string(),
-    });
-    let heartbeat_observer = Arc::clone(&observer);
-    let (frame_data, w, h) = run_with_heartbeat(
-        &heartbeat_observer,
-        GenerationStage::PostProcess,
-        "Converting decoded frames still running",
-        || tensor_to_rgb_frames(&video_out.frames, PixelRange::ZeroTo255),
+    // 5. Export output through the same native PNG/GIF/MP4 path as Wan.
+    let plan = resolve_output_plan(
+        &args.output_dir,
+        args.output.as_deref(),
+        args.frames,
+        args.gif,
+    );
+    let (_, _, _, height, width) = video_out.frames.dims5()?;
+    let output = VideoOutput {
+        frames: video_out.frames,
+        frame_rate: args.fps,
+        width,
+        height,
+    };
+    std::fs::create_dir_all(&plan.output_dir)?;
+    export_video_output_with_mp4_options_and_observer(
+        &output,
+        &plan.output_dir,
+        PixelRange::ZeroTo255,
+        plan.save_png,
+        plan.save_gif,
+        plan.mp4_path.as_deref(),
+        args.fps,
+        args.keep_partial,
+        observer.as_ref(),
     )?;
-    observer.on_event(&GenerationEvent::StageFinished {
-        stage: GenerationStage::PostProcess,
-        elapsed_secs: postprocess_started.elapsed().as_secs_f64(),
-    });
 
-    // 5. Save output
-    let output_dir = PathBuf::from(&args.output_dir);
-    std::fs::create_dir_all(&output_dir)?;
-    let encode_started = Instant::now();
-    observer.on_event(&GenerationEvent::StageStarted {
-        stage: GenerationStage::EncodeVideo,
-        message: format!("Writing {} decoded frames", frame_data.len()),
-    });
-
-    // Exclusive mode: --frames saves ONLY frames
-    if args.frames {
-        save_png_frames_with_observer(&frame_data, w, h, &output_dir, Some(observer.as_ref()))?;
-        eprintln!(
-            "\nDone! Saved {} frames to {}",
-            frame_data.len(),
-            output_dir.display()
+    if plan.save_png {
+        println!("Saved PNG frames to {}", plan.output_dir.display());
+    }
+    if plan.save_gif {
+        println!(
+            "Saved GIF to {}",
+            plan.output_dir.join("video.gif").display()
         );
-    } else {
-        eprintln!("Creating GIF animation with atomic publication...");
-        let gif_path = output_dir.join("video.gif");
-        let frame_delay = u16::try_from((100usize + args.fps / 2) / args.fps)
-            .unwrap_or(u16::MAX)
-            .max(1);
-        save_gif_atomic_with_observer(
-            &frame_data,
-            w,
-            h,
-            &gif_path,
-            frame_delay,
-            args.keep_partial,
-            Some(observer.as_ref()),
-        )?;
-        println!("\nDone! Saved GIF to {}", gif_path.display());
+    }
+    if let Some(path) = plan.mp4_path.as_ref() {
+        println!("Saved MP4 to {}", path.display());
     }
 
-    observer.on_event(&GenerationEvent::StageFinished {
-        stage: GenerationStage::EncodeVideo,
-        elapsed_secs: encode_started.elapsed().as_secs_f64(),
-    });
-
-    let generated_output = if args.frames {
-        output_dir.display().to_string()
-    } else {
-        output_dir.join("video.gif").display().to_string()
-    };
+    let generated_output = plan
+        .mp4_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .or_else(|| {
+            if plan.save_png {
+                Some(plan.output_dir.display().to_string())
+            } else if plan.save_gif {
+                Some(plan.output_dir.join("video.gif").display().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
 
     if args.dump_run_manifest {
-        let manifest_path = output_dir.join("run.json");
+        let manifest_path = plan.mp4_path.as_ref().map_or_else(
+            || plan.output_dir.join("run.json"),
+            |path| path.with_extension("json"),
+        );
         let manifest = RunManifest {
             model: format!("LTX-Video-{}", args.ltxv_version),
             backend: if args.cpu { "cpu" } else { "cuda" }.to_string(),
             device: format!("{device:?}"),
             dtype: format!("{dtype:?}"),
-            width: w,
-            height: h,
-            frames: frame_data.len(),
+            width: output.width,
+            height: output.height,
+            frames: output.num_frames()?,
             fps: args.fps,
             steps: effective_steps,
             guidance_scale,
@@ -884,7 +915,6 @@ fn main() -> anyhow::Result<()> {
         println!("Saved run manifest to {}", manifest_path.display());
     }
 
-    ensure_not_cancelled(observer.as_ref())?;
     observer.on_event(&GenerationEvent::GenerationFinished {
         output: Some(generated_output),
         elapsed_secs: generation_started.elapsed().as_secs_f64(),
@@ -894,3 +924,33 @@ fn main() -> anyhow::Result<()> {
 }
 
 use candle_video::models::ltx_video::t2v_pipeline::VaeConfig;
+
+#[cfg(test)]
+mod output_plan_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_mp4_uses_parent_without_implicit_gif() {
+        let plan = resolve_output_plan(
+            "output",
+            Some(Path::new("renders/ltx-video.mp4")),
+            false,
+            false,
+        );
+
+        assert_eq!(plan.output_dir, PathBuf::from("renders"));
+        assert_eq!(plan.mp4_path, Some(PathBuf::from("renders/ltx-video.mp4")));
+        assert!(!plan.save_gif);
+        assert!(!plan.save_png);
+    }
+
+    #[test]
+    fn no_explicit_mp4_defaults_to_gif_output() {
+        let plan = resolve_output_plan("output", None, false, false);
+
+        assert_eq!(plan.output_dir, PathBuf::from("output"));
+        assert_eq!(plan.mp4_path, None);
+        assert!(plan.save_gif);
+        assert!(!plan.save_png);
+    }
+}

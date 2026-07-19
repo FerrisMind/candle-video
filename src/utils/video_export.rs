@@ -6,7 +6,8 @@ use std::path::Path;
 use candle_core::{DType, IndexOp, Result, Tensor};
 use gif::{Encoder, Repeat};
 use muxide::api::{MuxerBuilder, VideoCodec};
-use openh264::encoder::{Encoder as H264Encoder, FrameType};
+use openh264::OpenH264API;
+use openh264::encoder::{Encoder as H264Encoder, EncoderConfig, FrameType};
 use openh264::formats::{RgbSliceU8, YUVBuffer};
 use rayon::prelude::*;
 
@@ -345,8 +346,14 @@ fn write_mp4_file(
         .video(VideoCodec::H264, width as u32, height as u32, fps as f64)
         .build()
         .map_err(|error| candle_core::Error::Msg(format!("MP4 muxer setup failed: {error}")))?;
-    let mut encoder = H264Encoder::new()
-        .map_err(|error| candle_core::Error::Msg(format!("OpenH264 setup failed: {error}")))?;
+    // The OpenH264 default enables frame skipping for its low camera bitrate.
+    // A generated frame must never disappear from a video, especially at
+    // larger LTX resolutions, so disable rate-control frame dropping.
+    let mut encoder = H264Encoder::with_api_config(
+        OpenH264API::from_source(),
+        EncoderConfig::new().skip_frames(false),
+    )
+    .map_err(|error| candle_core::Error::Msg(format!("OpenH264 setup failed: {error}")))?;
 
     for (index, rgb) in frame_data.iter().enumerate() {
         let rgb_source = RgbSliceU8::new(rgb, (width, height));
@@ -492,12 +499,15 @@ pub fn export_video_output_with_mp4_options_and_observer(
 
     if write_gif {
         let delay = (100.0 / fps.max(1) as f32) as u16;
-        save_gif(
+        let gif_path = output_dir.join("video.gif");
+        save_gif_atomic_with_observer(
             &frame_data,
             w,
             h,
-            output_dir.join("video.gif"),
+            &gif_path,
             delay.max(1),
+            keep_partial,
+            Some(observer),
         )?;
     }
 
@@ -584,5 +594,20 @@ mod tests {
             !partial.exists(),
             "successful export must remove partial file"
         );
+    }
+
+    #[test]
+    fn save_mp4_large_frames_do_not_get_skipped_by_rate_control() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("large.mp4");
+        let width = 768;
+        let height = 512;
+        let frame_len = width * height * 3;
+        let frames = vec![vec![96u8; frame_len], vec![160u8; frame_len]];
+
+        save_mp4_atomic(&frames, width, height, 25, &path, false)
+            .expect("large MP4 export must encode every frame");
+
+        assert!(path.exists(), "large MP4 must be published");
     }
 }
