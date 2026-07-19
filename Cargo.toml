@@ -24,7 +24,9 @@ tokenizers = "0.23.1"
 thiserror = "2.0.18"
 hf-hub = "0.4.3"
 clap = { version = "4.6.1", features = ["derive"] }
+ctrlc = "3.4.7"
 image = "0.25.10"
+indicatif = "0.18.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-tracy = { version = "0.11.4", optional = true }

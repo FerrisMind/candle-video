@@ -52,6 +52,21 @@ Important options are --negative-prompt, --seed, --fps,
 --output is an explicit MP4 path; parent directories are created. `--model-path`
 is accepted as a visible alias for `--weights`.
 
+The Wan CLI shares the LTX progress regime. Human progress is rendered on
+stderr and final paths on stdout; `--progress auto|always|never` controls the
+terminal renderer, while `--log-format json` emits one structured JSON event
+per line. `--events-jsonl path` mirrors those events to a file. Long text,
+transformer, and VAE operations emit heartbeat events (five seconds by
+default), and `--gpu-stats` appends best-effort `nvidia-smi` snapshots.
+`Ctrl+C` requests cooperative cancellation at safe stage/pass boundaries.
+
+Use `--dump-run-manifest` to write an atomic `run.json` beside the output.
+MP4/GIF export and manifests first use a sibling `.partial` file; failed
+partials are removed by default and retained only with `--keep-partial`.
+The event stages are shared with LTX: input validation, component loading,
+prompt encoding, latent preparation, denoising (including CFG passes), VAE
+decode, post-processing, video encoding, and finalization.
+
 diffusers is the default profile and reads the local UniPC scheduler
 configuration. official-wan uses the official Wan UniPC semantics with an
 explicit sample shift (the Wan2.1 reference defaults to 5.0).
