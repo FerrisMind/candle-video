@@ -1,11 +1,14 @@
 //! Wan backend adapter implementing the unified [`VideoPipeline`] trait.
 
+use std::sync::Arc;
+
 use candle_core::{Device, Result};
 
 use crate::models::wan::{WanGenerateRequest, WanPipeline};
 
 use super::model::ModelCapabilities;
 use super::pipeline::{GenerateRequest, VideoPipeline};
+use super::progress::ProgressObserver;
 use super::video::{VideoOutput, VideoTask};
 
 /// Wraps [`WanPipeline`] for the unified engine interface.
@@ -60,6 +63,15 @@ impl VideoPipeline for WanPipelineAdapter {
     }
 
     fn generate(&mut self, req: GenerateRequest, _device: &Device) -> Result<VideoOutput> {
+        self.generate_with_observer(req, _device, Arc::new(crate::NoopProgressObserver))
+    }
+
+    fn generate_with_observer(
+        &mut self,
+        req: GenerateRequest,
+        _device: &Device,
+        observer: Arc<dyn ProgressObserver>,
+    ) -> Result<VideoOutput> {
         self.validate(&req)?;
 
         let wan_req = WanGenerateRequest {
@@ -81,7 +93,7 @@ impl VideoPipeline for WanPipelineAdapter {
             negative_prompt_embeds: req.negative_prompt_embeds,
         };
 
-        let out = self.pipeline.generate(wan_req)?;
+        let out = self.pipeline.generate_with_observer(wan_req, observer)?;
         let (_, _, _, height, width) = out.frames.dims5()?;
         Ok(VideoOutput {
             frames: out.frames,

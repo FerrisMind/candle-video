@@ -1,5 +1,7 @@
 //! LTX-Video adapter implementing the unified [`VideoPipeline`] trait.
 
+use std::sync::Arc;
+
 use candle_core::{Device, Result};
 
 use crate::models::ltx_video::configs::LTXVInferenceConfig;
@@ -10,6 +12,7 @@ use crate::models::ltx_video::t2v_pipeline::{
 
 use super::model::ModelCapabilities;
 use super::pipeline::{GenerateRequest, VideoPipeline};
+use super::progress::ProgressObserver;
 use super::video::{VideoOutput, VideoTask};
 
 /// Wraps an existing [`LtxPipeline`] without changing LTX math or component traits.
@@ -63,6 +66,15 @@ impl VideoPipeline for LtxPipelineAdapter<'_> {
     }
 
     fn generate(&mut self, req: GenerateRequest, device: &Device) -> Result<VideoOutput> {
+        self.generate_with_observer(req, device, Arc::new(crate::NoopProgressObserver))
+    }
+
+    fn generate_with_observer(
+        &mut self,
+        req: GenerateRequest,
+        device: &Device,
+        observer: Arc<dyn ProgressObserver>,
+    ) -> Result<VideoOutput> {
         self.validate(&req)?;
 
         let negative = req.negative_prompt.map(PromptInput::Single).or_else(|| {
@@ -79,7 +91,7 @@ impl VideoPipeline for LtxPipelineAdapter<'_> {
             .clone()
             .unwrap_or_else(|| vec![0.05]);
 
-        let output = self.pipeline.call(
+        let output = self.pipeline.call_with_observer(
             Some(PromptInput::Single(req.prompt)),
             negative,
             req.height,
@@ -108,6 +120,7 @@ impl VideoPipeline for LtxPipelineAdapter<'_> {
                 Some(self.inference.skip_block_list.clone())
             },
             device,
+            observer,
         )?;
 
         Ok(VideoOutput {

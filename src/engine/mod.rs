@@ -9,7 +9,9 @@ pub mod ltx_adapter;
 pub mod memory;
 pub mod model;
 pub mod pipeline;
+pub mod progress;
 pub mod prompt;
+pub mod run_manifest;
 pub mod video;
 pub mod wan_adapter;
 
@@ -20,6 +22,11 @@ pub use ltx_adapter::{LtxPipelineAdapter, build_ltx_pipeline, default_ltx_vae_pr
 pub use memory::{MemoryOptions, PrecisionOptions};
 pub use model::{EngineLoadOptions, ModelCapabilities, ModelRegistry, VideoModelSpec};
 pub use pipeline::{GenerateRequest, VideoPipeline};
+pub use progress::{
+    CancellationToken, DenoisePass, GenerationEvent, GenerationStage, NoopProgressObserver,
+    ProgressObserver, cancellation_error, ensure_not_cancelled, run_with_heartbeat,
+};
 pub use prompt::{PromptEmbeds, PromptEncoder};
+pub use run_manifest::{RunManifest, write_run_manifest};
 pub use video::{FrameRule, OutputOptions, Resolution, VideoOutput, VideoTask};
 pub use wan_adapter::WanPipelineAdapter;

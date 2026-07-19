@@ -1,9 +1,12 @@
 //! High-level video generation pipeline trait and request types.
 
+use std::sync::Arc;
+
 use candle_core::{Device, Result};
 
 use super::memory::MemoryOptions;
 use super::model::ModelCapabilities;
+use super::progress::{NoopProgressObserver, ProgressObserver};
 use super::video::{OutputOptions, VideoOutput, VideoTask};
 
 /// User-facing generation request shared across backends.
@@ -67,4 +70,28 @@ pub trait VideoPipeline {
     fn capabilities(&self) -> ModelCapabilities;
     fn validate(&self, req: &GenerateRequest) -> Result<()>;
     fn generate(&mut self, req: GenerateRequest, device: &Device) -> Result<VideoOutput>;
+
+    /// Generate while publishing backend-neutral progress events.
+    ///
+    /// Existing third-party backends retain source compatibility through the
+    /// default implementation; Wan and LTX override it to instrument their
+    /// native denoising loops.
+    fn generate_with_observer(
+        &mut self,
+        req: GenerateRequest,
+        device: &Device,
+        observer: Arc<dyn ProgressObserver>,
+    ) -> Result<VideoOutput> {
+        let _ = observer;
+        self.generate(req, device)
+    }
+
+    /// Convenience wrapper for callers that do not need progress events.
+    fn generate_without_progress(
+        &mut self,
+        req: GenerateRequest,
+        device: &Device,
+    ) -> Result<VideoOutput> {
+        self.generate_with_observer(req, device, Arc::new(NoopProgressObserver))
+    }
 }
