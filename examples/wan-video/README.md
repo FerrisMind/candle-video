@@ -59,6 +59,27 @@ When `--output` is omitted, the default output is `output\video.gif`.
 Use `--frames` to save PNG frames instead. `--gif` can be combined with an
 explicit MP4 path when both outputs are wanted.
 
+## Progress and reproducibility
+
+Wan uses the same structured progress observer as `examples/ltx-video`.
+Human progress is sent to stderr and final output paths to stdout. For a
+machine-readable stream and an atomic run manifest:
+
+```powershell
+cargo run --release --example wan-video --features cuda,flash-attn -- `
+  --model-path "C:\Users\PC\Documents\models\Wan2.1-T2V-1.3B" `
+  --prompt "A candle flame" --width 32 --height 32 --num-frames 5 --steps 2 `
+  --low-vram --progress always --timings --log-format json `
+  --events-jsonl output\wan-events.jsonl --dump-run-manifest `
+  --output output\wan-smoke.mp4
+```
+
+`Ctrl+C` requests cooperative cancellation at stage/pass boundaries. MP4,
+GIF, and the JSON manifest are published through sibling `.partial` files;
+failed partial files are removed unless `--keep-partial` is set. Heartbeats
+are emitted every five seconds by default, and `--gpu-stats` adds best-effort
+`nvidia-smi` snapshots.
+
 ## Command-line flags
 
 | Flag | Description | Default |
@@ -86,6 +107,15 @@ explicit MP4 path when both outputs are wanted.
 | `--vae-slicing` | Opt-in VAE slicing | false |
 | `--transformer-f32` | Force F32 transformer weights | false |
 | `--latents-json` | Load fixed initial latents for differential testing | none |
+| `--progress` | `auto`, `always`, or `never` terminal rendering | `auto` |
+| `--log-format` | `human` or JSONL events on stderr | `human` |
+| `--events-jsonl` | Also write events to a JSONL file | none |
+| `--heartbeat-seconds` | Interval for long-operation heartbeat events | `5` |
+| `--timings` | Include stage elapsed times | false |
+| `--diagnostics`, `-v`, `-q` | Diagnostics, verbosity, or quiet human output | false |
+| `--gpu-stats` | Add best-effort `nvidia-smi` snapshots | false |
+| `--dump-run-manifest` | Write `run.json` beside output | false |
+| `--keep-partial` | Keep an incomplete `.partial` output on failure | false |
 
 ## Size and memory notes
 

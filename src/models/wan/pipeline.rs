@@ -1,11 +1,16 @@
 //! Wan 2.1 text-to-video pipeline (Diffusers `WanPipeline` parity, T2V only).
 
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
 
 use candle_core::{DType, Device, Result, Tensor};
 
 use crate::engine::model::ModelCapabilities;
-use crate::engine::{ensure_wan_cuda_requirements, wan_patch_token_count};
+use crate::engine::{
+    DenoisePass, GenerationEvent, GenerationStage, NoopProgressObserver, ProgressObserver,
+    ensure_not_cancelled, ensure_wan_cuda_requirements, run_with_heartbeat, wan_patch_token_count,
+};
 use crate::profile_zone;
 use crate::utils::deterministic_rng::Pcg32;
 
@@ -304,7 +309,7 @@ impl WanDenoiseStack {
         prompt_embeds: Tensor,
         negative_prompt_embeds: Option<Tensor>,
     ) -> Result<WanPipelineOutput> {
-        let latents = self.denoise(
+        self.denoise_and_decode_with_observer(
             height,
             width,
             num_frames,
@@ -314,7 +319,44 @@ impl WanDenoiseStack {
             initial_latents,
             prompt_embeds,
             negative_prompt_embeds,
+            Arc::new(NoopProgressObserver),
+        )
+    }
+
+    /// Denoise and decode while publishing structured progress events.
+    #[allow(clippy::too_many_arguments)]
+    pub fn denoise_and_decode_with_observer(
+        &mut self,
+        height: usize,
+        width: usize,
+        num_frames: usize,
+        num_inference_steps: usize,
+        guidance_scale: f32,
+        seed: Option<u64>,
+        initial_latents: Option<Tensor>,
+        prompt_embeds: Tensor,
+        negative_prompt_embeds: Option<Tensor>,
+        observer: Arc<dyn ProgressObserver>,
+    ) -> Result<WanPipelineOutput> {
+        let latents = self.denoise_with_observer(
+            height,
+            width,
+            num_frames,
+            num_inference_steps,
+            guidance_scale,
+            seed,
+            initial_latents,
+            prompt_embeds,
+            negative_prompt_embeds,
+            Arc::clone(&observer),
         )?;
+
+        ensure_not_cancelled(observer.as_ref())?;
+        let decode_started = Instant::now();
+        observer.on_event(&GenerationEvent::StageStarted {
+            stage: GenerationStage::DecodeVae,
+            message: format!("Decoding VAE for {num_frames} frames at {width}x{height}"),
+        });
 
         // Drop transformer before VAE decode so 12 GB GPUs fit Wan + VAE sequentially.
         if self.compute_device.is_cuda() {
@@ -335,8 +377,18 @@ impl WanDenoiseStack {
         let latents_for_vae = latents
             .to_dtype(self.vae_dtype)?
             .to_device(&self.vae_device)?;
-        let frames = vae.decode(&latents_for_vae)?;
+        let heartbeat_observer = Arc::clone(&observer);
+        let frames = run_with_heartbeat(
+            &heartbeat_observer,
+            GenerationStage::DecodeVae,
+            "VAE decode still running",
+            || vae.decode(&latents_for_vae),
+        )?;
         let frames = frames.to_device(&self.device)?;
+        observer.on_event(&GenerationEvent::StageFinished {
+            stage: GenerationStage::DecodeVae,
+            elapsed_secs: decode_started.elapsed().as_secs_f64(),
+        });
         Ok(WanPipelineOutput { frames })
     }
 
@@ -353,6 +405,35 @@ impl WanDenoiseStack {
         initial_latents: Option<Tensor>,
         prompt_embeds: Tensor,
         negative_prompt_embeds: Option<Tensor>,
+    ) -> Result<Tensor> {
+        self.denoise_with_observer(
+            height,
+            width,
+            num_frames,
+            num_inference_steps,
+            guidance_scale,
+            seed,
+            initial_latents,
+            prompt_embeds,
+            negative_prompt_embeds,
+            Arc::new(NoopProgressObserver),
+        )
+    }
+
+    /// Denoise while publishing step/pass progress and cooperative cancellation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn denoise_with_observer(
+        &mut self,
+        height: usize,
+        width: usize,
+        num_frames: usize,
+        num_inference_steps: usize,
+        guidance_scale: f32,
+        seed: Option<u64>,
+        initial_latents: Option<Tensor>,
+        prompt_embeds: Tensor,
+        negative_prompt_embeds: Option<Tensor>,
+        observer: Arc<dyn ProgressObserver>,
     ) -> Result<Tensor> {
         if height == 0 || width == 0 || !height.is_multiple_of(16) || !width.is_multiple_of(16) {
             candle_core::bail!(
@@ -371,6 +452,12 @@ impl WanDenoiseStack {
         let do_cfg = guidance_scale > 1.0;
         let num_frames = normalize_num_frames(num_frames, self.config.temporal_compression());
 
+        let denoise_started = Instant::now();
+        observer.on_event(&GenerationEvent::StageStarted {
+            stage: GenerationStage::Denoise,
+            message: format!("Starting {num_inference_steps} denoising steps"),
+        });
+
         let tokens = wan_patch_token_count(height, width, num_frames);
         ensure_wan_cuda_requirements(&self.device, tokens)?;
 
@@ -388,12 +475,28 @@ impl WanDenoiseStack {
         let timesteps = self.scheduler.timesteps_f32();
         let floating_timesteps = self.scheduler_profile == WanSchedulerProfile::FlowMatchEuler;
 
+        let prepare_started = Instant::now();
+        observer.on_event(&GenerationEvent::StageStarted {
+            stage: GenerationStage::PrepareLatents,
+            message: "Preparing initial latent noise".to_string(),
+        });
         let mut latents =
             self.prepare_latents(batch_size, height, width, num_frames, seed, initial_latents)?;
+        observer.on_event(&GenerationEvent::StageFinished {
+            stage: GenerationStage::PrepareLatents,
+            elapsed_secs: prepare_started.elapsed().as_secs_f64(),
+        });
+        ensure_not_cancelled(observer.as_ref())?;
 
         for (step_i, t) in timesteps.iter().copied().enumerate() {
-            let _ = step_i;
+            ensure_not_cancelled(observer.as_ref())?;
             profile_zone!("wan_denoise_step", step = step_i, total = timesteps.len());
+            let step_started = Instant::now();
+            observer.on_event(&GenerationEvent::DenoiseStepStarted {
+                step: step_i + 1,
+                total_steps: timesteps.len(),
+                timestep: t as f64,
+            });
             // ponytail: keep `latent_model_input` and `noise_pred` in the
             // transformer dtype across the loop. Previously we converted
             // every step (to F16, then F32 → scheduler → F16 → scheduler);
@@ -409,12 +512,23 @@ impl WanDenoiseStack {
                 Tensor::full(t as i64, batch_size, &self.device)?
             };
 
+            observer.on_event(&GenerationEvent::DenoisePassStarted {
+                step: step_i + 1,
+                pass: DenoisePass::Conditional,
+            });
             profile_zone!("wan_transformer_forward_cond");
             let transformer = self
                 .transformer
                 .as_ref()
                 .ok_or_else(|| candle_core::Error::Msg("transformer not loaded".into()))?;
-            let noise_pred = transformer.forward(&latent_model_input, &timestep, &prompt_embeds)?;
+            let heartbeat_observer = Arc::clone(&observer);
+            let noise_pred = run_with_heartbeat(
+                &heartbeat_observer,
+                GenerationStage::Denoise,
+                format!("Denoising step {} conditional transformer pass", step_i + 1),
+                || transformer.forward(&latent_model_input, &timestep, &prompt_embeds),
+            )?;
+            ensure_not_cancelled(observer.as_ref())?;
 
             let noise_pred = if do_cfg {
                 let neg = negative_embeds.as_ref().ok_or_else(|| {
@@ -422,8 +536,22 @@ impl WanDenoiseStack {
                         "negative embeddings are required for classifier-free guidance".into(),
                     )
                 })?;
+                observer.on_event(&GenerationEvent::DenoisePassStarted {
+                    step: step_i + 1,
+                    pass: DenoisePass::Unconditional,
+                });
                 profile_zone!("wan_transformer_forward_uncond");
-                let noise_uncond = transformer.forward(&latent_model_input, &timestep, neg)?;
+                let heartbeat_observer = Arc::clone(&observer);
+                let noise_uncond = run_with_heartbeat(
+                    &heartbeat_observer,
+                    GenerationStage::Denoise,
+                    format!(
+                        "Denoising step {} unconditional transformer pass",
+                        step_i + 1
+                    ),
+                    || transformer.forward(&latent_model_input, &timestep, neg),
+                )?;
+                ensure_not_cancelled(observer.as_ref())?;
                 WanPipeline::apply_classifier_free_guidance(
                     &noise_pred,
                     &noise_uncond,
@@ -439,7 +567,24 @@ impl WanDenoiseStack {
                 .scheduler
                 .step_f32(&noise_pred, t, &latents)?
                 .prev_sample;
+            observer.on_event(&GenerationEvent::DenoiseStepFinished {
+                step: step_i + 1,
+                total_steps: timesteps.len(),
+                timestep: t as f64,
+                elapsed_secs: step_started.elapsed().as_secs_f64(),
+            });
+            observer.on_event(&GenerationEvent::StageProgress {
+                stage: GenerationStage::Denoise,
+                current: (step_i + 1) as u64,
+                total: Some(timesteps.len() as u64),
+                message: None,
+            });
         }
+
+        observer.on_event(&GenerationEvent::StageFinished {
+            stage: GenerationStage::Denoise,
+            elapsed_secs: denoise_started.elapsed().as_secs_f64(),
+        });
 
         Ok(latents)
     }
@@ -810,33 +955,87 @@ impl WanPipeline {
 
     /// Run denoising and VAE decode; returns pixel tensor `[B, C, T, H, W]`.
     pub fn generate(&mut self, req: WanGenerateRequest) -> Result<WanPipelineOutput> {
-        use std::time::Instant;
+        self.generate_with_observer(req, Arc::new(NoopProgressObserver))
+    }
 
+    /// Run Wan generation while publishing structured progress events.
+    pub fn generate_with_observer(
+        &mut self,
+        req: WanGenerateRequest,
+        observer: Arc<dyn ProgressObserver>,
+    ) -> Result<WanPipelineOutput> {
+        let validate_started = Instant::now();
+        observer.on_event(&GenerationEvent::StageStarted {
+            stage: GenerationStage::ValidateInputs,
+            message: "Validating Wan generation request".to_string(),
+        });
         self.check_inputs(&req)?;
+        observer.on_event(&GenerationEvent::StageFinished {
+            stage: GenerationStage::ValidateInputs,
+            elapsed_secs: validate_started.elapsed().as_secs_f64(),
+        });
+
+        let requested_frames = req.num_frames;
 
         let (height, width) = self.round_dimensions(req.height, req.width);
+        let adjusted_frames =
+            normalize_num_frames(req.num_frames, self.config.temporal_compression());
         let do_cfg = self.do_classifier_free_guidance(req.guidance_scale);
+        let latent_shape = self.latent_shape(1, height, width, adjusted_frames);
+        observer.on_event(&GenerationEvent::ConfigResolved {
+            requested_width: req.width,
+            requested_height: req.height,
+            adjusted_width: width,
+            adjusted_height: height,
+            requested_frames,
+            adjusted_frames,
+            latent_shape,
+            steps: req.num_inference_steps,
+            guidance_scale: req.guidance_scale,
+            seed: req.seed,
+            scheduler: self.stack.scheduler_profile().to_string(),
+        });
 
-        let t0 = Instant::now();
+        let encode_started = Instant::now();
+        observer.on_event(&GenerationEvent::StageStarted {
+            stage: GenerationStage::EncodePrompt,
+            message: "Encoding positive and negative prompts".to_string(),
+        });
         let (prompt_embeds, negative_embeds) = if let Some(embeds) = &req.prompt_embeds {
             (embeds.clone(), req.negative_prompt_embeds.clone())
         } else {
             self.reload_text_encoder_if_needed()
                 .map_err(candle_core::Error::wrap)?;
-            let pair = self.encode_prompts(&req, do_cfg)?;
+            let heartbeat_observer = Arc::clone(&observer);
+            let pair = run_with_heartbeat(
+                &heartbeat_observer,
+                GenerationStage::EncodePrompt,
+                "Text encoder forward still running",
+                || self.encode_prompts(&req, do_cfg),
+            )?;
             self.release_text_encoder_after_encode();
             pair
         };
-        eprintln!("encode_prompt: {:.2}s", t0.elapsed().as_secs_f64());
+        observer.on_event(&GenerationEvent::StageFinished {
+            stage: GenerationStage::EncodePrompt,
+            elapsed_secs: encode_started.elapsed().as_secs_f64(),
+        });
+        ensure_not_cancelled(observer.as_ref())?;
 
         if self.sequential_gpu {
-            let t_load = Instant::now();
+            let load_started = Instant::now();
+            observer.on_event(&GenerationEvent::StageStarted {
+                stage: GenerationStage::LoadComponents,
+                message: "Loading Wan transformer on compute device".to_string(),
+            });
             self.stack.ensure_transformer_on_compute()?;
-            eprintln!("load_transformer: {:.2}s", t_load.elapsed().as_secs_f64());
+            observer.on_event(&GenerationEvent::StageFinished {
+                stage: GenerationStage::LoadComponents,
+                elapsed_secs: load_started.elapsed().as_secs_f64(),
+            });
         }
 
-        let t1 = Instant::now();
-        let out = self.stack.denoise_and_decode(
+        let out = self.stack.denoise_and_decode_with_observer(
             height,
             width,
             req.num_frames,
@@ -846,8 +1045,8 @@ impl WanPipeline {
             req.initial_latents,
             prompt_embeds,
             negative_embeds,
+            Arc::clone(&observer),
         )?;
-        eprintln!("denoise+decode: {:.2}s", t1.elapsed().as_secs_f64());
         Ok(out)
     }
 }
