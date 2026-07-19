@@ -13,7 +13,7 @@ pub use engine::{
     LtxPipelineAdapter, MemoryOptions, ModelCapabilities, ModelRegistry, NoopProgressObserver,
     ProgressObserver, RunManifest, VideoModelSpec, VideoOutput, VideoPipeline, VideoTask,
     WanDevicePlan, WanPipelineAdapter, ensure_not_cancelled, ensure_wan_cuda_requirements,
-    run_with_heartbeat, wan_patch_token_count, write_run_manifest,
+    resolve_seed, run_with_heartbeat, wan_patch_token_count, write_run_manifest,
 };
 pub use models::ltx_video::*;
 pub use models::wan::{

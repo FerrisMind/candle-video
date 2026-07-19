@@ -21,7 +21,7 @@ pub use device_plan::{WanDevicePlan, ensure_wan_cuda_requirements, wan_patch_tok
 pub use ltx_adapter::{LtxPipelineAdapter, build_ltx_pipeline, default_ltx_vae_processor_config};
 pub use memory::{MemoryOptions, PrecisionOptions};
 pub use model::{EngineLoadOptions, ModelCapabilities, ModelRegistry, VideoModelSpec};
-pub use pipeline::{GenerateRequest, VideoPipeline};
+pub use pipeline::{GenerateRequest, VideoPipeline, resolve_seed};
 pub use progress::{
     CancellationToken, DenoisePass, GenerationEvent, GenerationStage, NoopProgressObserver,
     ProgressObserver, cancellation_error, ensure_not_cancelled, run_with_heartbeat,

@@ -65,6 +65,23 @@ impl GenerateRequest {
     }
 }
 
+/// Materialize the seed used for a generation request.
+///
+/// The official Wan implementation treats its negative sentinel as “choose a
+/// random integer in `0..=sys.maxsize`”. Keep the same signed-64-bit range for
+/// omitted CLI seeds while preserving explicit values for reproducibility.
+pub fn resolve_seed(seed: Option<u64>) -> u64 {
+    match seed {
+        Some(seed) => seed,
+        None => rand::random_range(0..=i64::MAX as u64),
+    }
+}
+
+#[cfg(test)]
+fn resolve_seed_with_fallback(seed: Option<u64>, fallback: u64) -> u64 {
+    seed.unwrap_or(fallback)
+}
+
 /// Unified pipeline interface for all video generation backends.
 pub trait VideoPipeline {
     fn capabilities(&self) -> ModelCapabilities;
@@ -93,5 +110,20 @@ pub trait VideoPipeline {
         device: &Device,
     ) -> Result<VideoOutput> {
         self.generate_with_observer(req, device, Arc::new(NoopProgressObserver))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_seed_with_fallback;
+
+    #[test]
+    fn explicit_seed_is_preserved() {
+        assert_eq!(resolve_seed_with_fallback(Some(42), 99), 42);
+    }
+
+    #[test]
+    fn missing_seed_uses_the_materialized_random_seed() {
+        assert_eq!(resolve_seed_with_fallback(None, 99), 99);
     }
 }

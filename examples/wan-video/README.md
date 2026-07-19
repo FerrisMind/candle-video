@@ -117,6 +117,11 @@ are emitted every five seconds by default, and `--gpu-stats` adds best-effort
 | `--dump-run-manifest` | Write `run.json` beside output | false |
 | `--keep-partial` | Keep an incomplete `.partial` output on failure | false |
 
+When `--seed` is omitted, Wan follows the official implementation: it draws a
+random integer in `0..=sys.maxsize`, prints the chosen value, and stores it in
+`run.json`. Supplying `--seed N` makes the noise reproducible. When
+`--latents-json` supplies fixed initial latents, no noise seed is consumed.
+
 ## Size and memory notes
 
 Wan validates spatial dimensions against the model patch/VAE requirements

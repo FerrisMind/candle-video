@@ -9,7 +9,8 @@ use candle_core::{DType, Device, Result, Tensor};
 use crate::engine::model::ModelCapabilities;
 use crate::engine::{
     DenoisePass, GenerationEvent, GenerationStage, NoopProgressObserver, ProgressObserver,
-    ensure_not_cancelled, ensure_wan_cuda_requirements, run_with_heartbeat, wan_patch_token_count,
+    ensure_not_cancelled, ensure_wan_cuda_requirements, resolve_seed, run_with_heartbeat,
+    wan_patch_token_count,
 };
 use crate::profile_zone;
 use crate::utils::deterministic_rng::Pcg32;
@@ -986,6 +987,15 @@ impl WanPipeline {
             message: "Validating Wan generation request".to_string(),
         });
         self.check_inputs(&req)?;
+        // The official Wan API uses a negative seed sentinel to request a
+        // fresh random seed. Materialize that value before emitting the
+        // config event so observers and manifests see the actual seed used.
+        // Fixed initial latents do not consume a noise seed.
+        let effective_seed = if req.initial_latents.is_some() {
+            req.seed
+        } else {
+            Some(resolve_seed(req.seed))
+        };
         observer.on_event(&GenerationEvent::StageFinished {
             stage: GenerationStage::ValidateInputs,
             elapsed_secs: validate_started.elapsed().as_secs_f64(),
@@ -1008,7 +1018,7 @@ impl WanPipeline {
             latent_shape,
             steps: req.num_inference_steps,
             guidance_scale: req.guidance_scale,
-            seed: req.seed,
+            seed: effective_seed,
             scheduler: self.stack.scheduler_profile().to_string(),
         });
 
@@ -1057,7 +1067,7 @@ impl WanPipeline {
             req.num_frames,
             req.num_inference_steps,
             req.guidance_scale,
-            req.seed,
+            effective_seed,
             req.initial_latents,
             prompt_embeds,
             negative_embeds,

@@ -49,6 +49,11 @@ cargo run --example wan21-t2v -- --weights "C:\Users\PC\Documents\models\Wan2.1-
 Important options are --negative-prompt, --seed, --fps,
 --scheduler-profile, --scheduler-shift, --dtype f16|bf16|f32,
 --low-vram, --cpu-offload, --vae-tiling, --frames, and --gif.
+
+If `--seed` is omitted, the CLI follows the official Wan sentinel behavior:
+it chooses a random integer in `0..=sys.maxsize`, prints that effective seed,
+and records it in the run manifest. An explicit `--seed N` is reproducible;
+fixed `--latents-json` input does not consume a noise seed.
 --output is an explicit MP4 path; parent directories are created. `--model-path`
 is accepted as a visible alias for `--weights`.
 

@@ -15,7 +15,7 @@ use candle_video::utils::video_export::{
 use candle_video::{
     GenerateRequest, GenerationEvent, GenerationStage, MemoryOptions, ProgressObserver,
     RunManifest, VideoPipeline, WanDevicePlan, WanPipeline, WanPipelineAdapter,
-    WanSchedulerProfile, write_run_manifest,
+    WanSchedulerProfile, resolve_seed, write_run_manifest,
 };
 use clap::Parser;
 
@@ -65,6 +65,7 @@ struct Args {
     #[arg(long)]
     scheduler_shift: Option<f32>,
 
+    /// Explicit reproducibility seed; when omitted, use and report an official-Wan-style random seed.
     #[arg(long)]
     seed: Option<u64>,
 
@@ -260,6 +261,21 @@ fn main() -> anyhow::Result<()> {
         None => None,
     };
 
+    // Match official Wan: an omitted seed is a fresh random seed, while a
+    // supplied seed remains reproducible. If fixed initial latents were
+    // supplied, no noise seed is consumed and the manifest keeps `null`.
+    let seed = if initial_latents.is_some() {
+        args.seed
+    } else {
+        Some(resolve_seed(args.seed))
+    };
+    if args.seed.is_none() && initial_latents.is_none() {
+        eprintln!(
+            "Seed not provided; using random seed {}",
+            seed.unwrap_or_default()
+        );
+    }
+
     let req = GenerateRequest {
         prompt: args.prompt,
         negative_prompt: if args.negative_prompt.is_empty() {
@@ -273,7 +289,7 @@ fn main() -> anyhow::Result<()> {
         steps: args.steps,
         guidance_scale: args.guidance_scale,
         guidance_rescale: 0.0,
-        seed: args.seed,
+        seed,
         frame_rate: args.fps,
         task: candle_video::VideoTask::TextToVideo,
         memory,
@@ -363,7 +379,7 @@ fn main() -> anyhow::Result<()> {
             fps: args.fps,
             steps: args.steps,
             guidance_scale: args.guidance_scale,
-            seed: args.seed,
+            seed,
             scheduler: args.scheduler_profile.to_string(),
             total_seconds: generation_started.elapsed().as_secs_f64(),
             peak_vram_bytes: renderer.peak_vram_bytes(),
