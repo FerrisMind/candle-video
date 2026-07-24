@@ -363,10 +363,8 @@ impl T5Attention {
         let v = v.contiguous()?;
         let scores = {
             let _enter = self.span_mm.enter();
-            q.matmul(&k.t()?)?.clamp(
-                f32::NEG_INFINITY + 1e-6,
-                f32::MAX,
-            )?
+            q.matmul(&k.t()?)?
+                .clamp(f32::NEG_INFINITY + 1e-6, f32::MAX)?
         };
         let scores = match mask {
             None => scores,
@@ -546,6 +544,28 @@ struct T5Block {
     span: tracing::Span,
 }
 
+/// Match the UMT5 reference implementation's fp16 overflow guard. The
+/// original model does not clamp every hidden state to an arbitrary [-10, 10]
+/// interval (which destroys otherwise valid activations); it only replaces
+/// infinities produced by fp16 arithmetic with the largest safe finite value.
+fn clamp_fp16_overflow(xs: &Tensor) -> Result<Tensor> {
+    if xs.dtype() != DType::F16 {
+        return Ok(xs.clone());
+    }
+    let max_abs = xs
+        .abs()?
+        .max_all()?
+        .to_dtype(DType::F32)?
+        .to_scalar::<f32>()?;
+    if max_abs.is_infinite() {
+        // torch.finfo(torch.float16).max - 1000
+        let clamp_value = 65504.0f32 - 1000.0;
+        xs.clamp(-clamp_value, clamp_value)
+    } else {
+        Ok(xs.clone())
+    }
+}
+
 impl T5Block {
     fn load(
         has_relative_attention_bias: bool,
@@ -592,18 +612,20 @@ impl T5Block {
             false => None,
         };
         let (xs, position_bias) = self.self_attn.forward(xs, position_bias, mask.as_ref())?;
-        let xs = xs.clamp(-10.0, 10.0)?;
-        if let Some(cross_attn) = &mut self.cross_attn {
+        let xs = clamp_fp16_overflow(&xs)?;
+        let xs = if let Some(cross_attn) = &mut self.cross_attn {
             let encoder_hidden_states = encoder_hidden_states.ok_or_else(|| {
                 candle_core::Error::Msg(
                     "UMT5 cross-attention requires encoder hidden states".into(),
                 )
             })?;
-            let (xs_clamped, _) = cross_attn.forward(&xs, None, encoder_hidden_states)?;
-            let xs = xs_clamped.clamp(-10.0, 10.0)?;
-        }
+            let (cross_attended, _) = cross_attn.forward(&xs, None, encoder_hidden_states)?;
+            clamp_fp16_overflow(&cross_attended)?
+        } else {
+            xs
+        };
         let xs = self.ff.forward(&xs)?;
-        let xs = xs.clamp(-10.0, 10.0)?;
+        let xs = clamp_fp16_overflow(&xs)?;
         Ok((xs, position_bias))
     }
 

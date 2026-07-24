@@ -6,10 +6,11 @@ use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use candle_nn::VarBuilder;
 use tracing::{debug, info};
 
-use crate::svd::{
+use crate::models::svd::{
     AutoencoderKLTemporalDecoder, ClipVisionModelWithProjection, EulerDiscreteScheduler, SvdConfig,
     SvdInferenceConfig, UNetSpatioTemporalConditionModel, normalize_for_clip,
 };
+use crate::utils::deterministic_rng::Pcg32;
 
 /// Dump tensor to .npy file for comparison with Python reference.
 /// Only active when DUMP_TENSORS env var is set.
@@ -107,8 +108,27 @@ impl SvdPipeline {
         let num_frames = config.num_frames;
         let height = config.height;
         let width = config.width;
+        if num_frames == 0 {
+            candle_core::bail!("SVD requires num_frames >= 1");
+        }
+        if height == 0 || width == 0 || !height.is_multiple_of(8) || !width.is_multiple_of(8) {
+            candle_core::bail!(
+                "SVD height and width must be positive and divisible by 8, got {height}x{width}"
+            );
+        }
+        if config.num_inference_steps == 0 {
+            candle_core::bail!("SVD requires num_inference_steps >= 1");
+        }
         let latent_height = height / 8;
         let latent_width = width / 8;
+
+        if !self.device.is_cpu() {
+            self.device.set_seed(config.seed)?;
+        }
+        let mut cpu_rng = self
+            .device
+            .is_cpu()
+            .then(|| Pcg32::new(config.seed, 1442695040888963407));
 
         info!(
             num_frames,
@@ -140,7 +160,10 @@ impl SvdPipeline {
         // NOTE: diffusers adds noise in pixel space BEFORE encoding
         // See: pipeline_stable_video_diffusion.py:511-512
         let noise_aug_strength = config.noise_aug_strength;
-        let noise = Tensor::randn_like(image, 0.0, 1.0)?;
+        let noise = match cpu_rng.as_mut() {
+            Some(rng) => rng.randn(image.dims().to_vec(), &self.device)?,
+            None => Tensor::randn_like(image, 0.0, 1.0)?,
+        };
         let image_augmented = (image + &(noise * noise_aug_strength)?)?;
         dump_tensor("vae_input", &image_augmented);
         let image_latents = self.vae.encode_to_latent(&image_augmented)?;
@@ -153,12 +176,18 @@ impl SvdPipeline {
             .reshape((batch_size * num_frames, 4, latent_height, latent_width))?;
 
         // Create noisy latents: start from noise
-        let latents = Tensor::randn(
-            0f32,
-            1f32,
-            (batch_size * num_frames, 4, latent_height, latent_width),
-            &self.device,
-        )?
+        let latents = match cpu_rng.as_mut() {
+            Some(rng) => rng.randn(
+                (batch_size * num_frames, 4, latent_height, latent_width),
+                &self.device,
+            )?,
+            None => Tensor::randn(
+                0f32,
+                1f32,
+                (batch_size * num_frames, 4, latent_height, latent_width),
+                &self.device,
+            )?,
+        }
         .to_dtype(self.dtype)?;
 
         // 3. Prepare added time IDs

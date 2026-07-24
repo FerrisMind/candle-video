@@ -7,7 +7,6 @@ use candle_core::{D, Module, Result, Tensor};
 use candle_nn::{Linear, VarBuilder, linear};
 
 use super::model::get_timestep_embedding;
-use crate::common::attention::attention_dispatch;
 
 /// Feed-forward network with GEGLU activation
 #[derive(Debug)]
@@ -97,13 +96,16 @@ impl Attention {
         let k = k.reshape((batch, kv_seq_len, self.heads, self.head_dim))?;
         let v = v.reshape((batch, kv_seq_len, self.heads, self.head_dim))?;
 
-        // Use cross-platform attention dispatch (CUDA Flash-Attn / Metal SDPA / CPU fallback)
-        // Transpose to [B, heads, seq, head_dim] for attention_dispatch
+        // Transpose to [B, heads, seq, head_dim] for scaled dot-product
+        // attention. Keep the implementation local: SVD is a standalone
+        // model and must not depend on an optional `common` module.
         let q = q.transpose(1, 2)?.contiguous()?;
         let k = k.transpose(1, 2)?.contiguous()?;
         let v = v.transpose(1, 2)?.contiguous()?;
 
-        let out = attention_dispatch(&q, &k, &v, None, self.scale, true)?;
+        let scores = q.matmul(&k.transpose(2, 3)?)?.affine(self.scale, 0.0)?;
+        let weights = candle_nn::ops::softmax_last_dim(&scores)?;
+        let out = weights.matmul(&v)?;
 
         // Reshape back: [B, heads, seq, head_dim] -> [B, seq, heads*head_dim]
         let out = out

@@ -524,7 +524,7 @@ mod tests {
         use candle_video::models::ltx_video::configs::get_config_by_version;
 
         // Test 0.9.5 config
-        let config_095 = get_config_by_version("0.9.5");
+        let config_095 = get_config_by_version("0.9.5")?;
         println!("  LTX-Video 0.9.5:");
         println!("    - in_channels: {}", config_095.transformer.in_channels);
         println!("    - num_layers: {}", config_095.transformer.num_layers);
@@ -536,14 +536,14 @@ mod tests {
         assert_eq!(config_095.transformer.num_layers, 28);
 
         // Test 0.9.6 config
-        let config_096 = get_config_by_version("0.9.6-dev");
+        let config_096 = get_config_by_version("0.9.6-dev")?;
         println!("  LTX-Video 0.9.6:");
         println!("    - in_channels: {}", config_096.transformer.in_channels);
         println!("    - num_layers: {}", config_096.transformer.num_layers);
         assert_eq!(config_096.transformer.in_channels, 128);
 
         // Test 0.9.8 config (2B distilled)
-        let config_098_2b = get_config_by_version("0.9.8-2b-distilled");
+        let config_098_2b = get_config_by_version("0.9.8-2b-distilled")?;
         println!("  LTX-Video 0.9.8 (2B distilled):");
         println!(
             "    - in_channels: {}",
@@ -554,7 +554,7 @@ mod tests {
         assert_eq!(config_098_2b.transformer.num_layers, 28);
 
         // Test 0.9.8 config (13B)
-        let config_098_13b = get_config_by_version("0.9.8-13b-distilled");
+        let config_098_13b = get_config_by_version("0.9.8-13b-distilled")?;
         println!("  LTX-Video 0.9.8 (13B distilled):");
         println!(
             "    - in_channels: {}",

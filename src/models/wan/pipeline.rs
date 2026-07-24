@@ -1058,7 +1058,10 @@ impl WanPipeline {
         });
         ensure_not_cancelled(observer.as_ref())?;
 
-        if self.sequential_gpu {
+        // VAE decode releases the transformer on CUDA to reduce peak memory.
+        // That happens for every stack, not only sequential offload. Ensure a
+        // subsequent generation can restore the transformer before denoising.
+        if self.stack.transformer().is_err() || self.sequential_gpu {
             let load_started = Instant::now();
             observer.on_event(&GenerationEvent::StageStarted {
                 stage: GenerationStage::LoadComponents,

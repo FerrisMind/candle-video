@@ -285,7 +285,7 @@ fn main() -> anyhow::Result<()> {
     CliProgressObserver::install_ctrlc(&renderer)?;
     let observer: Arc<dyn ProgressObserver> = renderer.clone();
     let ltxv_config =
-        candle_video::models::ltx_video::configs::get_config_by_version(&args.ltxv_version);
+        candle_video::models::ltx_video::configs::get_config_by_version(&args.ltxv_version)?;
     let num_inference_steps = args
         .steps
         .unwrap_or(ltxv_config.inference.num_inference_steps);

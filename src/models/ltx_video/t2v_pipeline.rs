@@ -7,6 +7,7 @@ use crate::engine::{
     DenoisePass, GenerationEvent, GenerationStage, NoopProgressObserver, ProgressObserver,
     ensure_not_cancelled, run_with_heartbeat,
 };
+use crate::utils::deterministic_rng::Pcg32;
 
 #[derive(Debug, Clone)]
 pub struct SchedulerConfig {
@@ -38,10 +39,14 @@ pub trait Scheduler {
     fn order(&self) -> usize;
 
     /// Должен сохранить внутренний schedule и вернуть timesteps (в torch это scheduler.timesteps).
-    fn set_timesteps(&mut self, spec: TimestepsSpec, device: &Device, mu: f32) -> Result<Vec<i64>>;
+    fn set_timesteps(&mut self, spec: TimestepsSpec, device: &Device, mu: f32) -> Result<Vec<f32>>;
 
     /// x_t -> x_{t-1}
-    fn step(&mut self, noise_pred: &Tensor, timestep: i64, latents: &Tensor) -> Result<Tensor>;
+    fn step(&mut self, noise_pred: &Tensor, timestep: f32, latents: &Tensor) -> Result<Tensor>;
+
+    /// Seed scheduler-owned random draws (for stochastic samplers). Backends
+    /// without internal randomness can keep the default no-op implementation.
+    fn set_seed(&mut self, _seed: Option<u64>) {}
 }
 
 pub trait Tokenizer {
@@ -196,7 +201,7 @@ pub fn retrieve_timesteps(
     timesteps: Option<Vec<i64>>,
     sigmas: Option<Vec<f32>>,
     mu: f32,
-) -> Result<(Vec<i64>, usize)> {
+) -> Result<(Vec<f32>, usize)> {
     if timesteps.is_some() && sigmas.is_some() {
         candle_core::bail!("Only one of `timesteps` or `sigmas` can be passed.");
     }
@@ -270,7 +275,8 @@ pub struct LtxPipeline<'a> {
     pub guidance_rescale: f32,
     pub stg_scale: f32,
     pub num_timesteps: usize,
-    pub current_timestep: Option<i64>,
+    pub current_timestep: Option<f32>,
+    pub seed: Option<u64>,
     pub interrupt: bool,
 }
 
@@ -305,8 +311,15 @@ impl<'a> LtxPipeline<'a> {
             stg_scale: 1.0,
             num_timesteps: 0,
             current_timestep: None,
+            seed: None,
             interrupt: false,
         }
+    }
+
+    /// Set the seed used by CPU-side random tensors in the next generation.
+    /// CUDA/Metal callers should additionally seed the device RNG.
+    pub fn set_seed(&mut self, seed: Option<u64>) {
+        self.seed = seed;
     }
 
     pub fn do_spatio_temporal_guidance(&self) -> bool {
@@ -328,6 +341,9 @@ impl<'a> LtxPipeline<'a> {
         prompt_attention_mask: Option<&Tensor>,
         negative_prompt_attention_mask: Option<&Tensor>,
     ) -> Result<()> {
+        if height == 0 || width == 0 {
+            candle_core::bail!("`height` and `width` must be greater than zero.");
+        }
         if !height.is_multiple_of(32) || !width.is_multiple_of(32) {
             candle_core::bail!(
                 "`height` and `width` must be divisible by 32, got {height} and {width}"
@@ -372,6 +388,44 @@ impl<'a> LtxPipeline<'a> {
         Ok(())
     }
 
+    fn repeat_prompt_embeds(
+        embeds: Tensor,
+        attention_mask: Tensor,
+        num_videos_per_prompt: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        if num_videos_per_prompt == 0 {
+            candle_core::bail!("`num_videos_per_prompt` must be greater than zero.");
+        }
+        if num_videos_per_prompt == 1 {
+            return Ok((embeds, attention_mask));
+        }
+        if embeds.rank() != 3 || attention_mask.rank() != 2 {
+            candle_core::bail!(
+                "prompt embeddings must be [B,L,D] and attention mask [B,L], got {:?} and {:?}",
+                embeds.dims(),
+                attention_mask.dims()
+            );
+        }
+        if embeds.dim(0)? != attention_mask.dim(0)? || embeds.dim(1)? != attention_mask.dim(1)? {
+            candle_core::bail!(
+                "prompt embeddings and attention mask batch/sequence dimensions must match."
+            );
+        }
+        let batch_size = embeds.dim(0)?;
+        let seq_len = embeds.dim(1)?;
+        let hidden = embeds.dim(2)?;
+        // Repeat along the sequence axis and reshape, matching the T5 path's
+        // [B, L*num_videos, D] -> [B*num_videos, L, D] layout. Repeating the
+        // batch axis directly would interleave different prompts for B > 1.
+        let embeds = embeds
+            .repeat((1usize, num_videos_per_prompt, 1usize))?
+            .reshape((batch_size * num_videos_per_prompt, seq_len, hidden))?;
+        let attention_mask = attention_mask
+            .repeat((1usize, num_videos_per_prompt))?
+            .reshape((batch_size * num_videos_per_prompt, seq_len))?;
+        Ok((embeds, attention_mask))
+    }
+
     fn get_t5_prompt_embeds(
         &mut self,
         prompt: &[String],
@@ -400,8 +454,14 @@ impl<'a> LtxPipeline<'a> {
         let pe = prompt_embeds.repeat((1usize, num_videos_per_prompt, 1usize))?;
         let pe = pe.reshape((batch_size * num_videos_per_prompt, seq_len, hidden))?;
 
-        // return raw [B, L] 0/1 mask
+        // Repeat the mask with the same effective batch as the embeddings.
         let am = attention_mask.to_dtype(dtype)?.to_device(device)?;
+        let am = if num_videos_per_prompt == 1 {
+            am
+        } else {
+            am.repeat((1usize, num_videos_per_prompt))?
+                .reshape((batch_size * num_videos_per_prompt, seq_len))?
+        };
         Ok((pe, am))
     }
 
@@ -429,7 +489,7 @@ impl<'a> LtxPipeline<'a> {
 
         let (prompt_embeds, prompt_attention_mask) =
             if let (Some(pe), Some(pm)) = (prompt_embeds, prompt_attention_mask) {
-                (pe, pm)
+                Self::repeat_prompt_embeds(pe, pm, num_videos_per_prompt)?
             } else {
                 self.get_t5_prompt_embeds(
                     &prompt_vec,
@@ -464,15 +524,18 @@ impl<'a> LtxPipeline<'a> {
                     dtype,
                 )?
             } else {
-                let ne = match negative_prompt_embeds {
-                    Some(ne) => ne,
-                    None => prompt_embeds.zeros_like()?,
-                };
-                let nm = match negative_prompt_attention_mask {
-                    Some(nm) => nm,
-                    None => prompt_attention_mask.zeros_like()?,
-                };
-                (ne, nm)
+                match (negative_prompt_embeds, negative_prompt_attention_mask) {
+                    (Some(ne), Some(nm)) => {
+                        Self::repeat_prompt_embeds(ne, nm, num_videos_per_prompt)?
+                    }
+                    (None, None) => (
+                        prompt_embeds.zeros_like()?,
+                        prompt_attention_mask.zeros_like()?,
+                    ),
+                    _ => candle_core::bail!(
+                        "`negative_prompt_embeds` and `negative_prompt_attention_mask` must be provided together."
+                    ),
+                }
             };
 
         Ok((
@@ -606,6 +669,44 @@ impl<'a> LtxPipeline<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn prepare_latents_with_rng(
+        &self,
+        batch_size: usize,
+        num_channels_latents: usize,
+        height: usize,
+        width: usize,
+        num_frames: usize,
+        dtype: DType,
+        device: &Device,
+        latents: Option<Tensor>,
+        mut rng: Option<&mut Pcg32>,
+    ) -> Result<Tensor> {
+        if num_frames == 0 {
+            candle_core::bail!("`num_frames` must be greater than zero.");
+        }
+        if let Some(l) = latents {
+            return l.to_device(device)?.to_dtype(dtype);
+        }
+
+        let h = height / self.vae_spatial_compression_ratio;
+        let w = width / self.vae_spatial_compression_ratio;
+        let f = (num_frames - 1) / self.vae_temporal_compression_ratio + 1;
+
+        let shape = (batch_size, num_channels_latents, f, h, w);
+        let latents = match rng.as_mut() {
+            Some(rng) => rng.randn(shape, device)?,
+            None => Tensor::randn(0f32, 1f32, shape, device)?,
+        }
+        .to_dtype(dtype)?;
+        let latents = Self::pack_latents(
+            &latents,
+            self.transformer_spatial_patch_size,
+            self.transformer_temporal_patch_size,
+        )?;
+        Ok(latents)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_latents(
         &self,
         batch_size: usize,
@@ -617,22 +718,17 @@ impl<'a> LtxPipeline<'a> {
         device: &Device,
         latents: Option<Tensor>,
     ) -> Result<Tensor> {
-        if let Some(l) = latents {
-            return l.to_device(device)?.to_dtype(dtype);
-        }
-
-        let h = height / self.vae_spatial_compression_ratio;
-        let w = width / self.vae_spatial_compression_ratio;
-        let f = (num_frames - 1) / self.vae_temporal_compression_ratio + 1;
-
-        let shape = (batch_size, num_channels_latents, f, h, w);
-        let latents = Tensor::randn(0f32, 1f32, shape, device)?.to_dtype(dtype)?;
-        let latents = Self::pack_latents(
-            &latents,
-            self.transformer_spatial_patch_size,
-            self.transformer_temporal_patch_size,
-        )?;
-        Ok(latents)
+        self.prepare_latents_with_rng(
+            batch_size,
+            num_channels_latents,
+            height,
+            width,
+            num_frames,
+            dtype,
+            device,
+            latents,
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -722,6 +818,18 @@ impl<'a> LtxPipeline<'a> {
         device: &Device,
         observer: Arc<dyn ProgressObserver>,
     ) -> Result<LtxPipelineOutput> {
+        if num_frames == 0 {
+            candle_core::bail!("`num_frames` must be greater than zero.");
+        }
+        if num_videos_per_prompt == 0 {
+            candle_core::bail!("`num_videos_per_prompt` must be greater than zero.");
+        }
+        if frame_rate == 0 {
+            candle_core::bail!("`frame_rate` must be greater than zero.");
+        }
+        if num_inference_steps == 0 {
+            candle_core::bail!("`num_inference_steps` must be greater than zero.");
+        }
         let validate_started = Instant::now();
         observer.on_event(&GenerationEvent::StageStarted {
             stage: GenerationStage::ValidateInputs,
@@ -746,6 +854,14 @@ impl<'a> LtxPipeline<'a> {
         self.stg_scale = stg_scale;
         self.interrupt = false;
         self.current_timestep = None;
+        // Keep scheduler draws on the device RNG for CUDA/Metal. The local
+        // PCG stream is needed only on CPU, whose backend cannot be seeded.
+        self.scheduler
+            .set_seed(self.seed.filter(|_| device.is_cpu()));
+        let mut cpu_rng = self
+            .seed
+            .filter(|_| device.is_cpu())
+            .map(|seed| Pcg32::new(seed, 1442695040888963407));
 
         // Set skip blocks from presets (distilled models)
         // Note: In some versions this list is vec![42] (2B distilled) or others.
@@ -831,7 +947,7 @@ impl<'a> LtxPipeline<'a> {
             message: "Preparing initial latent noise".to_string(),
         });
         let num_channels_latents = self.transformer.config().in_channels;
-        let mut latents = self.prepare_latents(
+        let mut latents = self.prepare_latents_with_rng(
             effective_batch,
             num_channels_latents,
             height,
@@ -840,6 +956,7 @@ impl<'a> LtxPipeline<'a> {
             DType::F32,
             device,
             latents,
+            cpu_rng.as_mut(),
         )?;
         observer.on_event(&GenerationEvent::StageFinished {
             stage: GenerationStage::PrepareLatents,
@@ -918,7 +1035,7 @@ impl<'a> LtxPipeline<'a> {
             latent_shape: latents.dims().to_vec(),
             steps: ts.len(),
             guidance_scale,
-            seed: None,
+            seed: self.seed,
             scheduler: "ltx".to_string(),
         });
 
@@ -1020,7 +1137,7 @@ impl<'a> LtxPipeline<'a> {
             let noise_pred =
                 if self.do_classifier_free_guidance() || self.do_spatio_temporal_guidance() {
                     let b = latents.dim(0)?;
-                    let timestep_t = Tensor::full(t as f32, (b,), device)?;
+                    let timestep_t = Tensor::full(t, (b,), device)?;
                     let latents_input = latents.to_dtype(dtype)?;
 
                     // 1. Unconditional pass (if CFG active)
@@ -1152,7 +1269,7 @@ impl<'a> LtxPipeline<'a> {
                 } else {
                     // No guidance: single forward pass
                     let b = latents.dim(0)?;
-                    let timestep_t = Tensor::full(t as f32, (b,), device)?;
+                    let timestep_t = Tensor::full(t, (b,), device)?;
                     let latents_input = latents.to_dtype(p_emb.dtype())?;
 
                     observer.on_event(&GenerationEvent::DenoisePassStarted {
@@ -1272,8 +1389,11 @@ impl<'a> LtxPipeline<'a> {
                 .to_dtype(latents.dtype())?
                 .reshape((effective_batch, 1usize, 1usize, 1usize, 1usize))?;
 
-            let noise =
-                Tensor::randn(0f32, 1f32, latents.dims(), device)?.to_dtype(latents.dtype())?;
+            let noise = match cpu_rng.as_mut() {
+                Some(rng) => rng.randn(latents.dims().to_vec(), device)?,
+                None => Tensor::randn(0f32, 1f32, latents.dims(), device)?,
+            }
+            .to_dtype(latents.dtype())?;
 
             // latents = (1 - scale)*latents + scale*noise
             let one_minus = scale.affine(-1.0, 1.0)?; // 1 - scale
@@ -1310,5 +1430,51 @@ impl<'a> LtxPipeline<'a> {
         });
 
         Ok(LtxPipelineOutput { frames: video })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supplied_prompt_embeddings_are_repeated_with_masks() -> Result<()> {
+        let embeds = Tensor::arange(0f32, 6f32, &Device::Cpu)?.reshape((1, 2, 3))?;
+        let mask = Tensor::new(&[[1f32, 0f32]], &Device::Cpu)?;
+        let (repeated, repeated_mask) = LtxPipeline::repeat_prompt_embeds(embeds, mask, 3)?;
+
+        assert_eq!(repeated.dims(), &[3, 2, 3]);
+        assert_eq!(repeated_mask.dims(), &[3, 2]);
+        assert_eq!(repeated_mask.to_vec2::<f32>()?, vec![vec![1.0, 0.0]; 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn prompt_repetition_keeps_multi_prompt_order() -> Result<()> {
+        let embeds = Tensor::new(&[[[0f32], [1.0]], [[10.0], [11.0]]], &Device::Cpu)?;
+        let mask = Tensor::new(&[[1f32, 0f32], [0f32, 1f32]], &Device::Cpu)?;
+        let (repeated, repeated_mask) = LtxPipeline::repeat_prompt_embeds(embeds, mask, 2)?;
+
+        assert_eq!(
+            repeated.flatten_all()?.to_vec1::<f32>()?,
+            vec![0.0, 1.0, 0.0, 1.0, 10.0, 11.0, 10.0, 11.0]
+        );
+        assert_eq!(
+            repeated_mask.to_vec2::<f32>()?,
+            vec![
+                vec![1.0, 0.0],
+                vec![1.0, 0.0],
+                vec![0.0, 1.0],
+                vec![0.0, 1.0]
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn zero_video_copies_are_rejected() {
+        let embeds = Tensor::zeros((1, 1, 1), DType::F32, &Device::Cpu).unwrap();
+        let mask = Tensor::ones((1, 1), DType::F32, &Device::Cpu).unwrap();
+        assert!(LtxPipeline::repeat_prompt_embeds(embeds, mask, 0).is_err());
     }
 }

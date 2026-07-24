@@ -46,8 +46,8 @@ pub struct LTXVFullConfig {
 
 /// Returns the full configuration for a given version string.
 /// Supports 0.9.5+ only.
-pub fn get_config_by_version(version: &str) -> LTXVFullConfig {
-    match version {
+pub fn get_config_by_version(version: &str) -> candle_core::Result<LTXVFullConfig> {
+    let config = match version {
         // 0.9.5
         "0.9.5" | "0.9.5-2b" => presets::v0_9_5_2b(),
 
@@ -62,9 +62,11 @@ pub fn get_config_by_version(version: &str) -> LTXVFullConfig {
         "0.9.8-13b-dev" => presets::v0_9_8_dev_13b(),
         "0.9.8-13b-distilled" | "0.9.8-13b" => presets::v0_9_8_distilled_13b(),
 
-        // Default to 0.9.5
-        _ => presets::v0_9_5_2b(),
-    }
+        _ => candle_core::bail!(
+            "unsupported LTX-Video version `{version}`; supported versions are 0.9.5, 0.9.6-dev, 0.9.6-distilled, 0.9.8-2b-distilled, 0.9.8-13b-dev, and 0.9.8-13b-distilled"
+        ),
+    };
+    Ok(config)
 }
 
 use crate::models::ltx_video::scheduler::TimeShiftType;
@@ -288,7 +290,7 @@ mod tests {
 
     #[test]
     fn test_v0_9_5_2b_config() {
-        let config = get_config_by_version("0.9.5");
+        let config = get_config_by_version("0.9.5").unwrap();
         assert_eq!(config.transformer.num_layers, 28);
         assert_eq!(config.inference.guidance_scale, 3.0);
         assert_eq!(config.inference.num_inference_steps, 40);
@@ -297,7 +299,7 @@ mod tests {
 
     #[test]
     fn test_v0_9_8_distilled_2b_config() {
-        let config = get_config_by_version("0.9.8-2b-distilled");
+        let config = get_config_by_version("0.9.8-2b-distilled").unwrap();
         assert_eq!(config.transformer.num_layers, 28);
         assert_eq!(config.inference.guidance_scale, 1.0);
         assert_eq!(config.inference.stg_scale, 0.0);
@@ -305,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_v0_9_8_13b_distilled_config() {
-        let config = get_config_by_version("0.9.8-13b-distilled");
+        let config = get_config_by_version("0.9.8-13b-distilled").unwrap();
         assert_eq!(config.transformer.num_layers, 48);
         assert_eq!(config.transformer.attention_head_dim, 128);
         assert_eq!(config.transformer.cross_attention_dim, 4096);
@@ -314,12 +316,17 @@ mod tests {
 
     #[test]
     fn test_vae_config_5_blocks() {
-        let config = get_config_by_version("0.9.5");
+        let config = get_config_by_version("0.9.5").unwrap();
         assert_eq!(config.vae.block_out_channels.len(), 5);
         assert_eq!(
             config.vae.block_out_channels,
             vec![128, 256, 512, 1024, 2048]
         );
         assert_eq!(config.vae.layers_per_block, vec![4, 6, 6, 2, 2]);
+    }
+
+    #[test]
+    fn unknown_version_is_rejected() {
+        assert!(get_config_by_version("0.0.0").is_err());
     }
 }

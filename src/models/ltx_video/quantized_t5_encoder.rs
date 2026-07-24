@@ -255,11 +255,11 @@ impl T5Attention {
             }
         }
 
-        // Softmax and apply to values
-        // Fallback to CPU for softmax if CUDA implementation is missing or unstable
-        let scores_cpu = scores.to_device(&Device::Cpu)?;
-        let attn_weights_cpu = candle_nn::ops::softmax_last_dim(&scores_cpu)?;
-        let attn_weights = attn_weights_cpu.to_device(hidden_states.device())?;
+        // Keep softmax on the score tensor's device. Moving every attention
+        // matrix CPU→GPU→CPU→GPU for a 4096-wide T5 layer is prohibitively
+        // expensive and needlessly synchronizes CUDA. Candle provides the
+        // same stable implementation on the active backend.
+        let attn_weights = candle_nn::ops::softmax_last_dim(&scores)?;
 
         let attn_output = attn_weights.matmul(&v)?;
 

@@ -5,7 +5,7 @@
 
 use candle_core::{Device, Result, Tensor};
 
-use crate::svd::config::EulerSchedulerConfig;
+use crate::models::svd::config::EulerSchedulerConfig;
 
 /// Output from a scheduler step
 #[derive(Debug)]

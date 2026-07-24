@@ -12,10 +12,36 @@ pub use encoder::Encoder;
 use candle_core::{DType, Module, Result, Tensor};
 use candle_nn::VarBuilder;
 
-use crate::svd::config::SvdVaeConfig;
+use crate::models::svd::config::SvdVaeConfig;
 
-// Re-export DiagonalGaussianDistribution from candle-transformers
-pub use candle_transformers::models::stable_diffusion::vae::DiagonalGaussianDistribution as GaussianDistribution;
+/// Gaussian posterior produced by the VAE encoder.
+///
+/// SVD uses the posterior mode for image conditioning. Keeping the mean here
+/// avoids accidentally sampling a different image latent on every request.
+pub struct GaussianDistribution {
+    mean: Tensor,
+    std: Tensor,
+}
+
+impl GaussianDistribution {
+    pub fn new(parameters: &Tensor) -> Result<Self> {
+        let mut parameters = parameters.chunk(2, 1)?.into_iter();
+        let mean = parameters.next().unwrap();
+        let logvar = parameters.next().unwrap();
+        let std = (logvar * 0.5)?.exp()?;
+        Ok(Self { mean, std })
+    }
+
+    pub fn mode(&self) -> Tensor {
+        self.mean.clone()
+    }
+
+    #[allow(dead_code)]
+    pub fn sample(&self) -> Result<Tensor> {
+        let sample = self.mean.randn_like(0., 1.);
+        &self.mean + &self.std * sample
+    }
+}
 
 /// AutoencoderKL with Temporal Decoder for SVD
 ///
@@ -85,7 +111,7 @@ impl AutoencoderKLTemporalDecoder {
         };
 
         let posterior = self.encode(&x)?;
-        let z = posterior.sample()?;
+        let z = posterior.mode();
         let z = (z * self.config.scaling_factor)?;
 
         if self.config.force_upcast && original_dtype == DType::F16 {

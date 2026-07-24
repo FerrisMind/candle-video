@@ -11,7 +11,7 @@ use crate::models::ltx_video::t2v_pipeline::{
 };
 
 use super::model::ModelCapabilities;
-use super::pipeline::{GenerateRequest, VideoPipeline};
+use super::pipeline::{GenerateRequest, VideoPipeline, resolve_seed};
 use super::progress::ProgressObserver;
 use super::video::{VideoOutput, VideoTask};
 
@@ -54,8 +54,12 @@ impl VideoPipeline for LtxPipelineAdapter<'_> {
             candle_core::bail!("LTX adapter only supports TextToVideo, got {:?}", req.task);
         }
 
+        let prompt = req
+            .prompt_embeds
+            .is_none()
+            .then(|| PromptInput::Single(req.prompt.clone()));
         self.pipeline.check_inputs(
-            Some(&PromptInput::Single(req.prompt.clone())),
+            prompt.as_ref(),
             req.height,
             req.width,
             req.prompt_embeds.as_ref(),
@@ -77,8 +81,14 @@ impl VideoPipeline for LtxPipelineAdapter<'_> {
     ) -> Result<VideoOutput> {
         self.validate(&req)?;
 
+        let seed = resolve_seed(req.seed);
+        self.pipeline.set_seed(Some(seed));
+        if !device.is_cpu() {
+            device.set_seed(seed)?;
+        }
+
         let negative = req.negative_prompt.map(PromptInput::Single).or_else(|| {
-            if self.pipeline.do_classifier_free_guidance() {
+            if req.guidance_scale > 1.0 {
                 Some(PromptInput::Single(String::new()))
             } else {
                 None
@@ -91,16 +101,26 @@ impl VideoPipeline for LtxPipelineAdapter<'_> {
             .clone()
             .unwrap_or_else(|| vec![0.05]);
 
+        // Distilled presets provide an explicit sigma schedule. It must take
+        // precedence over the generic request step count, otherwise the
+        // scheduler rejects the length mismatch and the preset is ignored.
+        let preset_sigmas = self.inference.timesteps.clone();
+        let steps = preset_sigmas.as_ref().map_or(req.steps, Vec::len);
+        let prompt = req
+            .prompt_embeds
+            .is_none()
+            .then_some(PromptInput::Single(req.prompt));
+
         let output = self.pipeline.call_with_observer(
-            Some(PromptInput::Single(req.prompt)),
+            prompt,
             negative,
             req.height,
             req.width,
             req.frames,
             req.frame_rate,
-            req.steps,
+            steps,
             None,
-            None,
+            preset_sigmas,
             req.guidance_scale,
             req.guidance_rescale,
             self.inference.stg_scale,

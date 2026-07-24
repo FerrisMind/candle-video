@@ -4,6 +4,7 @@
 //! It keeps the same math and branching as the source file.
 
 use crate::models::ltx_video::t2v_pipeline::{Scheduler, SchedulerConfig, TimestepsSpec};
+use crate::utils::deterministic_rng::Pcg32;
 use candle_core::{DType, Device, Result, Tensor, bail};
 use statrs::distribution::{Beta, ContinuousCDF};
 
@@ -65,6 +66,7 @@ pub struct FlowMatchEulerDiscreteSchedulerOutput {
 #[derive(Debug)]
 pub struct FlowMatchEulerDiscreteScheduler {
     pub config: FlowMatchEulerDiscreteSchedulerConfig,
+    scheduler_config: SchedulerConfig,
 
     // Stored as tensors for convenient device/dtype conversion.
     timesteps: Tensor, // shape [n] (not appended)
@@ -78,10 +80,14 @@ pub struct FlowMatchEulerDiscreteScheduler {
     step_index: Option<usize>,
     begin_index: Option<usize>,
     num_inference_steps: Option<usize>,
+    rng: Option<Pcg32>,
 }
 
 impl FlowMatchEulerDiscreteScheduler {
     pub fn new(config: FlowMatchEulerDiscreteSchedulerConfig) -> Result<Self> {
+        if config.num_train_timesteps == 0 {
+            bail!("num_train_timesteps must be greater than zero.");
+        }
         if config.use_beta_sigmas as u32
             + config.use_exponential_sigmas as u32
             + config.use_karras_sigmas as u32
@@ -96,6 +102,17 @@ impl FlowMatchEulerDiscreteScheduler {
         // timesteps = np.linspace(1, N, N, dtype=float32)[::-1]
         // sigmas = timesteps / N
         let n = config.num_train_timesteps;
+        let defaults = SchedulerConfig::default();
+        let scheduler_config = SchedulerConfig {
+            base_image_seq_len: config
+                .base_image_seq_len
+                .unwrap_or(defaults.base_image_seq_len),
+            max_image_seq_len: config
+                .max_image_seq_len
+                .unwrap_or(defaults.max_image_seq_len),
+            base_shift: config.base_shift.unwrap_or(defaults.base_shift),
+            max_shift: config.max_shift.unwrap_or(defaults.max_shift),
+        };
         let mut ts: Vec<f32> = (1..=n).map(|v| v as f32).collect();
         ts.reverse();
 
@@ -133,6 +150,7 @@ impl FlowMatchEulerDiscreteScheduler {
 
         Ok(Self {
             config,
+            scheduler_config,
             timesteps: timesteps_t,
             sigmas: sigmas_with_terminal,
             timesteps_cpu: ts,
@@ -142,6 +160,7 @@ impl FlowMatchEulerDiscreteScheduler {
             step_index: None,
             begin_index: None,
             num_inference_steps: None,
+            rng: None,
         })
     }
 
@@ -279,6 +298,12 @@ impl FlowMatchEulerDiscreteScheduler {
         mu: Option<f32>,
         timesteps: Option<&[f32]>,
     ) -> Result<()> {
+        if num_inference_steps == Some(0)
+            || sigmas.is_some_and(|s| s.is_empty())
+            || timesteps.is_some_and(|t| t.is_empty())
+        {
+            bail!("num_inference_steps must be greater than zero.");
+        }
         if self.config.use_dynamic_shifting && mu.is_none() {
             bail!("mu must be provided when use_dynamic_shifting = true.");
         }
@@ -314,6 +339,7 @@ impl FlowMatchEulerDiscreteScheduler {
         self.num_inference_steps = Some(num_inference_steps);
 
         // 1) Prepare default timesteps/sigmas arrays (Vec<f32>).
+        let sigmas_provided = sigmas.is_some();
         let is_timesteps_provided = timesteps.is_some();
         let mut ts_vec: Option<Vec<f32>> = timesteps.map(|t| t.to_vec());
 
@@ -346,7 +372,7 @@ impl FlowMatchEulerDiscreteScheduler {
                 .collect();
         } else if self.config.use_dynamic_shifting {
             bail!("mu must be provided when use_dynamic_shifting = true.");
-        } else {
+        } else if !sigmas_provided {
             // Use standard linear/rational shift
             let shift = self.config.shift;
             sigmas_vec = sigmas_vec
@@ -563,7 +589,10 @@ impl FlowMatchEulerDiscreteScheduler {
                 sample_f.broadcast_sub(&cs.broadcast_mul(&model_output.to_dtype(DType::F32)?)?)?;
 
             // noise = randn_like(sample)
-            let noise = Tensor::randn(0f32, 1f32, sample_f.shape(), device)?;
+            let noise = match self.rng.as_mut() {
+                Some(rng) => rng.randn(sample_f.dims().to_vec(), device)?,
+                None => Tensor::randn(0f32, 1f32, sample_f.shape(), device)?,
+            };
 
             // prev_sample = (1 - next_sigma) * x0 + next_sigma * noise
             let ns = next_sigma
@@ -613,37 +642,14 @@ impl FlowMatchEulerDiscreteScheduler {
 
 impl Scheduler for FlowMatchEulerDiscreteScheduler {
     fn config(&self) -> &SchedulerConfig {
-        // We need to return a reference to SchedulerConfig.
-        // Since FlowMatchEulerDiscreteSchedulerConfig doesn't match exactly,
-        // and trait returns reference, we either need to store SchedulerConfig
-        // or change trait to return Cow or Clone.
-        // For now, let's assume we can't change the trait (it returns &).
-        // Hack: return a static default or store it.
-        // The LtxPipeline uses this config mainly for `calculate_shift`.
-        // Let's rely on LtxPipeline using its own defaults if we don't change this,
-        // OR add a field to struct.
-        // Simplest: use a lazy_static or constant if possible, or just unimplemented if not strictly used dynamic.
-        // Converting:
-        // base_image_seq_len: 256
-        // max_image_seq_len: 4096
-        // base_shift: 0.5
-        // max_shift: 1.15
-
-        // BETTER: allow implementing struct to own the config.
-        // But for now, I'll store a `SchedulerConfig` inside `FlowMatchEulerDiscreteScheduler`?
-        // No, that changes the struct definition.
-
-        // Let's implement it by adding a phantom static or leaking? No.
-        // Let's just create a static instance for now as LTX uses fixed params.
-        static DEFAULT_CONFIG: std::sync::OnceLock<SchedulerConfig> = std::sync::OnceLock::new();
-        DEFAULT_CONFIG.get_or_init(SchedulerConfig::default)
+        &self.scheduler_config
     }
 
     fn order(&self) -> usize {
         1
     }
 
-    fn set_timesteps(&mut self, spec: TimestepsSpec, device: &Device, mu: f32) -> Result<Vec<i64>> {
+    fn set_timesteps(&mut self, spec: TimestepsSpec, device: &Device, mu: f32) -> Result<Vec<f32>> {
         let (num, ts, sig) = match spec {
             TimestepsSpec::Steps(n) => (Some(n), None, None),
             TimestepsSpec::Timesteps(t) => (
@@ -654,16 +660,71 @@ impl Scheduler for FlowMatchEulerDiscreteScheduler {
             TimestepsSpec::Sigmas(s) => (None, None, Some(s)),
         };
 
-        self.set_timesteps(num, device, sig.as_deref(), Some(mu), ts.as_deref())?;
+        // A zero shift is used by distilled/custom sigma schedules to request
+        // the schedule verbatim. Passing `mu=0` into the SD3 time-shift
+        // formula would collapse all non-terminal sigmas to zero.
+        let mu = (mu > 0.0).then_some(mu);
+        self.set_timesteps(num, device, sig.as_deref(), mu, ts.as_deref())?;
         let t = self.timesteps.to_vec1::<f32>()?;
-        Ok(t.into_iter().map(|x| x as i64).collect())
+        Ok(t)
     }
 
-    fn step(&mut self, noise_pred: &Tensor, timestep: i64, latents: &Tensor) -> Result<Tensor> {
-        // We cast timestep to f32 as underlying scheduler expects f32 (usually) or i64?
-        // Scheduler::step takes timestep: f32.
-        let ts = timestep as f32;
-        let out = self.step(noise_pred, ts, latents, None)?;
+    fn step(&mut self, noise_pred: &Tensor, timestep: f32, latents: &Tensor) -> Result<Tensor> {
+        let out = self.step(noise_pred, timestep, latents, None)?;
         Ok(out.prev_sample)
+    }
+
+    fn set_seed(&mut self, seed: Option<u64>) {
+        self.rng = seed.map(|seed| Pcg32::new(seed, 1442695040888963407));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_fractional_timesteps_from_sigma_schedule() -> Result<()> {
+        let mut scheduler =
+            FlowMatchEulerDiscreteScheduler::new(FlowMatchEulerDiscreteSchedulerConfig::default())?;
+        let schedule = Scheduler::set_timesteps(
+            &mut scheduler,
+            TimestepsSpec::Sigmas(vec![1.0, 0.9937, 0.9875]),
+            &Device::Cpu,
+            0.0,
+        )?;
+
+        assert!((schedule[1] - 993.7).abs() < 1e-4);
+        assert_eq!(scheduler.index_for_timestep(schedule[1], None)?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn exposes_scheduler_shift_config_in_trait() -> Result<()> {
+        let config = FlowMatchEulerDiscreteSchedulerConfig {
+            base_image_seq_len: Some(1024),
+            max_image_seq_len: Some(4096),
+            base_shift: Some(0.95),
+            max_shift: Some(2.05),
+            ..Default::default()
+        };
+        let scheduler = FlowMatchEulerDiscreteScheduler::new(config)?;
+        let exposed = Scheduler::config(&scheduler);
+        assert_eq!(exposed.base_image_seq_len, 1024);
+        assert_eq!(exposed.max_image_seq_len, 4096);
+        assert_eq!(exposed.base_shift, 0.95);
+        assert_eq!(exposed.max_shift, 2.05);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_empty_schedule() -> Result<()> {
+        let mut scheduler =
+            FlowMatchEulerDiscreteScheduler::new(FlowMatchEulerDiscreteSchedulerConfig::default())?;
+        assert!(
+            Scheduler::set_timesteps(&mut scheduler, TimestepsSpec::Steps(0), &Device::Cpu, 0.0,)
+                .is_err()
+        );
+        Ok(())
     }
 }
