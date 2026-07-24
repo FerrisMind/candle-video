@@ -3,6 +3,7 @@ use candle_core::{Device, Result, Tensor};
 /// PCG32 Random Number Generator
 /// Simple, fast, and statistically good RNG.
 /// Matches standard PCG32 implementation.
+#[derive(Debug)]
 pub struct Pcg32 {
     state: u64,
     inc: u64,
