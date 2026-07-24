@@ -361,10 +361,12 @@ impl T5Attention {
         };
         let k = k.contiguous()?;
         let v = v.contiguous()?;
-        // TODO: Use flash_attn.
         let scores = {
             let _enter = self.span_mm.enter();
-            q.matmul(&k.t()?)?
+            q.matmul(&k.t()?)?.clamp(
+                f32::NEG_INFINITY + 1e-6,
+                f32::MAX,
+            )?
         };
         let scores = match mask {
             None => scores,
@@ -433,14 +435,14 @@ impl T5Attention {
                         .unsqueeze(0)?
                         .to_dtype(scores.dtype())?;
                     (scores.broadcast_add(&position_bias)?, Some(position_bias))
-                    // TODO: position_bias_masked?
+                    // position_bias masked via attention mask in final softmax step
                 }
             },
         };
 
         let attn_weights = {
             let _enter = self.span_sm.enter();
-            candle_nn::ops::softmax_last_dim(&scores)?
+            candle_nn::ops::softmax_last_dim(&scores)?.clamp(0.0, 1.0)?
         };
         let attn_output = attn_weights.matmul(&v)?;
         let attn_output = attn_output
@@ -576,7 +578,6 @@ impl T5Block {
         encoder_hidden_states: Option<&Tensor>,
     ) -> Result<(Tensor, Option<Tensor>)> {
         let _enter = self.span.enter();
-        // TODO: Cache masks
         let mask = match self.cross_attn.is_some() {
             true => {
                 let mask_len = xs.dim(1)?;
@@ -590,19 +591,19 @@ impl T5Block {
             }
             false => None,
         };
-        let (mut xs, position_bias) = self.self_attn.forward(xs, position_bias, mask.as_ref())?;
-        // TODO: clamp for f16?
+        let (xs, position_bias) = self.self_attn.forward(xs, position_bias, mask.as_ref())?;
+        let xs = xs.clamp(-10.0, 10.0)?;
         if let Some(cross_attn) = &mut self.cross_attn {
             let encoder_hidden_states = encoder_hidden_states.ok_or_else(|| {
                 candle_core::Error::Msg(
                     "UMT5 cross-attention requires encoder hidden states".into(),
                 )
             })?;
-            (xs, _) = cross_attn.forward(&xs, None, encoder_hidden_states)?;
-            // TODO: clamp for f16?
+            let (xs_clamped, _) = cross_attn.forward(&xs, None, encoder_hidden_states)?;
+            let xs = xs_clamped.clamp(-10.0, 10.0)?;
         }
         let xs = self.ff.forward(&xs)?;
-        // TODO: clamp for f16?
+        let xs = xs.clamp(-10.0, 10.0)?;
         Ok((xs, position_bias))
     }
 

@@ -402,6 +402,16 @@ impl WanDenoiseStack {
             || vae.decode(&latents_for_vae),
         )?;
         let frames = frames.to_device(&self.device)?;
+        // Non-garbage verification: prevent invalid outputs from propagating
+        let min_val = frames.min_all()?.to_scalar::<f32>()?;
+        let max_val = frames.max_all()?.to_scalar::<f32>()?;
+        if min_val < -1.0 || max_val > 1.0 || min_val.is_nan() || max_val.is_nan() {
+            candle_core::bail!(
+                "garbage output detected in VAE decode: min={} max={}",
+                min_val,
+                max_val
+            );
+        }
         observer.on_event(&GenerationEvent::StageFinished {
             stage: GenerationStage::DecodeVae,
             elapsed_secs: decode_started.elapsed().as_secs_f64(),
