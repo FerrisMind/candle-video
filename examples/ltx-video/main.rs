@@ -10,6 +10,7 @@ use candle_video::models::ltx_video::{
 };
 use clap::Parser;
 use hf_hub::{Repo, RepoType, api::sync::Api};
+use std::time::Instant;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer as HfTokenizer;
@@ -52,6 +53,10 @@ struct Args {
 
     #[arg(long)]
     cpu: bool,
+
+    /// Device to use: cpu, cuda, wgpu, or vulkan (overrides --cpu and the default CUDA heuristic)
+    #[arg(long)]
+    device: Option<String>,
 
     #[arg(long)]
     seed: Option<u64>,
@@ -174,6 +179,7 @@ impl Tokenizer for DummyTokenizer {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let t0 = Instant::now();
     let ltxv_config =
         candle_video::models::ltx_video::configs::get_config_by_version(&args.ltxv_version);
     let num_inference_steps = args
@@ -207,7 +213,17 @@ fn main() -> anyhow::Result<()> {
         args.width, args.height, args.num_frames
     );
 
-    let device = if args.cpu {
+    let device = if let Some(dev) = &args.device {
+        match dev.as_str() {
+            "cpu" => Device::Cpu,
+            "cuda" => Device::new_cuda(0).unwrap_or(Device::Cpu),
+            "wgpu" => Device::new_wgpu(0).unwrap_or(Device::Cpu),
+            "vulkan" => Device::new_vulkan(0).unwrap_or(Device::Cpu),
+            other => anyhow::bail!(
+                "unknown device: {other} (expected one of: cpu|cuda|wgpu|vulkan)"
+            ),
+        }
+    } else if args.cpu {
         Device::Cpu
     } else {
         Device::new_cuda(0).unwrap_or(Device::Cpu)
@@ -438,10 +454,21 @@ fn main() -> anyhow::Result<()> {
             let n_emb = t5_wrapper.forward(&n_ids)?;
             (p_emb, n_emb)
         } else {
-            println!("  Loading GGUF T5 model...");
-            let t5_model = QuantizedT5EncoderModel::load(&t5_file, &device)?;
-            let p_emb = t5_model.forward(&p_ids, Some(&p_mask))?;
-            let n_emb = t5_model.forward(&n_ids, Some(&n_mask))?;
+            println!("  Loading GGUF T5 model (on CPU: keeps 3.3GB quantized weights off VRAM)...");
+            let t5_device = Device::Cpu;
+            let t5_model = QuantizedT5EncoderModel::load(&t5_file, &t5_device)?;
+            let p_emb = t5_model
+                .forward(
+                    &p_ids.to_device(&t5_device)?,
+                    Some(&p_mask.to_device(&t5_device)?),
+                )?
+                .to_device(&device)?;
+            let n_emb = t5_model
+                .forward(
+                    &n_ids.to_device(&t5_device)?,
+                    Some(&n_mask.to_device(&t5_device)?),
+                )?
+                .to_device(&device)?;
             (p_emb, n_emb)
         };
 
@@ -456,6 +483,7 @@ fn main() -> anyhow::Result<()> {
     // 3. Step 2: Load Transformer and VAE for generation
     // 3. Step 2: Load Transformer and VAE for generation
     println!("Loading models...");
+    let t_models = Instant::now();
 
     // Check if using unified weights (official LTX-Video format)
     let (vae, transformer) = if let Some(ref unified_path) = effective_unified_weights {
@@ -550,6 +578,8 @@ fn main() -> anyhow::Result<()> {
     scheduler_config.stochastic_sampling = stochastic_sampling;
     let scheduler = FlowMatchEulerDiscreteScheduler::new(scheduler_config)?;
 
+    println!("Model load time: {:.2?}", t_models.elapsed());
+
     // 4. Pipeline
     let mut pipeline = LtxPipeline::new(
         Box::new(scheduler),
@@ -618,6 +648,7 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or(vec![0.0]);
     let decode_noise_scale = ltxv_config.inference.decode_noise_scale.clone();
 
+    let t_gen = Instant::now();
     let video_out = pipeline.call(
         None, // prompt
         None, // negative_prompt
@@ -644,6 +675,13 @@ fn main() -> anyhow::Result<()> {
         Some(ltxv_config.inference.skip_block_list.clone()),
         &device,
     )?;
+
+    let gen_elapsed = t_gen.elapsed();
+    println!(
+        "Generation (denoise+VAE decode) time: {:?}  -> ~{:.2} steps/sec (incl VAE decode)",
+        gen_elapsed,
+        num_inference_steps as f64 / gen_elapsed.as_secs_f64()
+    );
 
     // 5. Save output
     if !Path::new(&args.output_dir).exists() {
@@ -708,6 +746,13 @@ fn main() -> anyhow::Result<()> {
         }
         println!("\nDone! Saved GIF to {}", gif_path);
     }
+
+    println!("\n[counter] wgpu_cpu_fallback={} wgpu_host_compute={} vulkan_cpu_fallback={} vulkan_host_compute={}",
+        candle_core::wgpu_cpu_fallback_count(),
+        candle_core::wgpu_host_compute_count(),
+        candle_core::vulkan_cpu_fallback_count(),
+        candle_core::vulkan_host_compute_count());
+    println!("Total runtime: {:?}", t0.elapsed());
 
     Ok(())
 }

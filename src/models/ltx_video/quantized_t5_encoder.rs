@@ -667,7 +667,7 @@ impl QuantizedT5EncoderModel {
             if t36_start + 1478 < vals.len() {
                 println!(
                     "[DEBUG T5] Final Output Token 36 Pos 1478: {:?}",
-                    &vals[t36_start + 1478]
+                    vals[t36_start + 1478]
                 );
             }
         }

@@ -12,10 +12,10 @@ name = "candle_video"
 path = "src/lib.rs"
 
 [dependencies]
-candle-core = "0.10.2"
-candle-nn = "0.10.2"
-candle-transformers = "0.10.2"
-candle-flash-attn = { version = "0.10.2", optional = true }
+candle-core = { git = "https://github.com/FerrisMind/candle", branch = "wgpu/vulkan" }
+candle-nn = { git = "https://github.com/FerrisMind/candle", branch = "wgpu/vulkan" }
+candle-transformers = { git = "https://github.com/FerrisMind/candle", branch = "wgpu/vulkan" }
+candle-flash-attn = { git = "https://github.com/FerrisMind/candle", branch = "wgpu/vulkan", optional = true }
 safetensors = "0.8.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
@@ -42,6 +42,10 @@ legacy_tests = []
 # GPU Acceleration
 flash-attn = ["dep:candle-flash-attn"]
 cuda = ["candle-core/cuda"]
+# wgpu backend (cross-platform GPU via wgpu)
+wgpu = ["candle-core/wgpu"]
+# Vulkan backend
+vulkan = ["candle-core/vulkan"]
 # cuDNN for faster convolutions (requires CUDA)
 cudnn = ["candle-core/cudnn"]
 # Intel MKL for CPU acceleration (Linux/Windows x86_64)
