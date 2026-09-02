@@ -65,6 +65,10 @@ Rust library for AI video generation built on the [Candle](https://github.com/hu
 | `mkl` | Intel MKL for optimized CPU operations (x86_64) |
 | `accelerate` | Apple Accelerate for Metal (macOS) |
 | `nccl` | Multi-GPU support via NCCL |
+| `wgpu` | Cross-platform GPU via wgpu (**experimental**) |
+| `vulkan` | Vulkan GPU backend (**experimental**) |
+
+> **Experimental:** Inference on **Vulkan** and **wgpu** is supported experimentally. These backends may be unstable, produce incorrect results, or not work at all depending on your GPU and drivers. Build with `--features wgpu,vulkan` and pass `--device wgpu` or `--device vulkan` at runtime.
 
 ---
 
@@ -120,6 +124,9 @@ cargo build --release --no-default-features
 
 # With specific features
 cargo build --release --features "cudnn,flash-attn"
+
+# Experimental wgpu/Vulkan backends
+cargo build --release --features "wgpu,vulkan"
 ```
 
 ### Model Weights
@@ -210,6 +217,7 @@ cargo run --example ltx-video --release --features flash-attn,cudnn -- \
 | `--frames` | false | Save individual PNG frames |
 | `--gif` | false | Save as GIF animation |
 | `--cpu` | false | Run on CPU instead of GPU |
+| `--device` | (auto) | Device: `cpu`, `cuda`, `wgpu`, or `vulkan` (overrides `--cpu`) |
 | `--use-bf16-t5` | false | Use BF16 T5 instead of GGUF quantized |
 | `--unified-weights` | (None) | Path to unified safetensors file |
 

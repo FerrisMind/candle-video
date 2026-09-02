@@ -67,6 +67,10 @@ Biblioteca Rust para geração de vídeo com IA, construída sobre o framework [
 | `mkl` | Intel MKL para operações CPU otimizadas (x86_64) |
 | `accelerate` | Apple Accelerate para Metal (macOS) |
 | `nccl` | Suporte multi-GPU via NCCL |
+| `wgpu` | GPU multiplataforma via wgpu (**experimental**) |
+| `vulkan` | Backend GPU Vulkan (**experimental**) |
+
+> **Experimental:** A inferência em **Vulkan** e **wgpu** é suportada experimentalmente. Esses backends podem ser instáveis, produzir resultados incorretos ou não funcionar, dependendo da GPU e dos drivers. Compile com `--features wgpu,vulkan` e use `--device wgpu` ou `--device vulkan` em tempo de execução.
 
 ---
 
@@ -122,6 +126,9 @@ cargo build --release --no-default-features
 
 # Com recursos específicos
 cargo build --release --features "cudnn,flash-attn"
+
+# Backends experimentais wgpu/Vulkan
+cargo build --release --features "wgpu,vulkan"
 ```
 
 ### Pesos dos Modelos
@@ -212,6 +219,7 @@ cargo run --example ltx-video --release --features flash-attn,cudnn -- \
 | `--frames` | false | Salvar frames PNG individuais |
 | `--gif` | false | Salvar como animação GIF |
 | `--cpu` | false | Executar em CPU |
+| `--device` | (auto) | Dispositivo: `cpu`, `cuda`, `wgpu` ou `vulkan` (substitui `--cpu`) |
 | `--use-bf16-t5` | false | Usar T5 BF16 em vez de GGUF quantizado |
 | `--unified-weights` | (Nenhum) | Caminho para arquivo safetensors unificado |
 

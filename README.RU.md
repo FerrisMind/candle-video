@@ -65,6 +65,10 @@
 | `mkl` | Intel MKL для оптимизированных CPU операций (x86_64) |
 | `accelerate` | Apple Accelerate для Metal (macOS) |
 | `nccl` | Мульти-GPU поддержка через NCCL |
+| `wgpu` | Кроссплатформенный GPU через wgpu (**экспериментально**) |
+| `vulkan` | GPU-бэкенд Vulkan (**экспериментально**) |
+
+> **Экспериментально:** Инференс на **Vulkan** и **wgpu** поддерживается в экспериментальном режиме. Эти бэкенды могут работать нестабильно, выдавать неверные результаты или не работать вовсе — в зависимости от GPU и драйверов. Соберите с `--features wgpu,vulkan` и укажите `--device wgpu` или `--device vulkan` при запуске.
 
 ---
 
@@ -120,6 +124,9 @@ cargo build --release --no-default-features
 
 # С выбранными фичами
 cargo build --release --features "cudnn,flash-attn"
+
+# Экспериментальные бэкенды wgpu/Vulkan
+cargo build --release --features "wgpu,vulkan"
 ```
 
 ### Веса моделей
@@ -210,6 +217,7 @@ cargo run --example ltx-video --release --features flash-attn,cudnn -- \
 | `--frames` | false | Сохранять PNG кадры |
 | `--gif` | false | Сохранять как GIF |
 | `--cpu` | false | Запуск на CPU |
+| `--device` | (авто) | Устройство: `cpu`, `cuda`, `wgpu` или `vulkan` (переопределяет `--cpu`) |
 | `--use-bf16-t5` | false | Использовать BF16 T5 вместо GGUF |
 | `--unified-weights` | (Нет) | Путь к unified safetensors файлу |
 
