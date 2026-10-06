@@ -576,21 +576,29 @@ impl<'a> LtxPipeline<'a> {
         std: &Tensor,
         scaling_factor: f32,
     ) -> Result<Tensor> {
-        let c = latents.dim(1)?;
+        let dims5 = latents.dims().to_vec();
+        if dims5.len() != 5 {
+            candle_core::bail!("denormalize_latents expects [B,C,F,H,W], got {:?}", dims5);
+        }
+        let (b, c, f, h, w) = (dims5[0], dims5[1], dims5[2], dims5[3], dims5[4]);
+        // GPU elementwise/broadcast kernels are capped at rank 4: flatten
+        // [B,C,F,H,W] -> [B,C,F*H*W] and broadcast the per-channel mean/std as
+        // [C,1] (identical elementwise math), then reshape the result back.
+        let x = latents.reshape((b, c, f * h * w))?;
         let mean = mean
-            .reshape((1usize, c, 1usize, 1usize, 1usize))?
-            .to_device(latents.device())?
-            .to_dtype(latents.dtype())?;
+            .reshape((c, 1usize))?
+            .to_device(x.device())?
+            .to_dtype(x.dtype())?;
         let std = std
-            .reshape((1usize, c, 1usize, 1usize, 1usize))?
-            .to_device(latents.device())?
-            .to_dtype(latents.dtype())?;
+            .reshape((c, 1usize))?
+            .to_device(x.device())?
+            .to_dtype(x.dtype())?;
 
-        let x = latents.broadcast_mul(&std)?;
+        let x = x.broadcast_mul(&std)?;
         let x = x
             .affine((1.0 / scaling_factor) as f64, 0.0)?
             .broadcast_add(&mean)?;
-        Ok(x)
+        x.reshape(dims5)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1048,18 +1056,27 @@ impl<'a> LtxPipeline<'a> {
 
             let timestep =
                 Tensor::from_vec(dt, (effective_batch,), device)?.to_dtype(latents.dtype())?;
-            let scale = Tensor::from_vec(dns, (effective_batch,), device)?
-                .to_dtype(latents.dtype())?
-                .reshape((effective_batch, 1usize, 1usize, 1usize, 1usize))?;
 
-            let noise =
-                Tensor::randn(0f32, 1f32, latents.dims(), device)?.to_dtype(latents.dtype())?;
+            // GPU elementwise/broadcast kernels are capped at rank 4: flatten the
+            // rank-5 latents to [B, C*F*H*W] (same element order), keep scale as
+            // [B,1] and draw noise with the flattened dims (identical RNG stream to
+            // the 5-D form), mix, then reshape back to [B,C,F,H,W].
+            let dims5 = latents.dims().to_vec();
+            let flat: usize = dims5[1..].iter().product();
+            let latents_flat = latents.reshape((dims5[0], flat))?;
+
+            let scale = Tensor::from_vec(dns, (effective_batch,), device)?
+                .to_dtype(latents_flat.dtype())?
+                .reshape((effective_batch, 1usize))?;
+
+            let noise = Tensor::randn(0f32, 1f32, latents_flat.dims(), device)?
+                .to_dtype(latents_flat.dtype())?;
 
             // latents = (1 - scale)*latents + scale*noise
             let one_minus = scale.affine(-1.0, 1.0)?; // 1 - scale
-            let a = latents.broadcast_mul(&one_minus)?;
+            let a = latents_flat.broadcast_mul(&one_minus)?;
             let b = noise.broadcast_mul(&scale)?;
-            latents = a.broadcast_add(&b)?;
+            latents = a.broadcast_add(&b)?.reshape(dims5)?;
 
             timestep_opt = Some(timestep);
         }
