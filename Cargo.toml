@@ -12,10 +12,10 @@ name = "candle_video"
 path = "src/lib.rs"
 
 [dependencies]
-candle-core = { path = "../candle/candle-core" }
-candle-nn = { path = "../candle/candle-nn" }
-candle-transformers = { path = "../candle/candle-transformers" }
-candle-flash-attn = { path = "../candle/candle-flash-attn", optional = true }
+candle-core = { git = "https://github.com/FerrisMind/candle", rev = "addb4aaeaf9fa4ecd642cbfdde1a4863471c2254" }
+candle-nn = { git = "https://github.com/FerrisMind/candle", rev = "addb4aaeaf9fa4ecd642cbfdde1a4863471c2254" }
+candle-transformers = { git = "https://github.com/FerrisMind/candle", rev = "addb4aaeaf9fa4ecd642cbfdde1a4863471c2254" }
+candle-flash-attn = { git = "https://github.com/FerrisMind/candle", rev = "addb4aaeaf9fa4ecd642cbfdde1a4863471c2254", optional = true }
 safetensors = "0.8.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
